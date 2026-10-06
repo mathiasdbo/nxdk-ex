@@ -84,6 +84,12 @@ void al_source_set_apu_base(uintptr_t base);
  */
 uintptr_t al_source_get_apu_base(void);
 
+/**
+ * Update hardware master volume words for all active playing sources.
+ * Called immediately when global listener gain changes.
+ */
+void al_source_update_all_gains(void);
+
 /*
  * ============================================================================
  * OpenAL 1.1 Source API Prototypes
