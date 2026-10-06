@@ -246,12 +246,14 @@ AL_API void AL_APIENTRY alListener3f(ALenum param, ALfloat v1, ALfloat v2, ALflo
             g_listener_pos[0] = v1;
             g_listener_pos[1] = v2;
             g_listener_pos[2] = v3;
+            al_source_update_all_spatial();
             break;
 
         case AL_VELOCITY:
             g_listener_vel[0] = v1;
             g_listener_vel[1] = v2;
             g_listener_vel[2] = v3;
+            al_source_update_all_spatial();
             break;
 
         default:
@@ -280,6 +282,8 @@ AL_API void AL_APIENTRY alListenerfv(ALenum param, const ALfloat *values) {
         case AL_ORIENTATION:
             if (!listener_set_orientation(values)) {
                 alSetError(AL_INVALID_VALUE);
+            } else {
+                al_source_update_all_spatial();
             }
             break;
 

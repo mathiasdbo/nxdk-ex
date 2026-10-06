@@ -170,11 +170,12 @@ int main(void) {
     alGetSource3f(sources[0], AL_POSITION, &pos[0], &pos[1], &pos[2]);
     assert(pos[0] == 1.0f && pos[1] == 2.0f && pos[2] == 3.0f);
 
-    /* Reset pitch and gain to standard values */
+    /* Reset pitch, gain, position, and looping to standard values */
     alSourcef(sources[0], AL_PITCH, 1.0f);
     alSourcef(sources[0], AL_MIN_GAIN, 0.0f);
     alSourcef(sources[0], AL_MAX_GAIN, 1.0f);
     alSourcef(sources[0], AL_GAIN, 1.0f);
+    alSource3f(sources[0], AL_POSITION, 0.0f, 0.0f, 0.0f);
     alSourcei(sources[0], AL_LOOPING, AL_FALSE);
 
     /* Test 4: Playback State Transitions & APU Voice Synchronization */

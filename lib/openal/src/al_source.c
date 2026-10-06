@@ -13,6 +13,9 @@ static ALsource g_sources[AL_MAX_SOURCES];
 static bool s_subsystem_initialized = false;
 static int s_hw_voice_owner[NV_PAPU_NUM_3D_VOICES];
 static uintptr_t s_apu_base = NV_PAPU_BASE;
+static ALenum s_distance_model = AL_INVERSE_DISTANCE_CLAMPED;
+static float s_doppler_factor = 1.0f;
+static float s_speed_of_sound = 343.3f;
 
 /*
  * ============================================================================
@@ -64,6 +67,9 @@ void al_source_init_subsystem(void) {
     for (size_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
         s_hw_voice_owner[v] = AL_HW_VOICE_INVALID;
     }
+    s_distance_model = AL_INVERSE_DISTANCE_CLAMPED;
+    s_doppler_factor = 1.0f;
+    s_speed_of_sound = 343.3f;
     s_subsystem_initialized = true;
 }
 
@@ -86,6 +92,9 @@ void al_source_cleanup_subsystem(void) {
     for (size_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
         s_hw_voice_owner[v] = AL_HW_VOICE_INVALID;
     }
+    s_distance_model = AL_INVERSE_DISTANCE_CLAMPED;
+    s_doppler_factor = 1.0f;
+    s_speed_of_sound = 343.3f;
     s_subsystem_initialized = false;
 }
 
@@ -109,6 +118,294 @@ ALsource *al_source_get(ALuint id) {
 
 /*
  * ============================================================================
+ * 3D Spatial Audio & Attenuation Helpers (OpenAL 1.1)
+ * ============================================================================
+ */
+
+void apu_spatial_set_distance_model(ALenum model) {
+    s_distance_model = model;
+}
+
+ALenum apu_spatial_get_distance_model(void) {
+    return s_distance_model;
+}
+
+void apu_spatial_set_doppler_factor(float factor) {
+    s_doppler_factor = factor;
+}
+
+float apu_spatial_get_doppler_factor(void) {
+    return s_doppler_factor;
+}
+
+void apu_spatial_set_speed_of_sound(float speed) {
+    s_speed_of_sound = speed;
+}
+
+float apu_spatial_get_speed_of_sound(void) {
+    return s_speed_of_sound;
+}
+
+float apu_calc_distance_gain(float distance, float ref_dist, float max_dist, float rolloff, ALenum model) {
+    if (distance < 0.0f) {
+        distance = 0.0f;
+    }
+    if (ref_dist <= 0.0f || rolloff == 0.0f) {
+        return 1.0f;
+    }
+    if (max_dist < ref_dist) {
+        max_dist = ref_dist;
+    }
+
+    switch (model) {
+        case AL_NONE:
+            return 1.0f;
+
+        case AL_INVERSE_DISTANCE: {
+            float denom = ref_dist + rolloff * (distance - ref_dist);
+            if (denom <= 0.0f) {
+                return 1.0f;
+            }
+            return ref_dist / denom;
+        }
+
+        case AL_INVERSE_DISTANCE_CLAMPED: {
+            float d_clamp = distance;
+            if (d_clamp < ref_dist) d_clamp = ref_dist;
+            if (d_clamp > max_dist) d_clamp = max_dist;
+            float denom = ref_dist + rolloff * (d_clamp - ref_dist);
+            if (denom <= 0.0f) {
+                return 1.0f;
+            }
+            return ref_dist / denom;
+        }
+
+        case AL_LINEAR_DISTANCE: {
+            if (max_dist <= ref_dist) {
+                return 1.0f;
+            }
+            float d = distance;
+            if (d > max_dist) d = max_dist;
+            float gain = 1.0f - rolloff * ((d - ref_dist) / (max_dist - ref_dist));
+            if (gain < 0.0f) gain = 0.0f;
+            return gain;
+        }
+
+        case AL_LINEAR_DISTANCE_CLAMPED: {
+            if (max_dist <= ref_dist) {
+                return 1.0f;
+            }
+            float d_clamp = distance;
+            if (d_clamp < ref_dist) d_clamp = ref_dist;
+            if (d_clamp > max_dist) d_clamp = max_dist;
+            float gain = 1.0f - rolloff * ((d_clamp - ref_dist) / (max_dist - ref_dist));
+            if (gain < 0.0f) gain = 0.0f;
+            return gain;
+        }
+
+        case AL_EXPONENT_DISTANCE: {
+            if (distance <= 0.0f) {
+                return 1.0f;
+            }
+            return powf(distance / ref_dist, -rolloff);
+        }
+
+        case AL_EXPONENT_DISTANCE_CLAMPED: {
+            float d_clamp = distance;
+            if (d_clamp < ref_dist) d_clamp = ref_dist;
+            if (d_clamp > max_dist) d_clamp = max_dist;
+            if (d_clamp <= 0.0f) {
+                return 1.0f;
+            }
+            return powf(d_clamp / ref_dist, -rolloff);
+        }
+
+        default:
+            return 1.0f;
+    }
+}
+
+float apu_calc_cone_gain(const float source_pos[3], const float source_dir[3], const float listener_pos[3],
+                         float inner_deg, float outer_deg, float outer_gain) {
+    if (!source_pos || !source_dir || !listener_pos) {
+        return 1.0f;
+    }
+
+    /* Omnidirectional if direction is zero or angles are full sphere */
+    if (source_dir[0] == 0.0f && source_dir[1] == 0.0f && source_dir[2] == 0.0f) {
+        return 1.0f;
+    }
+    if (inner_deg >= 360.0f && outer_deg >= 360.0f) {
+        return 1.0f;
+    }
+
+    float lx = listener_pos[0] - source_pos[0];
+    float ly = listener_pos[1] - source_pos[1];
+    float lz = listener_pos[2] - source_pos[2];
+    float dist = sqrtf(lx * lx + ly * ly + lz * lz);
+    if (dist == 0.0f) {
+        return 1.0f;
+    }
+
+    float dir_len = sqrtf(source_dir[0] * source_dir[0] +
+                          source_dir[1] * source_dir[1] +
+                          source_dir[2] * source_dir[2]);
+    if (dir_len == 0.0f) {
+        return 1.0f;
+    }
+
+    float dot = source_dir[0] * lx + source_dir[1] * ly + source_dir[2] * lz;
+    float cos_theta = dot / (dir_len * dist);
+    if (cos_theta > 1.0f) cos_theta = 1.0f;
+    if (cos_theta < -1.0f) cos_theta = -1.0f;
+
+    float theta_deg = acosf(cos_theta) * (180.0f / 3.14159265358979323846f);
+
+    if (theta_deg <= inner_deg) {
+        return 1.0f;
+    }
+    if (theta_deg >= outer_deg) {
+        return outer_gain;
+    }
+    if (outer_deg <= inner_deg) {
+        return outer_gain;
+    }
+
+    float factor = (theta_deg - inner_deg) / (outer_deg - inner_deg);
+    return 1.0f - (1.0f - outer_gain) * factor;
+}
+
+float apu_calc_doppler_pitch(const float source_pos[3], const float source_vel[3],
+                            const float listener_pos[3], const float listener_vel[3],
+                            float doppler_factor, float speed_of_sound) {
+    if (doppler_factor == 0.0f || speed_of_sound <= 0.0f) {
+        return 1.0f;
+    }
+    if (!source_pos || !source_vel || !listener_pos || !listener_vel) {
+        return 1.0f;
+    }
+
+    /* Vector from source to listener (line of sight) */
+    float slx = listener_pos[0] - source_pos[0];
+    float sly = listener_pos[1] - source_pos[1];
+    float slz = listener_pos[2] - source_pos[2];
+    float dist = sqrtf(slx * slx + sly * sly + slz * slz);
+    if (dist == 0.0f) {
+        return 1.0f;
+    }
+
+    /* Normalized direction from source to listener */
+    float ux = slx / dist;
+    float uy = sly / dist;
+    float uz = slz / dist;
+
+    /* Scalar velocity projections along line of sight */
+    float vls = listener_vel[0] * ux + listener_vel[1] * uy + listener_vel[2] * uz;
+    float vss = source_vel[0] * ux + source_vel[1] * uy + source_vel[2] * uz;
+
+    /* Clamping per OpenAL 1.1 Specification Section 3.5.2 */
+    float max_v = speed_of_sound / doppler_factor;
+    if (vls > max_v) vls = max_v;
+    if (vss >= max_v * 0.999f) vss = max_v * 0.999f;
+
+    float num = speed_of_sound - doppler_factor * vls;
+    float denom = speed_of_sound - doppler_factor * vss;
+    if (denom <= 0.0f) {
+        return 1.0f;
+    }
+
+    float factor = num / denom;
+    if (factor < 0.0f) factor = 0.0f;
+    return factor;
+}
+
+void al_source_calc_spatial(const ALsource *src, AL_SPATIAL_CALC *calc) {
+    if (!src || !calc) {
+        return;
+    }
+
+    float lis_pos[3] = {0.0f, 0.0f, 0.0f};
+    float lis_vel[3] = {0.0f, 0.0f, 0.0f};
+    al_listener_get_position(lis_pos);
+    al_listener_get_velocity(lis_vel);
+
+    if (src->source_relative) {
+        calc->local_pos[0] = src->position[0];
+        calc->local_pos[1] = src->position[1];
+        calc->local_pos[2] = src->position[2];
+
+        float dist = sqrtf(src->position[0] * src->position[0] +
+                           src->position[1] * src->position[1] +
+                           src->position[2] * src->position[2]);
+        calc->distance = dist;
+
+        calc->distance_gain = apu_calc_distance_gain(
+            dist,
+            src->reference_distance,
+            src->max_distance,
+            src->rolloff_factor,
+            s_distance_model
+        );
+
+        float origin[3] = {0.0f, 0.0f, 0.0f};
+        calc->cone_gain = apu_calc_cone_gain(
+            src->position,
+            src->direction,
+            origin,
+            src->cone_inner_angle,
+            src->cone_outer_angle,
+            src->cone_outer_gain
+        );
+
+        calc->doppler_pitch = 1.0f;
+    } else {
+        al_listener_world_to_local(src->position, calc->local_pos);
+
+        float dx = src->position[0] - lis_pos[0];
+        float dy = src->position[1] - lis_pos[1];
+        float dz = src->position[2] - lis_pos[2];
+        float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+        calc->distance = dist;
+
+        calc->distance_gain = apu_calc_distance_gain(
+            dist,
+            src->reference_distance,
+            src->max_distance,
+            src->rolloff_factor,
+            s_distance_model
+        );
+
+        calc->cone_gain = apu_calc_cone_gain(
+            src->position,
+            src->direction,
+            lis_pos,
+            src->cone_inner_angle,
+            src->cone_outer_angle,
+            src->cone_outer_gain
+        );
+
+        calc->doppler_pitch = apu_calc_doppler_pitch(
+            src->position,
+            src->velocity,
+            lis_pos,
+            lis_vel,
+            s_doppler_factor,
+            s_speed_of_sound
+        );
+    }
+
+    /* Combine into effective gain: clamp(source_gain * distance_gain * cone_gain, min_gain, max_gain) * listener_gain */
+    float nominal = src->gain * calc->distance_gain * calc->cone_gain;
+    if (nominal < src->min_gain) nominal = src->min_gain;
+    if (nominal > src->max_gain) nominal = src->max_gain;
+    float eff = nominal * al_listener_get_gain();
+    if (eff < 0.0f) eff = 0.0f;
+    if (eff > 1.0f) eff = 1.0f;
+    calc->effective_gain = eff;
+}
+
+/*
+ * ============================================================================
  * Hardware Pitch & Master Volume Mapping Helpers
  * ============================================================================
  */
@@ -126,21 +423,19 @@ static uint32_t source_calc_pitch_step(ALsizei freq, float pitch) {
 }
 
 static uint16_t source_calc_master_volume(const ALsource *src) {
-    float listener_gain = al_listener_get_gain();
-    float clamped_gain = src->gain;
-    if (clamped_gain < src->min_gain) clamped_gain = src->min_gain;
-    if (clamped_gain > src->max_gain) clamped_gain = src->max_gain;
-    float eff_gain = clamped_gain * listener_gain;
-    if (eff_gain < 0.0f) eff_gain = 0.0f;
-    if (eff_gain > 1.0f) eff_gain = 1.0f;
-    return (uint16_t)(eff_gain * 65535.0f + 0.5f);
+    AL_SPATIAL_CALC calc;
+    al_source_calc_spatial(src, &calc);
+    return (uint16_t)(calc.effective_gain * 65535.0f + 0.5f);
 }
 
 static void source_update_hw_pitch(const ALsource *src) {
     if (src->state == AL_PLAYING && src->hw_voice_idx >= 0 && src->buffer != NULL) {
         NVAPU_VOICE_CONTEXT_3D *ctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
         if (ctx) {
-            ctx->pitch_step = source_calc_pitch_step(src->buffer->frequency, src->pitch);
+            AL_SPATIAL_CALC calc;
+            al_source_calc_spatial(src, &calc);
+            float eff_pitch = src->pitch * calc.doppler_pitch;
+            ctx->pitch_step = source_calc_pitch_step(src->buffer->frequency, eff_pitch);
         }
     }
 }
@@ -156,14 +451,19 @@ static void source_update_hw_gain(const ALsource *src) {
     }
 }
 
-void al_source_update_all_gains(void) {
+void al_source_update_all_spatial(void) {
     ensure_subsystem_initialized();
     for (size_t i = 0; i < AL_MAX_SOURCES; i++) {
         ALsource *src = &g_sources[i];
         if (src->in_use && src->state == AL_PLAYING && src->hw_voice_idx >= 0) {
             source_update_hw_gain(src);
+            source_update_hw_pitch(src);
         }
     }
+}
+
+void al_source_update_all_gains(void) {
+    al_source_update_all_spatial();
 }
 
 /*
@@ -182,9 +482,17 @@ static float calculate_source_priority(const ALsource *src) {
         return 0.0f;
     }
 
+    float lis_pos[3] = {0.0f, 0.0f, 0.0f};
+    al_listener_get_position(lis_pos);
+
     float dx = src->position[0];
     float dy = src->position[1];
     float dz = src->position[2];
+    if (!src->source_relative) {
+        dx -= lis_pos[0];
+        dy -= lis_pos[1];
+        dz -= lis_pos[2];
+    }
     float dist = sqrtf(dx * dx + dy * dy + dz * dz);
     if (dist < 0.1f) {
         dist = 0.1f;
@@ -436,6 +744,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->reference_distance = value;
+            source_update_hw_gain(src);
             break;
 
         case AL_MAX_DISTANCE:
@@ -444,6 +753,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->max_distance = value;
+            source_update_hw_gain(src);
             break;
 
         case AL_ROLLOFF_FACTOR:
@@ -452,6 +762,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->rolloff_factor = value;
+            source_update_hw_gain(src);
             break;
 
         case AL_CONE_INNER_ANGLE:
@@ -460,6 +771,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->cone_inner_angle = value;
+            source_update_hw_gain(src);
             break;
 
         case AL_CONE_OUTER_ANGLE:
@@ -468,6 +780,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->cone_outer_angle = value;
+            source_update_hw_gain(src);
             break;
 
         case AL_CONE_OUTER_GAIN:
@@ -476,6 +789,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->cone_outer_gain = value;
+            source_update_hw_gain(src);
             break;
 
         default:
@@ -498,18 +812,22 @@ AL_API void AL_APIENTRY alSource3f(ALuint source, ALenum param, ALfloat v1, ALfl
             src->position[0] = v1;
             src->position[1] = v2;
             src->position[2] = v3;
+            source_update_hw_gain(src);
+            source_update_hw_pitch(src);
             break;
 
         case AL_VELOCITY:
             src->velocity[0] = v1;
             src->velocity[1] = v2;
             src->velocity[2] = v3;
+            source_update_hw_pitch(src);
             break;
 
         case AL_DIRECTION:
             src->direction[0] = v1;
             src->direction[1] = v2;
             src->direction[2] = v3;
+            source_update_hw_gain(src);
             break;
 
         default:
@@ -608,6 +926,8 @@ AL_API void AL_APIENTRY alSourcei(ALuint source, ALenum param, ALint value) {
                 return;
             }
             src->source_relative = (ALboolean)value;
+            source_update_hw_gain(src);
+            source_update_hw_pitch(src);
             break;
 
         default:
@@ -942,9 +1262,11 @@ AL_API void AL_APIENTRY alSourcePlay(ALuint source) {
     ctx.prd_table_phys = src->buffer->prd_table_phys;
     ctx.current_prd_index = 0;
     ctx.sample_pos_frac = 0;
-    ctx.pitch_step = source_calc_pitch_step(src->buffer->frequency, src->pitch);
+    AL_SPATIAL_CALC calc;
+    al_source_calc_spatial(src, &calc);
+    ctx.pitch_step = source_calc_pitch_step(src->buffer->frequency, src->pitch * calc.doppler_pitch);
 
-    uint16_t master_vol = source_calc_master_volume(src);
+    uint16_t master_vol = (uint16_t)(calc.effective_gain * 65535.0f + 0.5f);
     ctx.master_vol_left = master_vol;
     ctx.master_vol_right = master_vol;
 
@@ -1119,4 +1441,172 @@ AL_API void AL_APIENTRY alSourceUnqueueBuffers(ALuint source, ALsizei nb, ALuint
     }
 
     alSetError(AL_INVALID_OPERATION);
+}
+
+/*
+ * ============================================================================
+ * OpenAL 1.1 Global Distance Model & Doppler Shift APIs
+ * ============================================================================
+ */
+
+AL_API void AL_APIENTRY alDistanceModel(ALenum distanceModel) {
+    ensure_subsystem_initialized();
+    switch (distanceModel) {
+        case AL_NONE:
+        case AL_INVERSE_DISTANCE:
+        case AL_INVERSE_DISTANCE_CLAMPED:
+        case AL_LINEAR_DISTANCE:
+        case AL_LINEAR_DISTANCE_CLAMPED:
+        case AL_EXPONENT_DISTANCE:
+        case AL_EXPONENT_DISTANCE_CLAMPED:
+            s_distance_model = distanceModel;
+            al_source_update_all_spatial();
+            break;
+
+        default:
+            alSetError(AL_INVALID_VALUE);
+            break;
+    }
+}
+
+AL_API void AL_APIENTRY alDopplerFactor(ALfloat value) {
+    ensure_subsystem_initialized();
+    if (!isfinite(value) || value < 0.0f) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    s_doppler_factor = value;
+    al_source_update_all_spatial();
+}
+
+AL_API void AL_APIENTRY alDopplerVelocity(ALfloat value) {
+    ensure_subsystem_initialized();
+    if (!isfinite(value) || value < 0.0f) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    /* Deprecated in OpenAL 1.1 in favor of alSpeedOfSound */
+}
+
+AL_API void AL_APIENTRY alSpeedOfSound(ALfloat value) {
+    ensure_subsystem_initialized();
+    if (!isfinite(value) || value <= 0.0f) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    s_speed_of_sound = value;
+    al_source_update_all_spatial();
+}
+
+/*
+ * ============================================================================
+ * OpenAL 1.1 Global State Query APIs
+ * ============================================================================
+ */
+
+AL_API ALint AL_APIENTRY alGetInteger(ALenum param) {
+    ensure_subsystem_initialized();
+    switch (param) {
+        case AL_DISTANCE_MODEL:
+            return (ALint)s_distance_model;
+        case AL_DOPPLER_FACTOR:
+            return (ALint)s_doppler_factor;
+        case AL_SPEED_OF_SOUND:
+            return (ALint)s_speed_of_sound;
+        default:
+            alSetError(AL_INVALID_ENUM);
+            return 0;
+    }
+}
+
+AL_API void AL_APIENTRY alGetIntegerv(ALenum param, ALint *values) {
+    if (!values) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    ensure_subsystem_initialized();
+    switch (param) {
+        case AL_DISTANCE_MODEL:
+            *values = (ALint)s_distance_model;
+            break;
+        case AL_DOPPLER_FACTOR:
+            *values = (ALint)s_doppler_factor;
+            break;
+        case AL_SPEED_OF_SOUND:
+            *values = (ALint)s_speed_of_sound;
+            break;
+        default:
+            alSetError(AL_INVALID_ENUM);
+            break;
+    }
+}
+
+AL_API ALfloat AL_APIENTRY alGetFloat(ALenum param) {
+    ensure_subsystem_initialized();
+    switch (param) {
+        case AL_DISTANCE_MODEL:
+            return (ALfloat)s_distance_model;
+        case AL_DOPPLER_FACTOR:
+            return s_doppler_factor;
+        case AL_DOPPLER_VELOCITY:
+            return 1.0f;
+        case AL_SPEED_OF_SOUND:
+            return s_speed_of_sound;
+        default:
+            alSetError(AL_INVALID_ENUM);
+            return 0.0f;
+    }
+}
+
+AL_API void AL_APIENTRY alGetFloatv(ALenum param, ALfloat *values) {
+    if (!values) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    ensure_subsystem_initialized();
+    switch (param) {
+        case AL_DISTANCE_MODEL:
+            *values = (ALfloat)s_distance_model;
+            break;
+        case AL_DOPPLER_FACTOR:
+            *values = s_doppler_factor;
+            break;
+        case AL_DOPPLER_VELOCITY:
+            *values = 1.0f;
+            break;
+        case AL_SPEED_OF_SOUND:
+            *values = s_speed_of_sound;
+            break;
+        default:
+            alSetError(AL_INVALID_ENUM);
+            break;
+    }
+}
+
+AL_API ALdouble AL_APIENTRY alGetDouble(ALenum param) {
+    return (ALdouble)alGetFloat(param);
+}
+
+AL_API void AL_APIENTRY alGetDoublev(ALenum param, ALdouble *values) {
+    if (!values) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    ALfloat fval = 0.0f;
+    alGetFloatv(param, &fval);
+    *values = (ALdouble)fval;
+}
+
+AL_API ALboolean AL_APIENTRY alGetBoolean(ALenum param) {
+    return (alGetInteger(param) != 0) ? AL_TRUE : AL_FALSE;
+}
+
+AL_API void AL_APIENTRY alGetBooleanv(ALenum param, ALboolean *values) {
+    if (!values) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    ALint ival = 0;
+    alGetIntegerv(param, &ival);
+    *values = (ival != 0) ? AL_TRUE : AL_FALSE;
 }
