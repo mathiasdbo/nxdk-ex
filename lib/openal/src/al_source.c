@@ -1,4 +1,5 @@
 #include "al_source.h"
+#include "al_listener.h"
 #include <string.h>
 #include <math.h>
 #include <float.h>
@@ -100,10 +101,69 @@ ALsource *al_source_get(ALuint id) {
         return NULL;
     }
     ALsource *src = &g_sources[id - 1];
-    if (!src->in_use) {
+    if (!src) {
         return NULL;
     }
-    return src;
+    return src->in_use ? src : NULL;
+}
+
+/*
+ * ============================================================================
+ * Hardware Pitch & Master Volume Mapping Helpers
+ * ============================================================================
+ */
+#define APU_PITCH_STEP_MIN 0x00001000u
+#define APU_PITCH_STEP_MAX 0x00040000u
+
+static uint32_t source_calc_pitch_step(ALsizei freq, float pitch) {
+    uint32_t step = APU_CALC_PITCH_STEP(freq, pitch);
+    if (step < APU_PITCH_STEP_MIN) {
+        step = APU_PITCH_STEP_MIN;
+    } else if (step > APU_PITCH_STEP_MAX) {
+        step = APU_PITCH_STEP_MAX;
+    }
+    return step;
+}
+
+static uint16_t source_calc_master_volume(const ALsource *src) {
+    float listener_gain = al_listener_get_gain();
+    float clamped_gain = src->gain;
+    if (clamped_gain < src->min_gain) clamped_gain = src->min_gain;
+    if (clamped_gain > src->max_gain) clamped_gain = src->max_gain;
+    float eff_gain = clamped_gain * listener_gain;
+    if (eff_gain < 0.0f) eff_gain = 0.0f;
+    if (eff_gain > 1.0f) eff_gain = 1.0f;
+    return (uint16_t)(eff_gain * 65535.0f + 0.5f);
+}
+
+static void source_update_hw_pitch(const ALsource *src) {
+    if (src->state == AL_PLAYING && src->hw_voice_idx >= 0 && src->buffer != NULL) {
+        NVAPU_VOICE_CONTEXT_3D *ctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
+        if (ctx) {
+            ctx->pitch_step = source_calc_pitch_step(src->buffer->frequency, src->pitch);
+        }
+    }
+}
+
+static void source_update_hw_gain(const ALsource *src) {
+    if (src->state == AL_PLAYING && src->hw_voice_idx >= 0) {
+        NVAPU_VOICE_CONTEXT_3D *ctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
+        if (ctx) {
+            uint16_t master_vol = source_calc_master_volume(src);
+            ctx->master_vol_left = master_vol;
+            ctx->master_vol_right = master_vol;
+        }
+    }
+}
+
+void al_source_update_all_gains(void) {
+    ensure_subsystem_initialized();
+    for (size_t i = 0; i < AL_MAX_SOURCES; i++) {
+        ALsource *src = &g_sources[i];
+        if (src->in_use && src->state == AL_PLAYING && src->hw_voice_idx >= 0) {
+            source_update_hw_gain(src);
+        }
+    }
 }
 
 /*
@@ -340,12 +400,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->pitch = value;
-            if (src->state == AL_PLAYING && src->hw_voice_idx >= 0 && src->buffer != NULL) {
-                NVAPU_VOICE_CONTEXT_3D *ctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
-                if (ctx) {
-                    ctx->pitch_step = APU_CALC_PITCH_STEP(src->buffer->frequency, src->pitch);
-                }
-            }
+            source_update_hw_pitch(src);
             break;
 
         case AL_GAIN:
@@ -354,19 +409,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->gain = value;
-            if (src->state == AL_PLAYING && src->hw_voice_idx >= 0) {
-                NVAPU_VOICE_CONTEXT_3D *ctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
-                if (ctx) {
-                    float clamped_gain = src->gain;
-                    if (clamped_gain < src->min_gain) clamped_gain = src->min_gain;
-                    if (clamped_gain > src->max_gain) clamped_gain = src->max_gain;
-                    if (clamped_gain < 0.0f) clamped_gain = 0.0f;
-                    if (clamped_gain > 1.0f) clamped_gain = 1.0f;
-                    uint16_t master_vol = (uint16_t)(clamped_gain * 65535.0f + 0.5f);
-                    ctx->master_vol_left = master_vol;
-                    ctx->master_vol_right = master_vol;
-                }
-            }
+            source_update_hw_gain(src);
             break;
 
         case AL_MIN_GAIN:
@@ -375,6 +418,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->min_gain = value;
+            source_update_hw_gain(src);
             break;
 
         case AL_MAX_GAIN:
@@ -383,6 +427,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->max_gain = value;
+            source_update_hw_gain(src);
             break;
 
         case AL_REFERENCE_DISTANCE:
@@ -897,16 +942,9 @@ AL_API void AL_APIENTRY alSourcePlay(ALuint source) {
     ctx.prd_table_phys = src->buffer->prd_table_phys;
     ctx.current_prd_index = 0;
     ctx.sample_pos_frac = 0;
-    ctx.pitch_step = APU_CALC_PITCH_STEP(src->buffer->frequency, src->pitch);
+    ctx.pitch_step = source_calc_pitch_step(src->buffer->frequency, src->pitch);
 
-    /* Clamp gain between min_gain and max_gain, then 0.0f..1.0f */
-    float clamped_gain = src->gain;
-    if (clamped_gain < src->min_gain) clamped_gain = src->min_gain;
-    if (clamped_gain > src->max_gain) clamped_gain = src->max_gain;
-    if (clamped_gain < 0.0f) clamped_gain = 0.0f;
-    if (clamped_gain > 1.0f) clamped_gain = 1.0f;
-
-    uint16_t master_vol = (uint16_t)(clamped_gain * 65535.0f + 0.5f);
+    uint16_t master_vol = source_calc_master_volume(src);
     ctx.master_vol_left = master_vol;
     ctx.master_vol_right = master_vol;
 
