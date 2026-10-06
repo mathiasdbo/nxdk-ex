@@ -1,0 +1,1084 @@
+#include "al_source.h"
+#include <string.h>
+#include <math.h>
+#include <float.h>
+
+/*
+ * ============================================================================
+ * Internal State & Global Source Pool
+ * ============================================================================
+ */
+static ALsource g_sources[AL_MAX_SOURCES];
+static bool s_subsystem_initialized = false;
+static int s_hw_voice_owner[NV_PAPU_NUM_3D_VOICES];
+static uintptr_t s_apu_base = NV_PAPU_BASE;
+
+/*
+ * ============================================================================
+ * Internal Helpers & Lifecycle Management
+ * ============================================================================
+ */
+
+void al_source_set_apu_base(uintptr_t base) {
+    s_apu_base = (base != 0) ? base : NV_PAPU_BASE;
+}
+
+uintptr_t al_source_get_apu_base(void) {
+    return s_apu_base;
+}
+
+static void source_reset_defaults(ALsource *src, ALuint id) {
+    src->id = id;
+    src->in_use = false;
+    src->state = AL_INITIAL;
+    src->buffer = NULL;
+    src->hw_voice_idx = AL_HW_VOICE_INVALID;
+    src->looping = AL_FALSE;
+    src->pitch = 1.0f;
+    src->gain = 1.0f;
+    src->min_gain = 0.0f;
+    src->max_gain = 1.0f;
+    src->position[0] = 0.0f;
+    src->position[1] = 0.0f;
+    src->position[2] = 0.0f;
+    src->velocity[0] = 0.0f;
+    src->velocity[1] = 0.0f;
+    src->velocity[2] = 0.0f;
+    src->direction[0] = 0.0f;
+    src->direction[1] = 0.0f;
+    src->direction[2] = 0.0f;
+    src->source_relative = AL_FALSE;
+    src->reference_distance = 1.0f;
+    src->max_distance = FLT_MAX;
+    src->rolloff_factor = 1.0f;
+    src->cone_inner_angle = 360.0f;
+    src->cone_outer_angle = 360.0f;
+    src->cone_outer_gain = 0.0f;
+}
+
+void al_source_init_subsystem(void) {
+    for (size_t i = 0; i < AL_MAX_SOURCES; i++) {
+        source_reset_defaults(&g_sources[i], (ALuint)(i + 1));
+    }
+    for (size_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
+        s_hw_voice_owner[v] = AL_HW_VOICE_INVALID;
+    }
+    s_subsystem_initialized = true;
+}
+
+void al_source_cleanup_subsystem(void) {
+    for (size_t i = 0; i < AL_MAX_SOURCES; i++) {
+        ALsource *src = &g_sources[i];
+        if (src->in_use) {
+            if (src->state == AL_PLAYING || src->state == AL_PAUSED) {
+                if (src->hw_voice_idx >= 0) {
+                    apu_voice_stop(s_apu_base, (uint32_t)src->hw_voice_idx);
+                }
+            }
+            if (src->buffer != NULL) {
+                al_buffer_release(src->buffer);
+                src->buffer = NULL;
+            }
+            source_reset_defaults(src, (ALuint)(i + 1));
+        }
+    }
+    for (size_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
+        s_hw_voice_owner[v] = AL_HW_VOICE_INVALID;
+    }
+    s_subsystem_initialized = false;
+}
+
+static void ensure_subsystem_initialized(void) {
+    if (!s_subsystem_initialized) {
+        al_source_init_subsystem();
+    }
+}
+
+ALsource *al_source_get(ALuint id) {
+    ensure_subsystem_initialized();
+    if (id < 1 || id > AL_MAX_SOURCES) {
+        return NULL;
+    }
+    ALsource *src = &g_sources[id - 1];
+    if (!src->in_use) {
+        return NULL;
+    }
+    return src;
+}
+
+/*
+ * ============================================================================
+ * Dynamic Priority & Voice Virtualization Management
+ * ============================================================================
+ * Dynamic priority formula:
+ *   P = base_priority * (gain / max(distance, 0.1))
+ * Looping sources receive +2.0 priority boost (base = 3.0 vs 1.0).
+ * Sources with gain < 0.001 are assigned priority 0.
+ * ============================================================================
+ */
+
+static float calculate_source_priority(const ALsource *src) {
+    if (!src || src->gain < 0.001f) {
+        return 0.0f;
+    }
+
+    float dx = src->position[0];
+    float dy = src->position[1];
+    float dz = src->position[2];
+    float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (dist < 0.1f) {
+        dist = 0.1f;
+    }
+
+    float base_priority = src->looping ? 3.0f : 1.0f;
+    return base_priority * (src->gain / dist);
+}
+
+static int allocate_hw_voice(ALsource *src) {
+    /* Check if current source already holds a valid voice */
+    if (src->hw_voice_idx >= 0 && src->hw_voice_idx < (int)NV_PAPU_NUM_3D_VOICES) {
+        if (s_hw_voice_owner[src->hw_voice_idx] == (int)src->id) {
+            return src->hw_voice_idx;
+        }
+    }
+
+    /* 1. First pass: look for an unassigned voice or an inactive voice */
+    for (uint32_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
+        int owner_id = s_hw_voice_owner[v];
+        if (owner_id <= 0) {
+            s_hw_voice_owner[v] = (int)src->id;
+            src->hw_voice_idx = (int)v;
+            return (int)v;
+        }
+
+        ALsource *owner = al_source_get((ALuint)owner_id);
+        if (!owner || owner->state != AL_PLAYING) {
+            if (owner) {
+                owner->hw_voice_idx = AL_HW_VOICE_INVALID;
+            }
+            s_hw_voice_owner[v] = (int)src->id;
+            src->hw_voice_idx = (int)v;
+            return (int)v;
+        }
+
+        /* Check if one-shot voice playback completed in hardware */
+        if (!owner->looping && apu_voice_is_active(s_apu_base, v) == 0) {
+            owner->state = AL_STOPPED;
+            owner->hw_voice_idx = AL_HW_VOICE_INVALID;
+            s_hw_voice_owner[v] = (int)src->id;
+            src->hw_voice_idx = (int)v;
+            return (int)v;
+        }
+    }
+
+    /* 2. Second pass: All 64 voices active, execute priority stealing */
+    float new_priority = calculate_source_priority(src);
+    int victim_voice = -1;
+    float min_priority = 1e30f;
+
+    for (uint32_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
+        int owner_id = s_hw_voice_owner[v];
+        ALsource *owner = al_source_get((ALuint)owner_id);
+        float p = owner ? calculate_source_priority(owner) : 0.0f;
+        if (p < min_priority) {
+            min_priority = p;
+            victim_voice = (int)v;
+        }
+    }
+
+    if (victim_voice >= 0 && new_priority > min_priority) {
+        /*
+         * Click-prevention preemption protocol:
+         * 1. Zero master volume and mixbin gains to eliminate DC offsets/clicks.
+         * 2. Clear active bit in hardware register.
+         * 3. Disconnect victim source (marks as virtualized/standby).
+         * 4. Assign hardware voice slot to the new higher-priority source.
+         */
+        NVAPU_VOICE_CONTEXT_3D *vctx = apu_voice_get_context((uint32_t)victim_voice);
+        if (vctx) {
+            vctx->master_vol_left = 0;
+            vctx->master_vol_right = 0;
+            memset(vctx->mixbin_gain, 0, sizeof(vctx->mixbin_gain));
+        }
+        apu_voice_stop(s_apu_base, (uint32_t)victim_voice);
+
+        int victim_owner_id = s_hw_voice_owner[victim_voice];
+        ALsource *victim = al_source_get((ALuint)victim_owner_id);
+        if (victim) {
+            victim->hw_voice_idx = AL_HW_VOICE_INVALID;
+        }
+
+        s_hw_voice_owner[victim_voice] = (int)src->id;
+        src->hw_voice_idx = victim_voice;
+        return victim_voice;
+    }
+
+    /* Fallback: Voice remains logically playing but virtualized */
+    src->hw_voice_idx = AL_HW_VOICE_INVALID;
+    return AL_HW_VOICE_INVALID;
+}
+
+/*
+ * ============================================================================
+ * OpenAL 1.1 Source Lifecycle APIs
+ * ============================================================================
+ */
+
+AL_API void AL_APIENTRY alGenSources(ALsizei n, ALuint *sources) {
+    ensure_subsystem_initialized();
+
+    if (n < 0) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    if (n == 0) {
+        return;
+    }
+    if (!sources) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+
+    /* Verify sufficient free slots exist in pool */
+    ALsizei available = 0;
+    for (size_t i = 0; i < AL_MAX_SOURCES; i++) {
+        if (!g_sources[i].in_use) {
+            available++;
+        }
+    }
+
+    if (available < n) {
+        alSetError(AL_OUT_OF_MEMORY);
+        return;
+    }
+
+    /* Allocate source slots */
+    ALsizei allocated = 0;
+    for (size_t i = 0; i < AL_MAX_SOURCES && allocated < n; i++) {
+        if (!g_sources[i].in_use) {
+            ALsource *src = &g_sources[i];
+            source_reset_defaults(src, (ALuint)(i + 1));
+            src->in_use = true;
+            sources[allocated++] = src->id;
+        }
+    }
+}
+
+AL_API void AL_APIENTRY alDeleteSources(ALsizei n, const ALuint *sources) {
+    ensure_subsystem_initialized();
+
+    if (n < 0) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    if (n == 0) {
+        return;
+    }
+    if (!sources) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+
+    /* Validation phase: all IDs must be valid (or 0) */
+    for (ALsizei i = 0; i < n; i++) {
+        ALuint id = sources[i];
+        if (id == 0) {
+            continue;
+        }
+        if (id > AL_MAX_SOURCES || !g_sources[id - 1].in_use) {
+            alSetError(AL_INVALID_NAME);
+            return;
+        }
+    }
+
+    /* Deletion phase */
+    for (ALsizei i = 0; i < n; i++) {
+        ALuint id = sources[i];
+        if (id == 0) {
+            continue;
+        }
+        ALsource *src = &g_sources[id - 1];
+        if (src->in_use) {
+            alSourceStop(id);
+            if (src->buffer) {
+                al_buffer_release(src->buffer);
+                src->buffer = NULL;
+            }
+            source_reset_defaults(src, (ALuint)(i + 1));
+        }
+    }
+}
+
+AL_API ALboolean AL_APIENTRY alIsSource(ALuint source) {
+    ensure_subsystem_initialized();
+
+    if (source < 1 || source > AL_MAX_SOURCES) {
+        return AL_FALSE;
+    }
+    return g_sources[source - 1].in_use ? AL_TRUE : AL_FALSE;
+}
+
+/*
+ * ============================================================================
+ * OpenAL 1.1 Source Property Configuration APIs
+ * ============================================================================
+ */
+
+AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
+    ensure_subsystem_initialized();
+
+    ALsource *src = al_source_get(source);
+    if (!src) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+
+    switch (param) {
+        case AL_PITCH:
+            if (value <= 0.0f) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->pitch = value;
+            if (src->state == AL_PLAYING && src->hw_voice_idx >= 0 && src->buffer != NULL) {
+                NVAPU_VOICE_CONTEXT_3D *ctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
+                if (ctx) {
+                    ctx->pitch_step = APU_CALC_PITCH_STEP(src->buffer->frequency, src->pitch);
+                }
+            }
+            break;
+
+        case AL_GAIN:
+            if (value < 0.0f) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->gain = value;
+            if (src->state == AL_PLAYING && src->hw_voice_idx >= 0) {
+                NVAPU_VOICE_CONTEXT_3D *ctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
+                if (ctx) {
+                    float clamped_gain = src->gain;
+                    if (clamped_gain < src->min_gain) clamped_gain = src->min_gain;
+                    if (clamped_gain > src->max_gain) clamped_gain = src->max_gain;
+                    if (clamped_gain < 0.0f) clamped_gain = 0.0f;
+                    if (clamped_gain > 1.0f) clamped_gain = 1.0f;
+                    uint16_t master_vol = (uint16_t)(clamped_gain * 65535.0f + 0.5f);
+                    ctx->master_vol_left = master_vol;
+                    ctx->master_vol_right = master_vol;
+                }
+            }
+            break;
+
+        case AL_MIN_GAIN:
+            if (value < 0.0f || value > 1.0f) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->min_gain = value;
+            break;
+
+        case AL_MAX_GAIN:
+            if (value < 0.0f || value > 1.0f) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->max_gain = value;
+            break;
+
+        case AL_REFERENCE_DISTANCE:
+            if (value < 0.0f) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->reference_distance = value;
+            break;
+
+        case AL_MAX_DISTANCE:
+            if (value < 0.0f) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->max_distance = value;
+            break;
+
+        case AL_ROLLOFF_FACTOR:
+            if (value < 0.0f) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->rolloff_factor = value;
+            break;
+
+        case AL_CONE_INNER_ANGLE:
+            if (value < 0.0f || value > 360.0f) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->cone_inner_angle = value;
+            break;
+
+        case AL_CONE_OUTER_ANGLE:
+            if (value < 0.0f || value > 360.0f) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->cone_outer_angle = value;
+            break;
+
+        case AL_CONE_OUTER_GAIN:
+            if (value < 0.0f || value > 1.0f) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->cone_outer_gain = value;
+            break;
+
+        default:
+            alSetError(AL_INVALID_ENUM);
+            break;
+    }
+}
+
+AL_API void AL_APIENTRY alSource3f(ALuint source, ALenum param, ALfloat v1, ALfloat v2, ALfloat v3) {
+    ensure_subsystem_initialized();
+
+    ALsource *src = al_source_get(source);
+    if (!src) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+
+    switch (param) {
+        case AL_POSITION:
+            src->position[0] = v1;
+            src->position[1] = v2;
+            src->position[2] = v3;
+            break;
+
+        case AL_VELOCITY:
+            src->velocity[0] = v1;
+            src->velocity[1] = v2;
+            src->velocity[2] = v3;
+            break;
+
+        case AL_DIRECTION:
+            src->direction[0] = v1;
+            src->direction[1] = v2;
+            src->direction[2] = v3;
+            break;
+
+        default:
+            alSetError(AL_INVALID_ENUM);
+            break;
+    }
+}
+
+AL_API void AL_APIENTRY alSourcefv(ALuint source, ALenum param, const ALfloat *values) {
+    if (!values) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+
+    switch (param) {
+        case AL_POSITION:
+        case AL_VELOCITY:
+        case AL_DIRECTION:
+            alSource3f(source, param, values[0], values[1], values[2]);
+            break;
+
+        case AL_PITCH:
+        case AL_GAIN:
+        case AL_MIN_GAIN:
+        case AL_MAX_GAIN:
+        case AL_REFERENCE_DISTANCE:
+        case AL_MAX_DISTANCE:
+        case AL_ROLLOFF_FACTOR:
+        case AL_CONE_INNER_ANGLE:
+        case AL_CONE_OUTER_ANGLE:
+        case AL_CONE_OUTER_GAIN:
+            alSourcef(source, param, values[0]);
+            break;
+
+        default:
+            if (!alIsSource(source)) {
+                alSetError(AL_INVALID_NAME);
+            } else {
+                alSetError(AL_INVALID_ENUM);
+            }
+            break;
+    }
+}
+
+AL_API void AL_APIENTRY alSourcei(ALuint source, ALenum param, ALint value) {
+    ensure_subsystem_initialized();
+
+    ALsource *src = al_source_get(source);
+    if (!src) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+
+    switch (param) {
+        case AL_BUFFER:
+            if (src->state == AL_PLAYING || src->state == AL_PAUSED) {
+                alSetError(AL_INVALID_OPERATION);
+                return;
+            }
+            if (value == 0) {
+                if (src->buffer != NULL) {
+                    al_buffer_release(src->buffer);
+                    src->buffer = NULL;
+                }
+            } else {
+                ALbuffer *buf = al_buffer_get((ALuint)value);
+                if (!buf) {
+                    alSetError(AL_INVALID_NAME);
+                    return;
+                }
+                if (src->buffer != NULL) {
+                    al_buffer_release(src->buffer);
+                }
+                src->buffer = buf;
+                al_buffer_retain(buf);
+            }
+            break;
+
+        case AL_LOOPING:
+            if (value != AL_TRUE && value != AL_FALSE) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->looping = (ALboolean)value;
+            if (src->state == AL_PLAYING && src->hw_voice_idx >= 0) {
+                NVAPU_VOICE_CONTEXT_3D *ctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
+                if (ctx) {
+                    ctx->loop_mode = src->looping ? NVAPU_VOICE_LOOP_ON : NVAPU_VOICE_LOOP_OFF;
+                }
+            }
+            break;
+
+        case AL_SOURCE_RELATIVE:
+            if (value != AL_TRUE && value != AL_FALSE) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->source_relative = (ALboolean)value;
+            break;
+
+        default:
+            alSetError(AL_INVALID_ENUM);
+            break;
+    }
+}
+
+AL_API void AL_APIENTRY alSource3i(ALuint source, ALenum param, ALint v1, ALint v2, ALint v3) {
+    alSource3f(source, param, (ALfloat)v1, (ALfloat)v2, (ALfloat)v3);
+}
+
+AL_API void AL_APIENTRY alSourceiv(ALuint source, ALenum param, const ALint *values) {
+    if (!values) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+
+    switch (param) {
+        case AL_POSITION:
+        case AL_VELOCITY:
+        case AL_DIRECTION:
+            alSource3f(source, param, (ALfloat)values[0], (ALfloat)values[1], (ALfloat)values[2]);
+            break;
+
+        case AL_BUFFER:
+        case AL_LOOPING:
+        case AL_SOURCE_RELATIVE:
+            alSourcei(source, param, values[0]);
+            break;
+
+        default:
+            if (!alIsSource(source)) {
+                alSetError(AL_INVALID_NAME);
+            } else {
+                alSetError(AL_INVALID_ENUM);
+            }
+            break;
+    }
+}
+
+/*
+ * ============================================================================
+ * OpenAL 1.1 Source Property Query APIs
+ * ============================================================================
+ */
+
+AL_API void AL_APIENTRY alGetSourcef(ALuint source, ALenum param, ALfloat *value) {
+    if (!value) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+
+    ALsource *src = al_source_get(source);
+    if (!src) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+
+    switch (param) {
+        case AL_PITCH:
+            *value = src->pitch;
+            break;
+
+        case AL_GAIN:
+            *value = src->gain;
+            break;
+
+        case AL_MIN_GAIN:
+            *value = src->min_gain;
+            break;
+
+        case AL_MAX_GAIN:
+            *value = src->max_gain;
+            break;
+
+        case AL_REFERENCE_DISTANCE:
+            *value = src->reference_distance;
+            break;
+
+        case AL_MAX_DISTANCE:
+            *value = src->max_distance;
+            break;
+
+        case AL_ROLLOFF_FACTOR:
+            *value = src->rolloff_factor;
+            break;
+
+        case AL_CONE_INNER_ANGLE:
+            *value = src->cone_inner_angle;
+            break;
+
+        case AL_CONE_OUTER_ANGLE:
+            *value = src->cone_outer_angle;
+            break;
+
+        case AL_CONE_OUTER_GAIN:
+            *value = src->cone_outer_gain;
+            break;
+
+        default:
+            alSetError(AL_INVALID_ENUM);
+            break;
+    }
+}
+
+AL_API void AL_APIENTRY alGetSource3f(ALuint source, ALenum param, ALfloat *v1, ALfloat *v2, ALfloat *v3) {
+    if (!v1 || !v2 || !v3) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+
+    ALsource *src = al_source_get(source);
+    if (!src) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+
+    switch (param) {
+        case AL_POSITION:
+            *v1 = src->position[0];
+            *v2 = src->position[1];
+            *v3 = src->position[2];
+            break;
+
+        case AL_VELOCITY:
+            *v1 = src->velocity[0];
+            *v2 = src->velocity[1];
+            *v3 = src->velocity[2];
+            break;
+
+        case AL_DIRECTION:
+            *v1 = src->direction[0];
+            *v2 = src->direction[1];
+            *v3 = src->direction[2];
+            break;
+
+        default:
+            alSetError(AL_INVALID_ENUM);
+            break;
+    }
+}
+
+AL_API void AL_APIENTRY alGetSourcefv(ALuint source, ALenum param, ALfloat *values) {
+    if (!values) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+
+    switch (param) {
+        case AL_POSITION:
+        case AL_VELOCITY:
+        case AL_DIRECTION:
+            alGetSource3f(source, param, &values[0], &values[1], &values[2]);
+            break;
+
+        default:
+            alGetSourcef(source, param, &values[0]);
+            break;
+    }
+}
+
+AL_API void AL_APIENTRY alGetSourcei(ALuint source, ALenum param, ALint *value) {
+    if (!value) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+
+    ALsource *src = al_source_get(source);
+    if (!src) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+
+    switch (param) {
+        case AL_SOURCE_STATE:
+            if (src->state == AL_PLAYING) {
+                if (src->hw_voice_idx >= 0) {
+                    int active = apu_voice_is_active(s_apu_base, (uint32_t)src->hw_voice_idx);
+                    if (!active && !src->looping) {
+                        src->state = AL_STOPPED;
+                        s_hw_voice_owner[src->hw_voice_idx] = AL_HW_VOICE_INVALID;
+                        src->hw_voice_idx = AL_HW_VOICE_INVALID;
+                    }
+                }
+            }
+            *value = src->state;
+            break;
+
+        case AL_BUFFER:
+            *value = (src->buffer != NULL) ? (ALint)src->buffer->id : 0;
+            break;
+
+        case AL_LOOPING:
+            *value = (ALint)src->looping;
+            break;
+
+        case AL_SOURCE_RELATIVE:
+            *value = (ALint)src->source_relative;
+            break;
+
+        case AL_BUFFERS_QUEUED:
+            *value = (src->buffer != NULL) ? 1 : 0;
+            break;
+
+        case AL_BUFFERS_PROCESSED:
+            if (src->buffer != NULL && !src->looping && src->state == AL_STOPPED) {
+                *value = 1;
+            } else {
+                *value = 0;
+            }
+            break;
+
+        case AL_SOURCE_TYPE:
+            if (src->buffer == NULL) {
+                *value = AL_UNDETERMINED;
+            } else {
+                *value = AL_STATIC;
+            }
+            break;
+
+        default:
+            alSetError(AL_INVALID_ENUM);
+            break;
+    }
+}
+
+AL_API void AL_APIENTRY alGetSource3i(ALuint source, ALenum param, ALint *v1, ALint *v2, ALint *v3) {
+    if (!v1 || !v2 || !v3) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+
+    ALsource *src = al_source_get(source);
+    if (!src) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+
+    switch (param) {
+        case AL_POSITION:
+            *v1 = (ALint)src->position[0];
+            *v2 = (ALint)src->position[1];
+            *v3 = (ALint)src->position[2];
+            break;
+
+        case AL_VELOCITY:
+            *v1 = (ALint)src->velocity[0];
+            *v2 = (ALint)src->velocity[1];
+            *v3 = (ALint)src->velocity[2];
+            break;
+
+        case AL_DIRECTION:
+            *v1 = (ALint)src->direction[0];
+            *v2 = (ALint)src->direction[1];
+            *v3 = (ALint)src->direction[2];
+            break;
+
+        default:
+            alSetError(AL_INVALID_ENUM);
+            break;
+    }
+}
+
+AL_API void AL_APIENTRY alGetSourceiv(ALuint source, ALenum param, ALint *values) {
+    if (!values) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+
+    switch (param) {
+        case AL_POSITION:
+        case AL_VELOCITY:
+        case AL_DIRECTION:
+            alGetSource3i(source, param, &values[0], &values[1], &values[2]);
+            break;
+
+        default:
+            alGetSourcei(source, param, &values[0]);
+            break;
+    }
+}
+
+/*
+ * ============================================================================
+ * OpenAL 1.1 Source Playback Control APIs
+ * ============================================================================
+ */
+
+AL_API void AL_APIENTRY alSourcePlay(ALuint source) {
+    ensure_subsystem_initialized();
+
+    ALsource *src = al_source_get(source);
+    if (!src) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+
+    /* If no buffer is attached, transition to AL_STOPPED without error */
+    if (src->buffer == NULL) {
+        src->state = AL_STOPPED;
+        return;
+    }
+
+    /* If paused and HW voice is intact, unpause directly */
+    if (src->state == AL_PAUSED && src->hw_voice_idx >= 0) {
+        apu_voice_pause(s_apu_base, (uint32_t)src->hw_voice_idx, 0);
+        src->state = AL_PLAYING;
+        return;
+    }
+
+    /* Allocate or bind hardware voice index (0..63) */
+    int idx = allocate_hw_voice(src);
+    if (idx < 0) {
+        /* Virtualized playback (logical AL_PLAYING without hardware voice) */
+        src->state = AL_PLAYING;
+        return;
+    }
+
+    /* Populate NVAPU_VOICE_CONTEXT_3D */
+    NVAPU_VOICE_CONTEXT_3D ctx;
+    apu_voice_context_reset(&ctx);
+
+    /* Format: 0 for 16-bit PCM, 1 for 8-bit PCM */
+    ctx.format = (src->buffer->bits == 8) ? NVAPU_VOICE_FORMAT_PCM8 : NVAPU_VOICE_FORMAT_PCM16;
+    /* Channels: 1 for stereo, 0 for mono */
+    ctx.channels = (src->buffer->channels == 2) ? NVAPU_VOICE_CHANNELS_STEREO : NVAPU_VOICE_CHANNELS_MONO;
+    /* Loop mode & Direct 2D playback */
+    ctx.loop_mode = src->looping ? NVAPU_VOICE_LOOP_ON : NVAPU_VOICE_LOOP_OFF;
+    ctx.mode_3d = 0; /* Direct 2D bypasses 3D HRTF/ITD processing */
+
+    ctx.prd_table_phys = src->buffer->prd_table_phys;
+    ctx.current_prd_index = 0;
+    ctx.sample_pos_frac = 0;
+    ctx.pitch_step = APU_CALC_PITCH_STEP(src->buffer->frequency, src->pitch);
+
+    /* Clamp gain between min_gain and max_gain, then 0.0f..1.0f */
+    float clamped_gain = src->gain;
+    if (clamped_gain < src->min_gain) clamped_gain = src->min_gain;
+    if (clamped_gain > src->max_gain) clamped_gain = src->max_gain;
+    if (clamped_gain < 0.0f) clamped_gain = 0.0f;
+    if (clamped_gain > 1.0f) clamped_gain = 1.0f;
+
+    uint16_t master_vol = (uint16_t)(clamped_gain * 65535.0f + 0.5f);
+    ctx.master_vol_left = master_vol;
+    ctx.master_vol_right = master_vol;
+
+    /* Route to MixBins 0 and 1 (Front Left, Front Right) at unity multiplier */
+    ctx.mixbin_routing_mask = 0x00000003;
+    ctx.mixbin_gain[0] = 0xFF;
+    ctx.mixbin_gain[1] = 0xFF;
+
+    /* Program hardware voice context, ensure unpaused, and trigger */
+    apu_voice_setup((uint32_t)idx, &ctx);
+    apu_voice_pause(s_apu_base, (uint32_t)idx, 0);
+    apu_voice_trigger(s_apu_base, (uint32_t)idx);
+
+    src->state = AL_PLAYING;
+}
+
+AL_API void AL_APIENTRY alSourcePause(ALuint source) {
+    ensure_subsystem_initialized();
+
+    ALsource *src = al_source_get(source);
+    if (!src) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+
+    if (src->state == AL_PLAYING) {
+        if (src->hw_voice_idx >= 0) {
+            apu_voice_pause(s_apu_base, (uint32_t)src->hw_voice_idx, 1);
+        }
+        src->state = AL_PAUSED;
+    }
+}
+
+AL_API void AL_APIENTRY alSourceStop(ALuint source) {
+    ensure_subsystem_initialized();
+
+    ALsource *src = al_source_get(source);
+    if (!src) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+
+    if (src->state == AL_PLAYING || src->state == AL_PAUSED) {
+        if (src->hw_voice_idx >= 0) {
+            NVAPU_VOICE_CONTEXT_3D *vctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
+            if (vctx) {
+                vctx->master_vol_left = 0;
+                vctx->master_vol_right = 0;
+                memset(vctx->mixbin_gain, 0, sizeof(vctx->mixbin_gain));
+            }
+            apu_voice_stop(s_apu_base, (uint32_t)src->hw_voice_idx);
+            s_hw_voice_owner[src->hw_voice_idx] = AL_HW_VOICE_INVALID;
+            src->hw_voice_idx = AL_HW_VOICE_INVALID;
+        }
+        src->state = AL_STOPPED;
+    }
+}
+
+AL_API void AL_APIENTRY alSourceRewind(ALuint source) {
+    ensure_subsystem_initialized();
+
+    ALsource *src = al_source_get(source);
+    if (!src) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+
+    if (src->state == AL_PLAYING || src->state == AL_PAUSED || src->state == AL_STOPPED) {
+        if (src->hw_voice_idx >= 0) {
+            NVAPU_VOICE_CONTEXT_3D *vctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
+            if (vctx) {
+                vctx->master_vol_left = 0;
+                vctx->master_vol_right = 0;
+                vctx->sample_pos_frac = 0;
+                vctx->current_prd_index = 0;
+            }
+            apu_voice_stop(s_apu_base, (uint32_t)src->hw_voice_idx);
+            s_hw_voice_owner[src->hw_voice_idx] = AL_HW_VOICE_INVALID;
+            src->hw_voice_idx = AL_HW_VOICE_INVALID;
+        }
+        src->state = AL_INITIAL;
+    }
+}
+
+AL_API void AL_APIENTRY alSourcePlayv(ALsizei n, const ALuint *sources) {
+    ensure_subsystem_initialized();
+    if (n < 0 || sources == NULL) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    for (ALsizei i = 0; i < n; i++) {
+        alSourcePlay(sources[i]);
+    }
+}
+
+AL_API void AL_APIENTRY alSourcePausev(ALsizei n, const ALuint *sources) {
+    ensure_subsystem_initialized();
+    if (n < 0 || sources == NULL) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    for (ALsizei i = 0; i < n; i++) {
+        alSourcePause(sources[i]);
+    }
+}
+
+AL_API void AL_APIENTRY alSourceStopv(ALsizei n, const ALuint *sources) {
+    ensure_subsystem_initialized();
+    if (n < 0 || sources == NULL) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    for (ALsizei i = 0; i < n; i++) {
+        alSourceStop(sources[i]);
+    }
+}
+
+AL_API void AL_APIENTRY alSourceRewindv(ALsizei n, const ALuint *sources) {
+    ensure_subsystem_initialized();
+    if (n < 0 || sources == NULL) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    for (ALsizei i = 0; i < n; i++) {
+        alSourceRewind(sources[i]);
+    }
+}
+
+/*
+ * ============================================================================
+ * OpenAL 1.1 Source Queueing APIs (Stubs for Static 2D Phase)
+ * ============================================================================
+ */
+
+AL_API void AL_APIENTRY alSourceQueueBuffers(ALuint source, ALsizei nb, const ALuint *buffers) {
+    ensure_subsystem_initialized();
+
+    if (nb < 0 || (nb > 0 && buffers == NULL)) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+
+    ALsource *src = al_source_get(source);
+    if (!src) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+
+    if (nb == 0) {
+        return;
+    }
+
+    alSetError(AL_INVALID_OPERATION);
+}
+
+AL_API void AL_APIENTRY alSourceUnqueueBuffers(ALuint source, ALsizei nb, ALuint *buffers) {
+    ensure_subsystem_initialized();
+
+    if (nb < 0 || (nb > 0 && buffers == NULL)) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+
+    ALsource *src = al_source_get(source);
+    if (!src) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+
+    if (nb == 0) {
+        return;
+    }
+
+    alSetError(AL_INVALID_OPERATION);
+}
