@@ -7,6 +7,7 @@
 #include "al_buffer.h"
 #include "apu_voice.h"
 #include "apu_hardware.h"
+#include "apu_spatial.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -89,6 +90,21 @@ uintptr_t al_source_get_apu_base(void);
  * Called immediately when global listener gain changes.
  */
 void al_source_update_all_gains(void);
+
+/**
+ * Recompute 3D spatial attenuation, cone gains, and Doppler pitch steps
+ * and update hardware voice context registers for all active playing sources.
+ * Called immediately when listener position/velocity/orientation or global models change.
+ */
+void al_source_update_all_spatial(void);
+
+/**
+ * Perform complete 3D spatial calculation for a given source object.
+ *
+ * @param src  Source object pointer.
+ * @param calc Destination spatial calculation result structure.
+ */
+void al_source_calc_spatial(const ALsource *src, AL_SPATIAL_CALC *calc);
 
 /*
  * ============================================================================
