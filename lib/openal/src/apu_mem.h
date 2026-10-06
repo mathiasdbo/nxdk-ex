@@ -84,6 +84,8 @@ void *apu_mem_alloc_phys(size_t size, size_t alignment, uint32_t *out_phys);
  */
 void apu_mem_free(void *ptr);
 
+#define apu_mem_free_phys(ptr) apu_mem_free(ptr)
+
 /**
  * Release all resources and destroy the contiguous memory pool.
  */
