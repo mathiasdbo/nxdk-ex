@@ -104,6 +104,8 @@ extern "C" {
 
 /* NV_PAPU_EP_CONTROL Bitfields */
 #define NV_PAPU_EP_CONTROL_ENABLE       (1u << 0) /* Bit 0: Output Processor Enable */
+#define NV_PAPU_EP_CONTROL_DSE_ENABLE   (1u << 1) /* Bit 1: Hardware Dolby Digital DSE Realtime Encoder Enable */
+#define NV_PAPU_EP_CONTROL_AC3_ENABLE   NV_PAPU_EP_CONTROL_DSE_ENABLE
 
 /* NV_PAPU_EP_FIFO_CONFIG Channel Masks */
 #define NV_PAPU_EP_FIFO_CONFIG_STEREO   0x03u     /* Channels 0-1 (Front Left, Front Right) */
