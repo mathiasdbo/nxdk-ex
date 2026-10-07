@@ -32,7 +32,7 @@ struct ALCdevice_struct {
     uint32_t voice_table_phys;          /**< 32-bit physical RAM address of voice array */
     uint32_t context_count;             /**< Number of active contexts created on device */
     ALCcontext *active_context;         /**< Pointer to currently active context (if any) */
-    uintptr_t apu_base;                 /**< MMIO base address (NV_PAPU_BASE or mock) */
+    uintptr_t apu_base;                 /**< MMIO base address (NV_PAPU_BASE, null-backend RAM or mock) */
     APU_AUDIO_TOPOLOGY topology;        /**< Active audio output topology (Stereo 2.0 or 5.1) */
 };
 
@@ -59,12 +59,20 @@ struct ALCcontext_struct {
  * Override the APU base MMIO address used by the ALC device subsystem.
  * Enables host testing with mock MMIO buffers without hardware faults.
  *
+ * With the default base (NV_PAPU_BASE) alcOpenDevice() runs on a zeroed
+ * BAR0-sized RAM region (null backend) instead of the real registers, unless
+ * the library is built with -DOPENAL_APU_REAL_MMIO. See alext.h
+ * (AL_XBOX_BACKEND) and lib/openal/docs/XEMU_VERIFICATION.md.
+ *
  * @param base Base MMIO address, or 0 to restore default NV_PAPU_BASE.
  */
 void alc_set_apu_base(uintptr_t base);
 
 /**
  * Retrieve the active APU base MMIO address.
+ *
+ * While a device is open this is the base the hardware session actually
+ * uses (for the null backend: the RAM region); otherwise the configured base.
  */
 uintptr_t alc_get_apu_base(void);
 

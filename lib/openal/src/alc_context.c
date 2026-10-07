@@ -34,6 +34,70 @@ static void *s_hw_voice_table_virt = NULL;
 static uint32_t s_hw_voice_table_phys = 0;
 
 /*
+ * Backend guard.
+ *
+ * The register model in apu_hardware.h is not xemu-conformant (see
+ * lib/openal/docs/XEMU_VERIFICATION.md): bring-up writes to the real BAR0 can disturb
+ * or abort the emulator. Driving real MMIO is therefore opt-in
+ * (-DOPENAL_APU_REAL_MMIO). By default, when the effective base is the
+ * hardware default NV_PAPU_BASE, the device runs on a zeroed BAR0-sized RAM
+ * region (the "null" backend). A base installed with alc_set_apu_base()
+ * (host test mock) is used as given.
+ */
+#define ALC_NULL_BAR0_SIZE 0x80000u
+
+static void *s_null_apu_ram = NULL;       /* null-backend BAR0 stand-in */
+static uintptr_t s_session_apu_base = 0;  /* base of the open hardware session */
+static bool s_hw_dolby_active = false;    /* cached: first device chose 5.1/DSE */
+
+static void alc_null_ram_release(void) {
+    free(s_null_apu_ram);
+    s_null_apu_ram = NULL;
+}
+
+/* MMIO means the open device's base is the real BAR0; no device open reports NULL */
+static ALint alc_current_backend(void) {
+    if (s_active_device_count > 0 && s_session_apu_base == NV_PAPU_BASE) {
+        return AL_XBOX_BACKEND_MMIO;
+    }
+    return AL_XBOX_BACKEND_NULL;
+}
+
+/*
+ * Portable function-pointer -> void * conversion (a direct cast is rejected
+ * by -std=c99 -pedantic). All supported targets have equal-sized pointers.
+ */
+typedef void (*ALC_PROC)(void);
+typedef char alc_proc_size_check[(sizeof(void *) == sizeof(ALC_PROC)) ? 1 : -1];
+
+static void *alc_proc_to_ptr(ALC_PROC fn) {
+    void *p = NULL;
+    memcpy(&p, &fn, sizeof(p));
+    return p;
+}
+
+static const struct {
+    const char *name;
+    ALC_PROC fn;
+} s_proc_table[] = {
+    { "alXboxGetHardwareStatus", (ALC_PROC)alXboxGetHardwareStatus },
+    { "alXboxUpdateVoices",      (ALC_PROC)alXboxUpdateVoices }
+};
+
+static void *alc_lookup_proc(const char *name) {
+    size_t i;
+    if (name == NULL) {
+        return NULL;
+    }
+    for (i = 0; i < sizeof(s_proc_table) / sizeof(s_proc_table[0]); i++) {
+        if (strcmp(name, s_proc_table[i].name) == 0) {
+            return alc_proc_to_ptr(s_proc_table[i].fn);
+        }
+    }
+    return NULL;
+}
+
+/*
  * ============================================================================
  * Error Reporting Helper
  * ============================================================================
@@ -60,7 +124,8 @@ void alc_set_apu_base(uintptr_t base) {
 }
 
 uintptr_t alc_get_apu_base(void) {
-    return s_alc_apu_base;
+    /* While a device is open, report the base actually in use (null-backend RAM or mock) */
+    return (s_active_device_count > 0) ? s_session_apu_base : s_alc_apu_base;
 }
 
 /*
@@ -81,11 +146,6 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
         }
     }
 
-    uintptr_t apu_base = s_alc_apu_base;
-    if (apu_base == 0) {
-        apu_base = NV_PAPU_BASE;
-    }
-
     /* Allocate device handle and detect audio topology */
     ALCdevice *device = (ALCdevice *)calloc(1, sizeof(ALCdevice));
     if (!device) {
@@ -95,10 +155,32 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
 
     device->topology = apu_detect_audio_topology();
 
+    /* Additional devices share the hardware session of the first one */
+    uintptr_t apu_base = s_session_apu_base;
+
     /* Initialize hardware resources on first open device */
     if (s_active_device_count == 0) {
+        apu_base = s_alc_apu_base;
+        if (apu_base == 0) {
+            apu_base = NV_PAPU_BASE;
+        }
+
+#ifndef OPENAL_APU_REAL_MMIO
+        /* Backend guard: never touch the real BAR0 unless explicitly enabled */
+        if (apu_base == NV_PAPU_BASE) {
+            s_null_apu_ram = calloc(1, ALC_NULL_BAR0_SIZE);
+            if (!s_null_apu_ram) {
+                free(device);
+                alc_set_error(NULL, ALC_OUT_OF_MEMORY);
+                return NULL;
+            }
+            apu_base = (uintptr_t)s_null_apu_ram;
+        }
+#endif
+
         /* 1. Contiguous physical memory pool */
         if (apu_mem_init(0) != 0) {
+            alc_null_ram_release();
             free(device);
             alc_set_error(NULL, ALC_OUT_OF_MEMORY);
             return NULL;
@@ -112,6 +194,7 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
         );
         if (!s_hw_voice_table_virt) {
             apu_mem_shutdown();
+            alc_null_ram_release();
             free(device);
             alc_set_error(NULL, ALC_OUT_OF_MEMORY);
             return NULL;
@@ -124,6 +207,7 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
             s_hw_voice_table_virt = NULL;
             s_hw_voice_table_phys = 0;
             apu_mem_shutdown();
+            alc_null_ram_release();
             free(device);
             alc_set_error(NULL, ALC_OUT_OF_MEMORY);
             return NULL;
@@ -137,6 +221,7 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
             s_hw_voice_table_virt = NULL;
             s_hw_voice_table_phys = 0;
             apu_mem_shutdown();
+            alc_null_ram_release();
             free(device);
             alc_set_error(NULL, ALC_INVALID_VALUE);
             return NULL;
@@ -151,6 +236,7 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
             s_hw_voice_table_virt = NULL;
             s_hw_voice_table_phys = 0;
             apu_mem_shutdown();
+            alc_null_ram_release();
             free(device);
             alc_set_error(NULL, ALC_INVALID_VALUE);
             return NULL;
@@ -167,6 +253,7 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
             s_hw_voice_table_virt = NULL;
             s_hw_voice_table_phys = 0;
             apu_mem_shutdown();
+            alc_null_ram_release();
             free(device);
             alc_set_error(NULL, ALC_INVALID_VALUE);
             return NULL;
@@ -178,6 +265,9 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
         al_source_init_subsystem();
         al_listener_init();
         al_source_set_apu_base(apu_base);
+
+        s_session_apu_base = apu_base;
+        s_hw_dolby_active = (device->topology == APU_TOPOLOGY_SURROUND_51);
     }
 
     device->is_open = true;
@@ -236,6 +326,14 @@ ALC_API ALCboolean ALC_APIENTRY alcCloseDevice(ALCdevice *device) {
             }
 
             apu_mem_shutdown();
+
+            if (s_null_apu_ram != NULL) {
+                /* Do not leave the source subsystem pointing at freed RAM */
+                al_source_set_apu_base(0);
+                alc_null_ram_release();
+            }
+            s_session_apu_base = 0;
+            s_hw_dolby_active = false;
         }
     }
 
@@ -330,6 +428,9 @@ ALC_API void ALC_APIENTRY alcProcessContext(ALCcontext *context) {
         alc_set_error(NULL, ALC_INVALID_CONTEXT);
         return;
     }
+
+    /* Context processing doubles as the public voice frame tick */
+    alXboxUpdateVoices();
 }
 
 ALC_API void ALC_APIENTRY alcSuspendContext(ALCcontext *context) {
@@ -517,10 +618,7 @@ ALC_API ALCboolean ALC_APIENTRY alcIsExtensionPresent(ALCdevice *device, const A
 
 ALC_API void * ALC_APIENTRY alcGetProcAddress(ALCdevice *device, const ALCchar *funcname) {
     (void)device;
-    if (funcname != NULL && strcmp(funcname, "alXboxGetHardwareStatus") == 0) {
-        return (void *)alXboxGetHardwareStatus;
-    }
-    return NULL;
+    return alc_lookup_proc(funcname);
 }
 
 ALC_API ALCenum ALC_APIENTRY alcGetEnumValue(ALCdevice *device, const ALCchar *enumname) {
@@ -576,9 +674,11 @@ AL_API const ALchar * AL_APIENTRY alGetString(ALenum param) {
         case AL_VERSION:
             return "1.1";
         case AL_RENDERER:
-            return "MCPX APU";
+            return (alc_current_backend() == AL_XBOX_BACKEND_MMIO)
+                       ? "MCPX APU (MMIO backend)"
+                       : "MCPX APU (null backend)";
         case AL_EXTENSIONS:
-            return "AL_EXT_MCFORMATS AL_XBOX_hardware_status";
+            return "AL_XBOX_hardware_status AL_XBOX_update";
         default:
             alSetError(AL_INVALID_ENUM);
             return NULL;
@@ -589,21 +689,16 @@ AL_API ALboolean AL_APIENTRY alIsExtensionPresent(const ALchar *extname) {
     if (extname == NULL) {
         return AL_FALSE;
     }
-    if (strcmp(extname, "AL_EXT_MCFORMATS") == 0 ||
-        strcmp(extname, "AL_XBOX_hardware_status") == 0) {
+    /* Keep in sync with the alGetString(AL_EXTENSIONS) list */
+    if (strcmp(extname, "AL_XBOX_hardware_status") == 0 ||
+        strcmp(extname, "AL_XBOX_update") == 0) {
         return AL_TRUE;
     }
     return AL_FALSE;
 }
 
 AL_API void * AL_APIENTRY alGetProcAddress(const ALchar *fname) {
-    if (fname == NULL) {
-        return NULL;
-    }
-    if (strcmp(fname, "alXboxGetHardwareStatus") == 0) {
-        return (void *)alXboxGetHardwareStatus;
-    }
-    return NULL;
+    return alc_lookup_proc(fname);
 }
 
 AL_API ALenum AL_APIENTRY alGetEnumValue(const ALchar *ename) {
@@ -659,18 +754,18 @@ AL_API void AL_APIENTRY alXboxGetHardwareStatus(ALenum param, ALint *value) {
             break;
         }
 
+        /* Cached software state; no MMIO access (0 when no device is open) */
         case AL_XBOX_DOLBY_DIGITAL_ACTIVE:
-            *value = apu_is_dolby_digital_active(s_alc_apu_base) ? 1 : 0;
+            *value = (s_active_device_count > 0 && s_hw_dolby_active) ? 1 : 0;
             break;
 
-        case AL_XBOX_VP_BASE_PHYS: {
-            uint32_t phys_addr = apu_read32(s_alc_apu_base, NV_PAPU_VP_BASE_ADDR);
-            if (phys_addr == 0 && s_hw_voice_table_phys != 0) {
-                phys_addr = s_hw_voice_table_phys;
-            }
-            *value = (ALint)phys_addr;
+        case AL_XBOX_VP_BASE_PHYS:
+            *value = (s_active_device_count > 0) ? (ALint)s_hw_voice_table_phys : 0;
             break;
-        }
+
+        case AL_XBOX_BACKEND:
+            *value = alc_current_backend();
+            break;
 
         default:
             alSetError(AL_INVALID_ENUM);
@@ -678,3 +773,20 @@ AL_API void AL_APIENTRY alXboxGetHardwareStatus(ALenum param, ALint *value) {
     }
 }
 
+/*
+ * ============================================================================
+ * Xbox Voice Frame Tick (AL_XBOX_update)
+ * ============================================================================
+ */
+
+AL_API void AL_APIENTRY alXboxUpdateVoices(void) {
+    /*
+     * The tick reads APU state. With no device open the source subsystem
+     * base may be unconfigured, the real BAR0 default, or stale (freed
+     * null-backend RAM / a mock the caller has released): do not touch it.
+     */
+    if (s_active_device_count == 0) {
+        return;
+    }
+    al_source_update_frame();
+}

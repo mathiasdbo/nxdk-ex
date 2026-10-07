@@ -14,6 +14,13 @@
 
 #define MOCK_MMIO_SIZE 0x30000 /* 192 KB for BAR0 registers + PRAM @ 0x20000 */
 
+/* Function pointer -> void * without a cast that -std=c99 -pedantic rejects */
+static void *fn_to_ptr(void (*fn)(void)) {
+    void *p = NULL;
+    memcpy(&p, &fn, sizeof(p));
+    return p;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("=== Xbox Output Processor (EP) & Dolby Digital DSE Unit Test ===\n");
@@ -156,6 +163,15 @@ int main(void) {
         assert(alGetError() == AL_NO_ERROR);
     }
 
+    /* AL tokens are library-private values equal to the raw SMC register 0x04 codes */
+    assert(AL_XBOX_AV_PACK_SCART == 0x00);
+    assert(AL_XBOX_AV_PACK_HDTV == 0x01);
+    assert(AL_XBOX_AV_PACK_VGA == 0x02);
+    assert(AL_XBOX_AV_PACK_RFU == 0x03);
+    assert(AL_XBOX_AV_PACK_SVIDEO == 0x04);
+    assert(AL_XBOX_AV_PACK_COMPOSITE == 0x06);
+    assert(AL_XBOX_AV_PACK_NONE == 0x07);
+
     /* 5.3 Dolby Digital Active Token */
     /* In Stereo mode */
     apu_eeprom_set_mock(true, XC_AUDIO_FLAGS_STEREO, APU_AV_PACK_STANDARD);
@@ -184,6 +200,15 @@ int main(void) {
     assert(alGetError() == AL_NO_ERROR);
 
     alcCloseDevice(dev_51);
+
+    /* With no device open both cached queries report 0 (no MMIO is read) */
+    val = -1;
+    alXboxGetHardwareStatus(AL_XBOX_VP_BASE_PHYS, &val);
+    assert(val == 0);
+    val = -1;
+    alXboxGetHardwareStatus(AL_XBOX_DOLBY_DIGITAL_ACTIVE, &val);
+    assert(val == 0);
+    assert(alGetError() == AL_NO_ERROR);
     printf("    -> All 4 hardware query tokens returned correct physical parameters [PASS]\n");
 
     /*
@@ -207,15 +232,19 @@ int main(void) {
 
     /* Extension presence query */
     assert(alIsExtensionPresent("AL_XBOX_hardware_status") == AL_TRUE);
-    assert(alIsExtensionPresent("AL_EXT_MCFORMATS") == AL_TRUE);
+    assert(alIsExtensionPresent("AL_XBOX_update") == AL_TRUE);
+    /* Not advertised: alBufferData rejects the multichannel formats */
+    assert(alIsExtensionPresent("AL_EXT_MCFORMATS") == AL_FALSE);
     assert(alIsExtensionPresent("AL_NONEXISTENT_EXT") == AL_FALSE);
     assert(alIsExtensionPresent(NULL) == AL_FALSE);
 
     /* Proc address query */
     void *proc_al = alGetProcAddress("alXboxGetHardwareStatus");
-    assert(proc_al == (void *)alXboxGetHardwareStatus);
+    assert(proc_al == fn_to_ptr((void (*)(void))alXboxGetHardwareStatus));
     void *proc_alc = alcGetProcAddress(NULL, "alXboxGetHardwareStatus");
-    assert(proc_alc == (void *)alXboxGetHardwareStatus);
+    assert(proc_alc == fn_to_ptr((void (*)(void))alXboxGetHardwareStatus));
+    assert(alGetProcAddress("alXboxUpdateVoices") == fn_to_ptr((void (*)(void))alXboxUpdateVoices));
+    assert(alcGetProcAddress(NULL, "alXboxUpdateVoices") == fn_to_ptr((void (*)(void))alXboxUpdateVoices));
     assert(alGetProcAddress("nonExistentFunction") == NULL);
     assert(alGetProcAddress(NULL) == NULL);
 
@@ -223,6 +252,7 @@ int main(void) {
     const ALchar *ext_str = alGetString(AL_EXTENSIONS);
     assert(ext_str != NULL);
     assert(strstr(ext_str, "AL_XBOX_hardware_status") != NULL);
+    assert(strstr(ext_str, "AL_EXT_MCFORMATS") == NULL);
     printf("    -> Error checks, proc address queries, and extension string verified [PASS]\n");
 
     /* Teardown */

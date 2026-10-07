@@ -118,6 +118,7 @@ int main(void)
         debugPrint("FATAL: alcOpenDevice failed!\n");
         return 1;
     }
+    debugPrint("      Backend: %s\n", alGetString(AL_RENDERER)); /* default backend is silent, see README */
 
     debugPrint("[2/5] Creating OpenAL 1.1 context...\n");
     ALCcontext *ctx = alcCreateContext(device, NULL);
