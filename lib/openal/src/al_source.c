@@ -208,6 +208,20 @@ void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc) {
         x_rel = calc->local_pos[0] / calc->distance;
     }
     apu_calc_itd_taps(x_rel, &calc->itd_delay_left, &calc->itd_delay_right);
+
+    /* HRTF Biquad filter calculation:
+     * Elevation and longitudinal rear offset relative to listener frame:
+     * y_rel = local_pos[1] / distance, z_rel = local_pos[2] / distance (when distance > 0.00001f).
+     * Maps to Butterworth lowpass filter cutoff frequency fc at 48 kHz.
+     */
+    if (calc->distance > 0.00001f) {
+        float y_rel = calc->local_pos[1] / calc->distance;
+        float z_rel = calc->local_pos[2] / calc->distance;
+        float fc = apu_calc_elevation_cutoff(y_rel, z_rel);
+        apu_calc_butterworth_lowpass_q14(fc, 48000.0f, &calc->hrtf_coeffs);
+    } else {
+        apu_get_biquad_passthrough_q14(&calc->hrtf_coeffs);
+    }
 }
 
 void al_source_calc_spatial(const ALsource *src, AL_SPATIAL_CALC *calc) {
@@ -273,6 +287,21 @@ static void source_update_hw_itd(const ALsource *src) {
     }
 }
 
+static void source_update_hw_hrtf(const ALsource *src) {
+    if (src->state == AL_PLAYING && src->hw_voice_idx >= 0) {
+        NVAPU_VOICE_CONTEXT_3D *ctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
+        if (ctx && ctx->mode_3d) {
+            AL_SPATIAL_CALC calc;
+            al_source_calc_spatial(src, &calc);
+            ctx->hrtf_b0 = calc.hrtf_coeffs.b0;
+            ctx->hrtf_b1 = calc.hrtf_coeffs.b1;
+            ctx->hrtf_b2 = calc.hrtf_coeffs.b2;
+            ctx->hrtf_a1 = calc.hrtf_coeffs.a1;
+            ctx->hrtf_a2 = calc.hrtf_coeffs.a2;
+        }
+    }
+}
+
 void al_source_update_all_spatial(void) {
     ensure_subsystem_initialized();
     for (size_t i = 0; i < AL_MAX_SOURCES; i++) {
@@ -281,6 +310,7 @@ void al_source_update_all_spatial(void) {
             source_update_hw_gain(src);
             source_update_hw_pitch(src);
             source_update_hw_itd(src);
+            source_update_hw_hrtf(src);
         }
     }
 }
@@ -638,6 +668,7 @@ AL_API void AL_APIENTRY alSource3f(ALuint source, ALenum param, ALfloat v1, ALfl
             source_update_hw_gain(src);
             source_update_hw_pitch(src);
             source_update_hw_itd(src);
+            source_update_hw_hrtf(src);
             break;
 
         case AL_VELOCITY:
@@ -752,6 +783,8 @@ AL_API void AL_APIENTRY alSourcei(ALuint source, ALenum param, ALint value) {
             src->source_relative = (ALboolean)value;
             source_update_hw_gain(src);
             source_update_hw_pitch(src);
+            source_update_hw_itd(src);
+            source_update_hw_hrtf(src);
             break;
 
         default:
@@ -1093,17 +1126,29 @@ AL_API void AL_APIENTRY alSourcePlay(ALuint source) {
     ctx.master_vol_left = master_vol;
     ctx.master_vol_right = master_vol;
 
-    /* 3D mode & ITD configuration: mono sources enable full 3D processing */
+    /* 3D mode, ITD, and HRTF configuration: mono sources enable full 3D processing */
     if (src->buffer->channels == 1) {
         ctx.mode_3d = 1;
         ctx.itd_delay_left = calc.itd_delay_left;
         ctx.itd_delay_right = calc.itd_delay_right;
         ctx.itd_delay_buffer = apu_itd_get_voice_buffer_phys((uint32_t)idx);
+        ctx.hrtf_b0 = calc.hrtf_coeffs.b0;
+        ctx.hrtf_b1 = calc.hrtf_coeffs.b1;
+        ctx.hrtf_b2 = calc.hrtf_coeffs.b2;
+        ctx.hrtf_a1 = calc.hrtf_coeffs.a1;
+        ctx.hrtf_a2 = calc.hrtf_coeffs.a2;
     } else {
         ctx.mode_3d = 0;
         ctx.itd_delay_left = 0;
         ctx.itd_delay_right = 0;
         ctx.itd_delay_buffer = 0;
+        APU_BIQUAD_COEFFS_Q14 pass;
+        apu_get_biquad_passthrough_q14(&pass);
+        ctx.hrtf_b0 = pass.b0;
+        ctx.hrtf_b1 = pass.b1;
+        ctx.hrtf_b2 = pass.b2;
+        ctx.hrtf_a1 = pass.a1;
+        ctx.hrtf_a2 = pass.a2;
     }
 
     /* Route to MixBins 0 and 1 (Front Left, Front Right) at unity multiplier */

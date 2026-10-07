@@ -27,9 +27,25 @@ extern "C" {
 #define NV_PAPU_ITD_POOL_SIZE               (NV_PAPU_NUM_3D_VOICES * NV_PAPU_ITD_BUFFER_SIZE_PER_VOICE) /* 16384 bytes */
 
 /**
+ * Q14 Fixed-Point 2nd-Order Biquad Filter Coefficients.
+ * Used for HRTF elevation and pinna spectral cues on MCPX APU 3D voices.
+ * Scaling: 1.0f = 16384 (0x4000). Range: [-2.0, +1.999939] (-32768 to 32767).
+ *
+ * Difference equation:
+ * y[n] = b0 * x[n] + b1 * x[n-1] + b2 * x[n-2] - a1 * y[n-1] - a2 * y[n-2]
+ */
+typedef struct APU_BIQUAD_COEFFS_Q14 {
+    int16_t b0; /**< Feedforward coefficient tap 0 (Q14) */
+    int16_t b1; /**< Feedforward coefficient tap 1 (Q14) */
+    int16_t b2; /**< Feedforward coefficient tap 2 (Q14) */
+    int16_t a1; /**< Feedback coefficient tap 1 (Q14) */
+    int16_t a2; /**< Feedback coefficient tap 2 (Q14) */
+} APU_BIQUAD_COEFFS_Q14;
+
+/**
  * 3D Spatial Calculation Result Structure.
  * Holds calculated listener-relative coordinates, distance, attenuation gains,
- * Doppler pitch multipliers, and Woodworth ITD delay taps for an OpenAL source.
+ * Doppler pitch multipliers, Woodworth ITD delay taps, and HRTF biquad coefficients for an OpenAL source.
  */
 typedef struct AL_SPATIAL_CALC {
     float local_pos[3];       /**< Source position in listener local frame: right, up, front */
@@ -40,6 +56,7 @@ typedef struct AL_SPATIAL_CALC {
     float doppler_pitch;      /**< Doppler pitch multiplier (>1 approaching, <1 receding) */
     uint16_t itd_delay_left;  /**< ITD left ear delay tap in samples [0..64] */
     uint16_t itd_delay_right; /**< ITD right ear delay tap in samples [0..64] */
+    APU_BIQUAD_COEFFS_Q14 hrtf_coeffs; /**< HRTF elevation/pinna biquad coefficients in Q14 */
 } AL_SPATIAL_CALC;
 
 /**
@@ -178,6 +195,59 @@ uint16_t apu_calc_itd_delay_samples(float x_rel);
  * @param delay_right Pointer to store right ear delay tap in samples (0..64).
  */
 void apu_calc_itd_taps(float x_rel, uint16_t *delay_left, uint16_t *delay_right);
+
+/*
+ * ============================================================================
+ * HRTF Elevation & Pinna Spectral Filter Engine (Q14 Biquad)
+ * ============================================================================
+ */
+
+/**
+ * Calculate the lowpass cutoff frequency (in Hz) for HRTF elevation spectral cues.
+ *
+ * Formula:
+ *   - y_rel clamped to [-1.0f, 1.0f], z_rel clamped to [-1.0f, 1.0f]
+ *   - Base cutoff: f_base = 14000.0f + 4000.0f * y_rel
+ *   - Rear shadow: if z_rel > 0.0f, fc = f_base - 4000.0f * z_rel; else fc = f_base
+ *   - Clamped to [1000.0f, 20000.0f]
+ *
+ * @param y_rel Normalized vertical offset (y_local / distance).
+ * @param z_rel Normalized longitudinal depth offset (z_local / distance, >0 is rear).
+ * @return Cutoff frequency in Hz [1000.0f, 20000.0f].
+ */
+float apu_calc_elevation_cutoff(float y_rel, float z_rel);
+
+/**
+ * Calculate 2nd-order Butterworth lowpass biquad filter coefficients in Q14 fixed-point.
+ *
+ * Standard Butterworth 2nd-order lowpass:
+ *   - Q = 1 / sqrt(2) ~= 0.7071067811865475f
+ *   - w0 = 2.0f * PI * (cutoff_hz / sample_rate)
+ *   - alpha = sin(w0) / sqrt(2.0f)
+ *   - a0 = 1.0f + alpha
+ *   - b0 = (1.0f - cos(w0)) / (2.0f * a0)
+ *   - b1 = (1.0f - cos(w0)) / a0
+ *   - b2 = b0
+ *   - a1 = (-2.0f * cos(w0)) / a0
+ *   - a2 = (1.0f - alpha) / a0
+ *   - Q14: round(coeff * 16384.0f) clamped to [-32768, 32767]
+ *
+ * @param cutoff_hz   Cutoff frequency in Hz.
+ * @param sample_rate Sampling rate in Hz (typically 48000.0f).
+ * @param out_coeffs  Pointer to destination Q14 coefficients structure.
+ */
+void apu_calc_butterworth_lowpass_q14(float cutoff_hz, float sample_rate, APU_BIQUAD_COEFFS_Q14 *out_coeffs);
+
+/**
+ * Retrieve flat passthrough / neutral identity biquad filter coefficients in Q14.
+ *
+ * Preset:
+ *   - b0 = 16384 (1.0 in Q14)
+ *   - b1 = 0, b2 = 0, a1 = 0, a2 = 0
+ *
+ * @param out_coeffs Pointer to destination Q14 coefficients structure.
+ */
+void apu_get_biquad_passthrough_q14(APU_BIQUAD_COEFFS_Q14 *out_coeffs);
 
 /*
  * ============================================================================

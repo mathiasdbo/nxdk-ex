@@ -313,6 +313,109 @@ void apu_calc_itd_taps(float x_rel, uint16_t *delay_left, uint16_t *delay_right)
 
 /*
  * ============================================================================
+ * HRTF Elevation & Pinna Spectral Filter Engine (Q14 Biquad)
+ * ============================================================================
+ */
+
+float apu_calc_elevation_cutoff(float y_rel, float z_rel) {
+    if (isnan(y_rel)) {
+        y_rel = 0.0f;
+    }
+    if (isnan(z_rel)) {
+        z_rel = 0.0f;
+    }
+
+    if (y_rel < -1.0f) {
+        y_rel = -1.0f;
+    } else if (y_rel > 1.0f) {
+        y_rel = 1.0f;
+    }
+
+    if (z_rel < -1.0f) {
+        z_rel = -1.0f;
+    } else if (z_rel > 1.0f) {
+        z_rel = 1.0f;
+    }
+
+    float f_base = 14000.0f + 4000.0f * y_rel;
+    float fc;
+    if (z_rel > 0.0f) {
+        fc = f_base - 4000.0f * z_rel;
+    } else {
+        fc = f_base;
+    }
+
+    if (fc < 1000.0f) {
+        fc = 1000.0f;
+    } else if (fc > 20000.0f) {
+        fc = 20000.0f;
+    }
+
+    return fc;
+}
+
+static int16_t float_to_q14(float val) {
+    float scaled = roundf(val * 16384.0f);
+    if (scaled > 32767.0f) {
+        return 32767;
+    }
+    if (scaled < -32768.0f) {
+        return -32768;
+    }
+    return (int16_t)scaled;
+}
+
+void apu_calc_butterworth_lowpass_q14(float cutoff_hz, float sample_rate, APU_BIQUAD_COEFFS_Q14 *out_coeffs) {
+    if (!out_coeffs) {
+        return;
+    }
+
+    if (isnan(cutoff_hz) || cutoff_hz <= 0.0f) {
+        apu_get_biquad_passthrough_q14(out_coeffs);
+        return;
+    }
+
+    if (sample_rate <= 0.0f) {
+        sample_rate = 48000.0f;
+    }
+
+    /* Guard cutoff against Nyquist frequency limit */
+    float nyquist = sample_rate * 0.5f;
+    if (cutoff_hz >= nyquist) {
+        cutoff_hz = nyquist * 0.999f;
+    }
+
+    float w0 = 2.0f * 3.14159265358979323846f * (cutoff_hz / sample_rate);
+    float alpha = sinf(w0) / 1.4142135623730951f; /* sin(w0) / sqrt(2) */
+    float a0 = 1.0f + alpha;
+
+    float cos_w0 = cosf(w0);
+    float b0 = (1.0f - cos_w0) / (2.0f * a0);
+    float b1 = (1.0f - cos_w0) / a0;
+    float b2 = b0;
+    float a1 = (-2.0f * cos_w0) / a0;
+    float a2 = (1.0f - alpha) / a0;
+
+    out_coeffs->b0 = float_to_q14(b0);
+    out_coeffs->b1 = float_to_q14(b1);
+    out_coeffs->b2 = float_to_q14(b2);
+    out_coeffs->a1 = float_to_q14(a1);
+    out_coeffs->a2 = float_to_q14(a2);
+}
+
+void apu_get_biquad_passthrough_q14(APU_BIQUAD_COEFFS_Q14 *out_coeffs) {
+    if (!out_coeffs) {
+        return;
+    }
+    out_coeffs->b0 = 16384;
+    out_coeffs->b1 = 0;
+    out_coeffs->b2 = 0;
+    out_coeffs->a1 = 0;
+    out_coeffs->a2 = 0;
+}
+
+/*
+ * ============================================================================
  * ITD Circular Buffer Subsystem API
  * ============================================================================
  */
