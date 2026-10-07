@@ -5,9 +5,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include "apu_eeprom.h"
 
 #ifdef __cplusplus
 extern "C" {
+#endif
+
+#ifndef ALC_XBOX_TOPOLOGY
+#define ALC_XBOX_TOPOLOGY               0x1014
 #endif
 
 /*
@@ -28,6 +33,7 @@ struct ALCdevice_struct {
     uint32_t context_count;             /**< Number of active contexts created on device */
     ALCcontext *active_context;         /**< Pointer to currently active context (if any) */
     uintptr_t apu_base;                 /**< MMIO base address (NV_PAPU_BASE or mock) */
+    APU_AUDIO_TOPOLOGY topology;        /**< Active audio output topology (Stereo 2.0 or 5.1) */
 };
 
 /**

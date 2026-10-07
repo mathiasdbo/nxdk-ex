@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "apu_hardware.h"
+#include "apu_eeprom.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -232,6 +233,144 @@ static inline int apu_gp_is_running(uintptr_t apu_base)
 static inline int apu_load_microcode(const uint32_t *ucode, size_t dword_count)
 {
     return apu_gp_load_microcode(NV_PAPU_BASE, ucode, dword_count);
+}
+
+/**
+ * Load microcode binary and configure Output Processor (EP) FIFO corresponding
+ * to target audio topology (Stereo 2.0 or Surround 5.1).
+ *
+ * - APU_TOPOLOGY_SURROUND_51: loads gp_passthrough_51_bin (81 DWORDs),
+ *   sets NV_PAPU_EP_FIFO_CONFIG to 0x3F (NV_PAPU_EP_FIFO_CONFIG_SURROUND).
+ * - APU_TOPOLOGY_STEREO_20: loads gp_stereo_downmix_bin (86 DWORDs),
+ *   sets NV_PAPU_EP_FIFO_CONFIG to 0x03 (NV_PAPU_EP_FIFO_CONFIG_STEREO).
+ *
+ * @param apu_base Base MMIO address of APU (or 0 for default NV_PAPU_BASE).
+ * @param topology Target topology (APU_TOPOLOGY_STEREO_20 or APU_TOPOLOGY_SURROUND_51).
+ * @return 0 on success, negative value on error.
+ */
+static inline int apu_gp_load_topology_microcode(uintptr_t apu_base, APU_AUDIO_TOPOLOGY topology)
+{
+    if (apu_base == 0) {
+        apu_base = NV_PAPU_BASE;
+    }
+
+    if (topology == APU_TOPOLOGY_SURROUND_51) {
+        int res = apu_gp_load_microcode(apu_base, gp_passthrough_51_bin, GP_PASSTHROUGH_51_SIZE);
+        if (res != 0) {
+            return res;
+        }
+        apu_write32(apu_base, NV_PAPU_EP_FIFO_CONFIG, NV_PAPU_EP_FIFO_CONFIG_SURROUND);
+        return 0;
+    } else if (topology == APU_TOPOLOGY_STEREO_20) {
+        int res = apu_gp_load_microcode(apu_base, gp_stereo_downmix_bin, GP_STEREO_DOWNMIX_SIZE);
+        if (res != 0) {
+            return res;
+        }
+        apu_write32(apu_base, NV_PAPU_EP_FIFO_CONFIG, NV_PAPU_EP_FIFO_CONFIG_STEREO);
+        return 0;
+    }
+
+    return -1;
+}
+
+/*
+ * ----------------------------------------------------------------------------
+ * DSP56300 ITU-R BS.775 Reference Arithmetic & Downmix Simulation
+ * ----------------------------------------------------------------------------
+ */
+#define APU_DSP56K_Q23_FACTOR_3DB        0x5A827Au
+#define APU_DSP56K_SAMPLE_MAX_24         8388607
+#define APU_DSP56K_SAMPLE_MIN_24        (-8388608)
+
+/**
+ * 24-bit fixed-point Q23 multiplication with symmetric rounding.
+ * Simulates Motorola DSP56300 MACR / MPY scaling.
+ *
+ * @param val 24-bit signed sample value [-8388608, 8388607].
+ * @param coeff 24-bit unsigned/signed Q23 coefficient (e.g. 0x5A827A).
+ * @return 24-bit scaled integer.
+ */
+static inline int32_t apu_dsp56k_q23_mul(int32_t val, int32_t coeff)
+{
+    int64_t prod = (int64_t)val * (int64_t)coeff;
+    int64_t round_const = 1LL << 22;
+    int64_t res;
+    if (prod >= 0) {
+        res = (prod + round_const) >> 23;
+    } else {
+        res = -((-prod + round_const) >> 23);
+    }
+    return (int32_t)res;
+}
+
+/**
+ * Saturate 64-bit value to 24-bit signed range [-8388608, 8388607].
+ * Simulates Motorola DSP56300 Saturation Mode enabled via ORI #$001000, SR.
+ *
+ * @param val 64-bit accumulator value.
+ * @return 24-bit saturated integer.
+ */
+static inline int32_t apu_dsp56k_saturate24(int64_t val)
+{
+    if (val > (int64_t)APU_DSP56K_SAMPLE_MAX_24) {
+        return APU_DSP56K_SAMPLE_MAX_24;
+    }
+    if (val < (int64_t)APU_DSP56K_SAMPLE_MIN_24) {
+        return APU_DSP56K_SAMPLE_MIN_24;
+    }
+    return (int32_t)val;
+}
+
+/**
+ * DSP56300 ITU-R BS.775 5.1 downmix reference function for host simulation.
+ *
+ * Mathematical equations:
+ *   Left  = FL + 0.70710678 * Center + 0.70710678 * SL
+ *   Right = FR + 0.70710678 * Center + 0.70710678 * SR
+ *
+ * Coefficients:
+ *   Q23 factor 0x5A827A (round(0.70710678 * 8388608)).
+ *
+ * Channel mapping:
+ *   mixbins[0] = Front Left  (FL)
+ *   mixbins[1] = Front Right (FR)
+ *   mixbins[2] = Surround Left (SL)
+ *   mixbins[3] = Surround Right (SR)
+ *   mixbins[4] = Center (C)
+ *   mixbins[5] = LFE (Subwoofer - bypassed in stereo downmix)
+ *
+ * @param mixbins Array of 6 discrete 24-bit signed input samples [-8388608, 8388607].
+ * @param out_left Destination pointer for saturated 24-bit Left output.
+ * @param out_right Destination pointer for saturated 24-bit Right output.
+ */
+static inline void apu_dsp56k_itur_downmix(const int32_t mixbins[6], int32_t *out_left, int32_t *out_right)
+{
+    if (mixbins == NULL) {
+        if (out_left != NULL) *out_left = 0;
+        if (out_right != NULL) *out_right = 0;
+        return;
+    }
+
+    int32_t fl = mixbins[0];
+    int32_t fr = mixbins[1];
+    int32_t sl = mixbins[2];
+    int32_t sr = mixbins[3];
+    int32_t c  = mixbins[4];
+    /* mixbins[5] is LFE, bypassed in ITU-R BS.775 stereo downmix */
+
+    int32_t c_scaled  = apu_dsp56k_q23_mul(c, (int32_t)APU_DSP56K_Q23_FACTOR_3DB);
+    int32_t sl_scaled = apu_dsp56k_q23_mul(sl, (int32_t)APU_DSP56K_Q23_FACTOR_3DB);
+    int32_t sr_scaled = apu_dsp56k_q23_mul(sr, (int32_t)APU_DSP56K_Q23_FACTOR_3DB);
+
+    int64_t left_acc  = (int64_t)fl + (int64_t)c_scaled + (int64_t)sl_scaled;
+    int64_t right_acc = (int64_t)fr + (int64_t)c_scaled + (int64_t)sr_scaled;
+
+    if (out_left != NULL) {
+        *out_left = apu_dsp56k_saturate24(left_acc);
+    }
+    if (out_right != NULL) {
+        *out_right = apu_dsp56k_saturate24(right_acc);
+    }
 }
 
 #ifdef __cplusplus
