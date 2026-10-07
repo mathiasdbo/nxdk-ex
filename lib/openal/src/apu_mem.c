@@ -1,8 +1,9 @@
 #include "apu_mem.h"
+#include "apu_platform.h"
 #include <string.h>
 #include <stdlib.h>
 
-#if defined(__NXDK__) || defined(_XBOX)
+#ifdef OPENAL_TARGET_XBOX
 #include <xboxkrnl/xboxkrnl.h>
 #ifndef NVAPU_MAXRAM
 #define NVAPU_MAXRAM 0x03FFAFFF
@@ -39,8 +40,30 @@ static void    *s_pool_virt = NULL;
 static uint32_t s_pool_phys = 0;
 static size_t   s_pool_size = 0;
 
-#if !defined(__NXDK__) && !defined(_XBOX)
+#ifndef OPENAL_TARGET_XBOX
 static void    *s_host_raw_pool = NULL;
+
+/*
+ * Host fallback for blocks that do not fit the pool. malloc() does not honour
+ * alignments above its own, so over-allocate and keep the raw pointer just
+ * below the aligned block for apu_mem_free(). alignment is a power of 2 >= 8.
+ */
+static void *host_direct_alloc(size_t size, size_t alignment) {
+    size_t extra = alignment + sizeof(void *);
+    uint8_t *raw;
+    uintptr_t user;
+
+    if (size > SIZE_MAX - extra) {
+        return NULL;
+    }
+    raw = (uint8_t *)malloc(size + extra);
+    if (!raw) {
+        return NULL;
+    }
+    user = ((uintptr_t)raw + sizeof(void *) + (alignment - 1)) & ~(uintptr_t)(alignment - 1);
+    ((void **)user)[-1] = raw;
+    return (void *)user;
+}
 #endif
 
 int apu_mem_init(size_t pool_size) {
@@ -60,7 +83,7 @@ int apu_mem_init(size_t pool_size) {
     /* Page-align pool size (4096 bytes) */
     pool_size = (pool_size + 4095u) & ~(size_t)4095u;
 
-#if defined(__NXDK__) || defined(_XBOX)
+#ifdef OPENAL_TARGET_XBOX
     s_pool_virt = MmAllocateContiguousMemoryEx(
         pool_size,
         0,
@@ -101,7 +124,7 @@ void apu_mem_shutdown(void) {
         return;
     }
 
-#if defined(__NXDK__) || defined(_XBOX)
+#ifdef OPENAL_TARGET_XBOX
     MmFreeContiguousMemory(s_pool_virt);
 #else
     if (s_host_raw_pool) {
@@ -120,7 +143,7 @@ uint32_t apu_mem_get_physical_address(const void *ptr) {
         return 0;
     }
 
-#if defined(__NXDK__) || defined(_XBOX)
+#ifdef OPENAL_TARGET_XBOX
     return (uint32_t)MmGetPhysicalAddress((void *)ptr);
 #else
     if (s_pool_virt &&
@@ -179,6 +202,18 @@ void *apu_mem_alloc_phys(size_t size, size_t alignment, uint32_t *out_phys) {
             uintptr_t header_end = (uintptr_t)curr + sizeof(apu_chunk_t);
             uintptr_t min_user = header_end + sizeof(apu_chunk_t *);
             uintptr_t cand_user = (min_user + (alignment - 1)) & ~(alignment - 1);
+            uintptr_t chunk_end = (uintptr_t)curr + curr->total_size;
+
+            /*
+             * The aligned block must lie entirely inside this free chunk. Decide
+             * that before writing any header: the leading split below only moves
+             * the chunk header (cand_user is unchanged), so a block that does not
+             * fit here must never touch the following chunk.
+             */
+            if (cand_user < min_user || cand_user > chunk_end || size > chunk_end - cand_user) {
+                curr = curr->next;
+                continue;
+            }
 
             /* Split leading free chunk if large alignment offset introduces sufficient slack */
             uintptr_t cand_chunk_addr = (cand_user - sizeof(apu_chunk_t) - sizeof(apu_chunk_t *)) & ~((uintptr_t)7u);
@@ -206,7 +241,7 @@ void *apu_mem_alloc_phys(size_t size, size_t alignment, uint32_t *out_phys) {
 
             {
                 size_t user_offset = (size_t)(cand_user - (uintptr_t)curr);
-                size_t needed = (user_offset + size + 7u) & ~7u;
+                size_t needed = (user_offset + size + 7u) & ~(size_t)7u;
 
                 if (curr->total_size >= needed) {
                     void *user_ptr;
@@ -246,7 +281,7 @@ void *apu_mem_alloc_phys(size_t size, size_t alignment, uint32_t *out_phys) {
     }
 
     /* Fallback to direct contiguous kernel allocation if pool is exhausted or insufficient */
-#if defined(__NXDK__) || defined(_XBOX)
+#ifdef OPENAL_TARGET_XBOX
     {
         void *direct = MmAllocateContiguousMemoryEx(
             size,
@@ -269,7 +304,7 @@ void *apu_mem_alloc_phys(size_t size, size_t alignment, uint32_t *out_phys) {
     }
 #else
     {
-        void *direct = malloc(size);
+        void *direct = host_direct_alloc(size, alignment);
         if (direct) {
             memset(direct, 0, size);
             if (out_phys) {
@@ -319,10 +354,10 @@ void apu_mem_free(void *ptr) {
         }
     } else {
         /* Direct standalone allocation */
-#if defined(__NXDK__) || defined(_XBOX)
+#ifdef OPENAL_TARGET_XBOX
         MmFreeContiguousMemory(ptr);
 #else
-        free(ptr);
+        free(((void **)ptr)[-1]);
 #endif
     }
 }
