@@ -106,6 +106,14 @@ void al_source_update_all_spatial(void);
  */
 void al_source_calc_spatial(const ALsource *src, AL_SPATIAL_CALC *calc);
 
+/**
+ * Perform complete 3D spatial calculation for a given source object (mutable alias).
+ *
+ * @param src  Source object pointer.
+ * @param calc Destination spatial calculation result structure.
+ */
+void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc);
+
 /*
  * ============================================================================
  * OpenAL 1.1 Source API Prototypes
