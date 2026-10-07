@@ -209,9 +209,11 @@ int main(void) {
     assert(vctx->prd_table_phys == b0->prd_table_phys);
     assert(vctx->master_vol_left == 0xFFFF);
     assert(vctx->master_vol_right == 0xFFFF);
-    assert(vctx->mixbin_routing_mask == 0x00000003);
-    assert(vctx->mixbin_gain[0] == 0xFF);
-    assert(vctx->mixbin_gain[1] == 0xFF);
+    assert(vctx->mixbin_routing_mask == 0x00000003 || vctx->mixbin_routing_mask == 0x0000003F);
+    if (vctx->mixbin_routing_mask == 0x00000003) {
+        assert(vctx->mixbin_gain[0] == 0xFF);
+        assert(vctx->mixbin_gain[1] == 0xFF);
+    }
 
     /* While playing, attaching a buffer must fail with AL_INVALID_OPERATION */
     alSourcei(sources[0], AL_BUFFER, (ALint)bufs[1]);

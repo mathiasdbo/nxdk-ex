@@ -43,9 +43,23 @@ typedef struct APU_BIQUAD_COEFFS_Q14 {
 } APU_BIQUAD_COEFFS_Q14;
 
 /**
+ * 5.1 Multichannel Equal-Power Panning Gains (ITU-R BS.775).
+ * Holds linear amplitude factors for the 5 full-range satellite channels and subwoofer LFE.
+ */
+typedef struct APU_PAN_GAINS_51 {
+    float fl;  /* Front Left (MixBin 0) */
+    float fr;  /* Front Right (MixBin 1) */
+    float sl;  /* Surround Left (MixBin 2) */
+    float sr;  /* Surround Right (MixBin 3) */
+    float c;   /* Center (MixBin 4) */
+    float lfe; /* Subwoofer LFE (MixBin 5) */
+} APU_PAN_GAINS_51;
+
+/**
  * 3D Spatial Calculation Result Structure.
  * Holds calculated listener-relative coordinates, distance, attenuation gains,
- * Doppler pitch multipliers, Woodworth ITD delay taps, and HRTF biquad coefficients for an OpenAL source.
+ * Doppler pitch multipliers, Woodworth ITD delay taps, HRTF biquad coefficients,
+ * and 5.1 equal-power panning gains / hardware MixBin multipliers for an OpenAL source.
  */
 typedef struct AL_SPATIAL_CALC {
     float local_pos[3];       /**< Source position in listener local frame: right, up, front */
@@ -57,6 +71,8 @@ typedef struct AL_SPATIAL_CALC {
     uint16_t itd_delay_left;  /**< ITD left ear delay tap in samples [0..64] */
     uint16_t itd_delay_right; /**< ITD right ear delay tap in samples [0..64] */
     APU_BIQUAD_COEFFS_Q14 hrtf_coeffs; /**< HRTF elevation/pinna biquad coefficients in Q14 */
+    APU_PAN_GAINS_51 pan_gains_51;     /**< 5.1 ITU-R BS.775 equal-power panning gains */
+    uint8_t mixbin_gain[16];           /**< MixBin 0..15 8-bit linear multipliers */
 } AL_SPATIAL_CALC;
 
 /**
@@ -251,9 +267,60 @@ void apu_get_biquad_passthrough_q14(APU_BIQUAD_COEFFS_Q14 *out_coeffs);
 
 /*
  * ============================================================================
+ * ITU-R BS.775 5.1 Equal-Power Panning Engine
+ * ============================================================================
+ */
+
+/**
+ * Calculate equal-power 5.1 multichannel panning gains based on ITU-R BS.775
+ * speaker geometry and listener-relative horizontal azimuth.
+ *
+ * Speaker layout (azimuth):
+ *   - Center (C):          0.0 rad (0 deg)
+ *   - Front Right (FR):    pi/6 rad (30 deg)
+ *   - Surround Right (SR): 11*pi/18 rad (110 deg)
+ *   - Surround Left (SL):  25*pi/18 rad (250 deg)
+ *   - Front Left (FL):     11*pi/6 rad (330 deg)
+ *
+ * Pairwise equal-power panning across 5 active arcs:
+ *   - Sector 0: [0, FR] (C to FR): g_C = cos(phi * pi/2), g_FR = sin(phi * pi/2)
+ *   - Sector 1: [FR, SR] (FR to SR): g_FR = cos(phi * pi/2), g_SR = sin(phi * pi/2)
+ *   - Sector 2: [SR, SL] (SR to SL, Rear): g_SR = cos(phi * pi/2), g_SL = sin(phi * pi/2)
+ *   - Sector 3: [SL, FL] (SL to FL): g_SL = cos(phi * pi/2), g_FL = sin(phi * pi/2)
+ *   - Sector 4: [FL, 2*pi) (FL to C): g_FL = cos(phi * pi/2), g_C = sin(phi * pi/2)
+ *
+ * If horizontal radius < 0.00001f, gains are evenly distributed across FL, FR, SL, SR (0.5f each), C = 0.0f.
+ *
+ * @param x_local    Listener-relative horizontal lateral coordinate (+right, -left).
+ * @param z_local    Listener-relative longitudinal depth coordinate (-front, +behind).
+ * @param lfe_factor Subwoofer LFE gain factor [0.0..1.0].
+ * @param out_gains  Pointer to destination 5.1 panning gains structure.
+ */
+void apu_calc_panning_51(float x_local, float z_local, float lfe_factor, APU_PAN_GAINS_51 *out_gains);
+
+/**
+ * Quantize 5.1 floating-point panning gains to 8-bit linear hardware MixBin multipliers.
+ *
+ * Mapping:
+ *   - MixBin 0 (FL)  = round(pan_gains->fl * 255.0f) clamped to [0, 255]
+ *   - MixBin 1 (FR)  = round(pan_gains->fr * 255.0f) clamped to [0, 255]
+ *   - MixBin 2 (SL)  = round(pan_gains->sl * 255.0f) clamped to [0, 255]
+ *   - MixBin 3 (SR)  = round(pan_gains->sr * 255.0f) clamped to [0, 255]
+ *   - MixBin 4 (C)   = round(pan_gains->c * 255.0f) clamped to [0, 255]
+ *   - MixBin 5 (LFE) = round(pan_gains->lfe * 255.0f) clamped to [0, 255]
+ *   - MixBins 6..15  = 0
+ *
+ * @param pan_gains    Pointer to source 5.1 panning gains structure.
+ * @param out_mixbins  16-byte array for destination 8-bit hardware MixBin multipliers.
+ */
+void apu_calc_mixbin_gains_51(const APU_PAN_GAINS_51 *pan_gains, uint8_t out_mixbins[16]);
+
+/*
+ * ============================================================================
  * ITD Circular Buffer Subsystem API
  * ============================================================================
  */
+
 
 /**
  * Initialize the hardware ITD circular buffer subsystem pool.

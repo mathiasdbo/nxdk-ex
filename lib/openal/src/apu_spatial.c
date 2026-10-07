@@ -416,9 +416,145 @@ void apu_get_biquad_passthrough_q14(APU_BIQUAD_COEFFS_Q14 *out_coeffs) {
 
 /*
  * ============================================================================
+ * ITU-R BS.775 5.1 Equal-Power Panning Engine
+ * ============================================================================
+ * Speaker Azimuth Angles:
+ *   - Center (C):          0.0 rad (0 deg)
+ *   - Front Right (FR):    pi/6 rad (30 deg)
+ *   - Surround Right (SR): 11*pi/18 rad (110 deg)
+ *   - Surround Left (SL):  25*pi/18 rad (250 deg)
+ *   - Front Left (FL):     11*pi/6 rad (330 deg)
+ * ============================================================================
+ */
+
+#ifndef APU_PI
+#define APU_PI       3.14159265358979323846f
+#endif
+#define APU_TWO_PI   (2.0f * APU_PI)
+#define APU_HALF_PI  (0.5f * APU_PI)
+
+#define APU_AZIMUTH_C   (0.0f)
+#define APU_AZIMUTH_FR  (APU_PI / 6.0f)
+#define APU_AZIMUTH_SR  (11.0f * APU_PI / 18.0f)
+#define APU_AZIMUTH_SL  (25.0f * APU_PI / 18.0f)
+#define APU_AZIMUTH_FL  (11.0f * APU_PI / 6.0f)
+
+static uint8_t float_to_gain8(float g) {
+    if (isnan(g) || g <= 0.0f) {
+        return 0;
+    }
+    float scaled = roundf(g * 255.0f);
+    if (scaled >= 255.0f) {
+        return 255;
+    }
+    return (uint8_t)scaled;
+}
+
+void apu_calc_panning_51(float x_local, float z_local, float lfe_factor, APU_PAN_GAINS_51 *out_gains) {
+    if (!out_gains) {
+        return;
+    }
+
+    /* Clamp LFE factor to [0.0f, 1.0f] */
+    float lfe = lfe_factor;
+    if (isnan(lfe) || lfe < 0.0f) {
+        lfe = 0.0f;
+    } else if (lfe > 1.0f) {
+        lfe = 1.0f;
+    }
+    out_gains->lfe = lfe;
+
+    if (isnan(x_local) || isnan(z_local)) {
+        out_gains->fl = 0.5f;
+        out_gains->fr = 0.5f;
+        out_gains->sl = 0.5f;
+        out_gains->sr = 0.5f;
+        out_gains->c  = 0.0f;
+        return;
+    }
+
+    float r = sqrtf(x_local * x_local + z_local * z_local);
+    if (r < 0.00001f) {
+        /* Evenly distributed across FL, FR, SL, SR (0.5f each), C = 0.0f */
+        out_gains->fl = 0.5f;
+        out_gains->fr = 0.5f;
+        out_gains->sl = 0.5f;
+        out_gains->sr = 0.5f;
+        out_gains->c  = 0.0f;
+        return;
+    }
+
+    /* Azimuth angle theta = atan2f(x_local, -z_local). Wrap negative to [0, 2*pi) */
+    float theta = atan2f(x_local, -z_local);
+    if (theta < 0.0f) {
+        theta += APU_TWO_PI;
+    }
+    while (theta >= APU_TWO_PI) {
+        theta -= APU_TWO_PI;
+    }
+    if (theta < 0.0f) {
+        theta = 0.0f;
+    }
+
+    out_gains->fl = 0.0f;
+    out_gains->fr = 0.0f;
+    out_gains->sl = 0.0f;
+    out_gains->sr = 0.0f;
+    out_gains->c  = 0.0f;
+
+    /* Pairwise equal-power panning */
+    if (theta >= APU_AZIMUTH_C && theta < APU_AZIMUTH_FR) {
+        /* Sector 0: [0, FR] (C to FR) */
+        float phi = (theta - APU_AZIMUTH_C) / (APU_AZIMUTH_FR - APU_AZIMUTH_C);
+        if (phi < 0.0f) phi = 0.0f; else if (phi > 1.0f) phi = 1.0f;
+        out_gains->c  = cosf(phi * APU_HALF_PI);
+        out_gains->fr = sinf(phi * APU_HALF_PI);
+    } else if (theta >= APU_AZIMUTH_FR && theta < APU_AZIMUTH_SR) {
+        /* Sector 1: [FR, SR] (FR to SR) */
+        float phi = (theta - APU_AZIMUTH_FR) / (APU_AZIMUTH_SR - APU_AZIMUTH_FR);
+        if (phi < 0.0f) phi = 0.0f; else if (phi > 1.0f) phi = 1.0f;
+        out_gains->fr = cosf(phi * APU_HALF_PI);
+        out_gains->sr = sinf(phi * APU_HALF_PI);
+    } else if (theta >= APU_AZIMUTH_SR && theta < APU_AZIMUTH_SL) {
+        /* Sector 2: [SR, SL] (SR to SL, Rear) */
+        float phi = (theta - APU_AZIMUTH_SR) / (APU_AZIMUTH_SL - APU_AZIMUTH_SR);
+        if (phi < 0.0f) phi = 0.0f; else if (phi > 1.0f) phi = 1.0f;
+        out_gains->sr = cosf(phi * APU_HALF_PI);
+        out_gains->sl = sinf(phi * APU_HALF_PI);
+    } else if (theta >= APU_AZIMUTH_SL && theta < APU_AZIMUTH_FL) {
+        /* Sector 3: [SL, FL] (SL to FL) */
+        float phi = (theta - APU_AZIMUTH_SL) / (APU_AZIMUTH_FL - APU_AZIMUTH_SL);
+        if (phi < 0.0f) phi = 0.0f; else if (phi > 1.0f) phi = 1.0f;
+        out_gains->sl = cosf(phi * APU_HALF_PI);
+        out_gains->fl = sinf(phi * APU_HALF_PI);
+    } else {
+        /* Sector 4: [FL, 2*pi) (FL to C) */
+        float phi = (theta - APU_AZIMUTH_FL) / (APU_TWO_PI - APU_AZIMUTH_FL);
+        if (phi < 0.0f) phi = 0.0f; else if (phi > 1.0f) phi = 1.0f;
+        out_gains->fl = cosf(phi * APU_HALF_PI);
+        out_gains->c  = sinf(phi * APU_HALF_PI);
+    }
+}
+
+void apu_calc_mixbin_gains_51(const APU_PAN_GAINS_51 *pan_gains, uint8_t out_mixbins[16]) {
+    if (!pan_gains || !out_mixbins) {
+        return;
+    }
+    memset(out_mixbins, 0, 16);
+    out_mixbins[0] = float_to_gain8(pan_gains->fl);
+    out_mixbins[1] = float_to_gain8(pan_gains->fr);
+    out_mixbins[2] = float_to_gain8(pan_gains->sl);
+    out_mixbins[3] = float_to_gain8(pan_gains->sr);
+    out_mixbins[4] = float_to_gain8(pan_gains->c);
+    out_mixbins[5] = float_to_gain8(pan_gains->lfe);
+}
+
+/*
+ * ============================================================================
  * ITD Circular Buffer Subsystem API
  * ============================================================================
  */
+
 
 int apu_itd_subsystem_init(void) {
     if (s_itd_initialized && s_itd_virt != NULL) {
