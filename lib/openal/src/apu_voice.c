@@ -90,6 +90,7 @@ void apu_voice_context_reset(NVAPU_VOICE_CONTEXT_3D *ctx)
     ctx->mode_3d = 1u;
     ctx->active = 0u;
     ctx->pitch_step = APU_PITCH_STEP_UNITY;
+    ctx->hrtf_b0 = 16384; /* Default Q14 identity passthrough (b0 = 1.0) */
 }
 
 int apu_voice_setup(uint32_t index, const NVAPU_VOICE_CONTEXT_3D *ctx)
