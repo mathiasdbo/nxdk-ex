@@ -14,23 +14,58 @@ extern "C" {
  * ============================================================================
  * Xbox MCPX APU Voice Processor (VP) Voice Context & Management Definitions
  * ============================================================================
- * The Voice Processor operates in 64 3D voice mode or 256 2D voice mode.
- * In 3D mode, each voice context is 128 bytes (32 DWORDs) and includes:
- *   - Resampler phase & 16.16 pitch step (polyphase resampler)
- *   - PRD table DMA pointers & fractional phase
- *   - EG1 (ADSR) amplitude and EG2 pitch/cutoff envelopes
- *   - ITD sample delay buffer (0..64 samples)
- *   - Q14 fixed-point HRTF biquad filtering (b0, b1, b2, a1, a2)
- *   - MixBin routing masks (MixBins 0..31) and 8-bit linear gain multipliers
+ * WARNING: NVAPU_VOICE_CONTEXT_3D below is a SOFTWARE MODEL. It is NOT the
+ * NV_PAVS voice record that the VP reads. In xemu (478b4f4) a voice is 0x80
+ * bytes at VPVADDR + handle * 0x80, with DWORD 0 = CFG_VBIN, DWORD 1 =
+ * CFG_FMT, 0x54 = PAR_STATE (ACTIVE_VOICE is bit 21), 0x58 = current buffer
+ * offset (CBO) and 0x7C = next-voice handle | pitch. Only the size (128 bytes)
+ * coincides. Voices are programmed with front-end methods, not by writing
+ * this structure. Differences that matter (details and xemu source
+ * references: lib/openal/docs/XEMU_VERIFICATION.md):
+ *  - Pitch: hardware TAR_PITCH is a signed 16-bit log2 value in 4.12 fixed
+ *    point (bits 31:16 of the method argument), p = round(4096 *
+ *    log2(src_rate / 48000)). The 16.16 linear step used here is a model
+ *    value only.
+ *  - Volume: hardware volumes are 12-bit ATTENUATIONS in 1/64 dB, where 0 is
+ *    unity (0 dB) and 0xFFF is mute. The linear gains used here (0 = silence)
+ *    have the OPPOSITE polarity: a zero-filled voice record mixes all eight
+ *    outputs at 0 dB into bin 0. (For handles < 64 only outputs 0-3 are
+ *    redirected to the four HRTF submix bins; outputs 4-7 still use the
+ *    record's bins, i.e. bin 0. With HRTF enabled, a zero HRTF handle on such
+ *    a voice is not the null handle (null is 0xFFFF), so the voice is silent
+ *    unless a table entry was latched.)
+ *  - Routing: 8 (5-bit mixbin, 12-bit attenuation) outputs per voice, not a
+ *    mixbin bitmask plus 16 gains.
+ *  - 3D: HRTF is a 31-tap FIR plus one ITD (+/- 42 samples) taken from a
+ *    128-entry table loaded by methods, for handles < 64 only. There is no
+ *    Q14 biquad or RAM ITD buffer in the voice record.
+ *  - Buffers: a global SGE page table (VPSGEADDR) and sample-unit offsets
+ *    (CBO/LBO/EBO), not per-buffer PRD lists with byte offsets.
+ *  - 256 voice handles coexist (no 64-3D-OR-256-2D mode); a voice runs only
+ *    after VOICE_ON has linked it into a voice list.
  *
- * All 64 3D voice contexts reside contiguously in an 8 KB physical page
- * aligned to 4 KB (NV_PAPU_VOICE_ARRAY_SIZE_3D = 8192 bytes).
+ * Model summary (this file):
+ * Each voice context is 128 bytes (32 DWORDs) and holds:
+ *   - 16.16 pitch step
+ *   - PRD table DMA pointers & position
+ *   - EG1 (ADSR) amplitude and EG2 pitch/cutoff envelope placeholders
+ *   - ITD delay values (field range 0..64 samples; the Woodworth formula in
+ *     apu_spatial.c never exceeds 31) and a delay-buffer pointer
+ *   - Q14 HRTF biquad coefficients (b0, b1, b2, a1, a2)
+ *   - MixBin routing mask (MixBins 0..31) and 8-bit linear gain multipliers
+ *
+ * All 64 voice contexts reside contiguously in an 8 KB physical page aligned
+ * to 4 KB (NV_PAPU_VOICE_ARRAY_SIZE_3D = 8192 bytes); the VP can address up
+ * to 256 handles (32 KB).
  * ============================================================================
  */
 
 /* Voice Format Codes (DWORD 0: bits 0..1) */
 #define NVAPU_VOICE_FORMAT_PCM16         0u  /* 16-bit Signed Little-Endian PCM */
-#define NVAPU_VOICE_FORMAT_PCM8          1u  /* 8-bit Signed PCM */
+/* 8-bit PCM is UNSIGNED (offset binary, 0x80 = silence): the hardware sample
+ * size is U8, and OpenAL AL_FORMAT_*8 data is unsigned as well, so it is
+ * copied unchanged and needs no conversion. */
+#define NVAPU_VOICE_FORMAT_PCM8          1u  /* 8-bit Unsigned PCM */
 #define NVAPU_VOICE_FORMAT_ADPCM         2u  /* Xbox ADPCM 4-bit */
 
 /* Voice Channel Layout (DWORD 0: bit 2) */
@@ -41,11 +76,14 @@ extern "C" {
 #define NVAPU_VOICE_LOOP_OFF             0u  /* One-shot playback (stops at EOT) */
 #define NVAPU_VOICE_LOOP_ON              1u  /* Looping playback */
 
-/* 16.16 Fixed-Point Pitch Step Constants & Macros */
+/* 16.16 Fixed-Point Pitch Step Constants & Macros
+ * (software-model value; hardware TAR_PITCH is a signed 4.12 log2 field,
+ * p = round(4096 * log2(rate / 48000)), where unity is 0, not 0x10000) */
 #define APU_PITCH_STEP_UNITY             0x00010000u /* 1.0x pitch step at 48000 Hz */
 
 /**
  * Calculate 16.16 fixed-point phase pitch step for the Voice Processor.
+ * Linear model value, NOT the hardware encoding (see the banner above).
  *
  * Formula: ((SampleRate * (pitch_multiplier * 65536 + 0.5)) / 48000)
  *
@@ -82,7 +120,8 @@ NVAPU_VOICE_CONTEXT_3D {
     uint32_t reserved0           : 25;
 
     /* DWORD 1: Resampler Phase Pitch Step (16.16 fixed-point) */
-    uint32_t pitch_step;                /* (SampleRate / 48000) * Pitch * 65536 */
+    uint32_t pitch_step;                /* (SampleRate / 48000) * Pitch * 65536
+                                           (linear model; hardware TAR_PITCH is signed 4.12 log2) */
 
     /* DWORD 2-4: DMA Pointers */
     uint32_t prd_table_phys;            /* Physical address of the PRD table */
@@ -93,7 +132,9 @@ NVAPU_VOICE_CONTEXT_3D {
     uint32_t loop_start_offset;         /* Byte offset for loop restart */
     uint32_t loop_end_offset;           /* Byte offset for loop trigger */
 
-    /* DWORD 7: Direct 2D Master Gain */
+    /* DWORD 7: Direct 2D Master Gain
+     * Linear model gains, 0 = silence. Hardware volumes are 12-bit
+     * attenuations (1/64 dB) with 0 = unity and 0xFFF = mute. */
     uint16_t master_vol_left;           /* Linear gain Left  (0 - 0xFFFF) */
     uint16_t master_vol_right;          /* Linear gain Right (0 - 0xFFFF) */
 
@@ -128,7 +169,9 @@ NVAPU_VOICE_CONTEXT_3D {
     uint32_t mixbin_routing_mask;       /* Bitmask (0x0000003F enables MixBins 0..5) */
     uint32_t reserved2[3];
 
-    /* DWORD 28-31: MixBin Gain Matrix (8-Bit Linear Multipliers) */
+    /* DWORD 28-31: MixBin Gain Matrix (8-Bit Linear Multipliers)
+     * Linear model gains, 0 = silence (hardware polarity is inverted, see
+     * the banner). The FL..LFE bin order is this library's convention. */
     uint8_t  mixbin_gain[16];           /* [0]=FL, [1]=FR, [2]=SL, [3]=SR, [4]=C, [5]=LFE */
 }
 #if defined(_MSC_VER) && !defined(__clang__)
