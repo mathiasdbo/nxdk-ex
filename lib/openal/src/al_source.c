@@ -1417,3 +1417,19 @@ AL_API void AL_APIENTRY alGetBooleanv(ALenum param, ALboolean *values) {
     alGetIntegerv(param, &ival);
     *values = (ival != 0) ? AL_TRUE : AL_FALSE;
 }
+
+AL_API void AL_APIENTRY alEnable(ALenum capability) {
+    (void)capability;
+    alSetError(AL_INVALID_ENUM);
+}
+
+AL_API void AL_APIENTRY alDisable(ALenum capability) {
+    (void)capability;
+    alSetError(AL_INVALID_ENUM);
+}
+
+AL_API ALboolean AL_APIENTRY alIsEnabled(ALenum capability) {
+    (void)capability;
+    alSetError(AL_INVALID_ENUM);
+    return AL_FALSE;
+}
