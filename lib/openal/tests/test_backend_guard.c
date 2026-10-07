@@ -98,6 +98,48 @@ static void exercise_device(ALCdevice *dev) {
     assert(alGetError() == AL_NO_ERROR);
 }
 
+#ifndef OPENAL_APU_REAL_MMIO
+/*
+ * Buffer, source, playback and state queries with no device open. The source
+ * subsystem has no session base then, so its voice control must not fall back
+ * to the real BAR0: any access to 0xFE800000 would fault on the host.
+ */
+static void play_without_device(void) {
+    ALuint buf = 0, src = 0;
+    int16_t pcm[256] = {0};
+    ALint state = 0;
+
+    assert(al_source_get_apu_base() != NV_PAPU_BASE);
+
+    alGenBuffers(1, &buf);
+    assert(buf != 0);
+    alBufferData(buf, AL_FORMAT_MONO16, pcm, (ALsizei)sizeof(pcm), 48000);
+    alGenSources(1, &src);
+    assert(src != 0);
+    alSourcei(src, AL_BUFFER, (ALint)buf);
+    alSourcei(src, AL_LOOPING, AL_TRUE);
+    assert(alGetError() == AL_NO_ERROR);
+
+    alSourcePlay(src);
+    alGetSourcei(src, AL_SOURCE_STATE, &state);
+    assert(state == AL_PLAYING);
+    alSourcePause(src);
+    alSourcePlay(src);  /* unpause path */
+    alSourcePlay(src);  /* restart path (stops the voice first) */
+    alGetSourcei(src, AL_SOURCE_STATE, &state);
+    assert(state == AL_PLAYING);
+    alSourceStop(src);
+    alGetSourcei(src, AL_SOURCE_STATE, &state);
+    assert(state == AL_STOPPED);
+    assert(alGetError() == AL_NO_ERROR);
+
+    alDeleteSources(1, &src);
+    alDeleteBuffers(1, &buf);
+    assert(alGetError() == AL_NO_ERROR);
+    assert(al_source_get_apu_base() != NV_PAPU_BASE);
+}
+#endif
+
 int main(void) {
     printf("=== OpenAL Backend Guard (null/software-model backend) Test ===\n");
 
@@ -130,6 +172,11 @@ int main(void) {
         alXboxUpdateVoices();
         assert(alGetError() == AL_NO_ERROR);
         assert(alc_get_apu_base() == NV_PAPU_BASE);
+
+#ifndef OPENAL_APU_REAL_MMIO
+        /* Before the first alcOpenDevice() */
+        play_without_device();
+#endif
     }
 
     /* ------------------------------------------------------------------ */
@@ -232,7 +279,7 @@ int main(void) {
 
         /* Last close released the stand-in and reset the configured base view */
         assert(alc_get_apu_base() == NV_PAPU_BASE);
-        assert(al_source_get_apu_base() == NV_PAPU_BASE);
+        assert(al_source_get_apu_base() != NV_PAPU_BASE); /* parked, not the real BAR0 */
         assert(backend_query() == AL_XBOX_BACKEND_NULL);
         {
             ALint v = -1;
@@ -240,6 +287,9 @@ int main(void) {
             assert(v == 0);
             alXboxUpdateVoices(); /* still a no-op */
         }
+
+        /* After the last alcCloseDevice() */
+        play_without_device();
 
         /* Repeated open/close cycles (run under valgrind/ASan to check for leaks) */
         for (cycle = 0; cycle < 20; cycle++) {
