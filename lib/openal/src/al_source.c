@@ -55,6 +55,7 @@ static void source_reset_defaults(ALsource *src, ALuint id) {
     src->cone_inner_angle = 360.0f;
     src->cone_outer_angle = 360.0f;
     src->cone_outer_gain = 0.0f;
+    src->lfe_gain = 0.0f;
 }
 
 void al_source_init_subsystem(void) {
@@ -222,7 +223,12 @@ void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc) {
     } else {
         apu_get_biquad_passthrough_q14(&calc->hrtf_coeffs);
     }
+
+    /* 5.1 Multichannel ITU-R BS.775 Equal-Power Panning & MixBin Quantization */
+    apu_calc_panning_51(calc->local_pos[0], calc->local_pos[2], src->lfe_gain, &calc->pan_gains_51);
+    apu_calc_mixbin_gains_51(&calc->pan_gains_51, calc->mixbin_gain);
 }
+
 
 void al_source_calc_spatial(const ALsource *src, AL_SPATIAL_CALC *calc) {
     al_source_compute_spatial((ALsource *)src, calc);
@@ -302,6 +308,19 @@ static void source_update_hw_hrtf(const ALsource *src) {
     }
 }
 
+static void source_update_hw_mixbins(const ALsource *src) {
+    if (src->state == AL_PLAYING && src->hw_voice_idx >= 0 && src->buffer != NULL) {
+        NVAPU_VOICE_CONTEXT_3D *ctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
+        if (ctx && src->buffer->channels == 1) {
+            AL_SPATIAL_CALC calc;
+            al_source_calc_spatial(src, &calc);
+            for (size_t i = 0; i < 6; i++) {
+                ctx->mixbin_gain[i] = calc.mixbin_gain[i];
+            }
+        }
+    }
+}
+
 void al_source_update_all_spatial(void) {
     ensure_subsystem_initialized();
     for (size_t i = 0; i < AL_MAX_SOURCES; i++) {
@@ -311,9 +330,11 @@ void al_source_update_all_spatial(void) {
             source_update_hw_pitch(src);
             source_update_hw_itd(src);
             source_update_hw_hrtf(src);
+            source_update_hw_mixbins(src);
         }
     }
 }
+
 
 void al_source_update_all_gains(void) {
     al_source_update_all_spatial();
@@ -645,6 +666,15 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
             source_update_hw_gain(src);
             break;
 
+        case AL_XBOX_LFE_GAIN:
+            if (value < 0.0f || value > 1.0f) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->lfe_gain = value;
+            source_update_hw_mixbins(src);
+            break;
+
         default:
             alSetError(AL_INVALID_ENUM);
             break;
@@ -669,6 +699,7 @@ AL_API void AL_APIENTRY alSource3f(ALuint source, ALenum param, ALfloat v1, ALfl
             source_update_hw_pitch(src);
             source_update_hw_itd(src);
             source_update_hw_hrtf(src);
+            source_update_hw_mixbins(src);
             break;
 
         case AL_VELOCITY:
@@ -714,6 +745,7 @@ AL_API void AL_APIENTRY alSourcefv(ALuint source, ALenum param, const ALfloat *v
         case AL_CONE_INNER_ANGLE:
         case AL_CONE_OUTER_ANGLE:
         case AL_CONE_OUTER_GAIN:
+        case AL_XBOX_LFE_GAIN:
             alSourcef(source, param, values[0]);
             break;
 
@@ -785,7 +817,9 @@ AL_API void AL_APIENTRY alSourcei(ALuint source, ALenum param, ALint value) {
             source_update_hw_pitch(src);
             source_update_hw_itd(src);
             source_update_hw_hrtf(src);
+            source_update_hw_mixbins(src);
             break;
+
 
         default:
             alSetError(AL_INVALID_ENUM);
@@ -883,6 +917,10 @@ AL_API void AL_APIENTRY alGetSourcef(ALuint source, ALenum param, ALfloat *value
 
         case AL_CONE_OUTER_GAIN:
             *value = src->cone_outer_gain;
+            break;
+
+        case AL_XBOX_LFE_GAIN:
+            *value = src->lfe_gain;
             break;
 
         default:
@@ -1151,10 +1189,19 @@ AL_API void AL_APIENTRY alSourcePlay(ALuint source) {
         ctx.hrtf_a2 = pass.a2;
     }
 
-    /* Route to MixBins 0 and 1 (Front Left, Front Right) at unity multiplier */
-    ctx.mixbin_routing_mask = 0x00000003;
-    ctx.mixbin_gain[0] = 0xFF;
-    ctx.mixbin_gain[1] = 0xFF;
+    /* Configure MixBin routing mask and gains */
+    if (src->buffer->channels == 1) {
+        /* Mono 3D positional: 5.1 multichannel routing mask enables MixBins 0..5 */
+        ctx.mixbin_routing_mask = 0x0000003F;
+        memcpy(ctx.mixbin_gain, calc.mixbin_gain, sizeof(ctx.mixbin_gain));
+    } else {
+        /* Stereo 2D direct: direct route to MixBins 0 and 1 at unity multiplier */
+        ctx.mixbin_routing_mask = 0x00000003;
+        memset(ctx.mixbin_gain, 0, sizeof(ctx.mixbin_gain));
+        ctx.mixbin_gain[0] = 0xFF;
+        ctx.mixbin_gain[1] = 0xFF;
+    }
+
 
     /* Program hardware voice context, ensure unpaused, and trigger */
     apu_voice_setup((uint32_t)idx, &ctx);
