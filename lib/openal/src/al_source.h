@@ -2,6 +2,7 @@
 #define AL_SOURCE_H
 
 #include <AL/al.h>
+#include <AL/alext.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include "al_buffer.h"
@@ -47,7 +48,9 @@ typedef struct ALsource {
     ALfloat cone_inner_angle;
     ALfloat cone_outer_angle;
     ALfloat cone_outer_gain;
+    ALfloat lfe_gain;
 } ALsource;
+
 
 /*
  * ============================================================================
