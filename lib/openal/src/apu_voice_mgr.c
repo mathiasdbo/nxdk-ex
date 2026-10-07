@@ -143,27 +143,46 @@ int apu_voice_mgr_allocate(ALsource *src) {
     }
 
     if (victim_voice >= 0 && new_priority > min_priority) {
+        int victim_owner_id = s_hw_voice_owner[victim_voice];
+        ALsource *victim = al_source_get((ALuint)victim_owner_id);
+        NVAPU_VOICE_CONTEXT_3D *vctx = apu_voice_get_context((uint32_t)victim_voice);
+
         /*
          * Click-prevention preemption protocol:
-         * 1. Silence victim voice context (master volumes 0, mixbin gains 0).
-         * 2. Stop voice via apu_voice_stop.
-         * 3. Detach victim source: victim->hw_voice_idx = AL_HW_VOICE_INVALID.
-         * 4. Assign slot to src, update owner.
+         * 1. Preserve victim progress (PRD index and fractional sample phase).
          */
-        NVAPU_VOICE_CONTEXT_3D *vctx = apu_voice_get_context((uint32_t)victim_voice);
+        if (vctx && victim) {
+            victim->saved_prd_index = vctx->current_prd_index;
+            victim->saved_sample_pos_frac = vctx->sample_pos_frac;
+        }
+
+        /*
+         * 2. Zero gains to eliminate clicks/pops and DC offsets before halting.
+         */
         if (vctx) {
             vctx->master_vol_left = 0;
             vctx->master_vol_right = 0;
             memset(vctx->mixbin_gain, 0, sizeof(vctx->mixbin_gain));
         }
-        apu_voice_stop(apu_base, (uint32_t)victim_voice);
 
-        int victim_owner_id = s_hw_voice_owner[victim_voice];
-        ALsource *victim = al_source_get((ALuint)victim_owner_id);
+        /*
+         * 3. Halt channel and confirm halt in hardware registers.
+         */
+        apu_voice_stop(apu_base, (uint32_t)victim_voice);
+        if (apu_voice_is_active(apu_base, (uint32_t)victim_voice) != 0) {
+            apu_voice_stop(apu_base, (uint32_t)victim_voice);
+        }
+
+        /*
+         * 4. Detach victim to virtual standby (retaining AL_PLAYING state).
+         */
         if (victim) {
             victim->hw_voice_idx = AL_HW_VOICE_INVALID;
         }
 
+        /*
+         * 5. Assign hardware voice slot to the higher-priority preemptor.
+         */
         s_hw_voice_owner[victim_voice] = (int)src->id;
         src->hw_voice_idx = victim_voice;
         return victim_voice;
@@ -261,6 +280,8 @@ void apu_voice_mgr_update(uintptr_t apu_base) {
             if (best_candidate != NULL && best_priority > 0.0f) {
                 s_hw_voice_owner[v] = (int)best_candidate->id;
                 best_candidate->hw_voice_idx = (int)v;
+                /* Promoted candidate restores saved_prd_index and saved_sample_pos_frac,
+                 * clears them, configures 3D voice context, unpauses, and triggers playback. */
                 al_source_program_hw_voice(best_candidate, v);
             } else {
                 break;
