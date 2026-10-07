@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#if defined(__NXDK__) || defined(_XBOX)
+#if defined(NXDK) || defined(__NXDK__) || defined(_XBOX)
 #  include <hal/video.h>
 #  include <hal/debug.h>
 #  include <pbkit/pbkit.h>
