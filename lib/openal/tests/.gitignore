@@ -1,0 +1,2 @@
+# Output of "make -C lib/openal/tests test" (see Makefile, BUILD_DIR)
+/build/
