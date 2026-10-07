@@ -58,7 +58,7 @@ int apu_mem_init(size_t pool_size) {
     }
 
     /* Page-align pool size (4096 bytes) */
-    pool_size = (pool_size + 4095u) & ~4095u;
+    pool_size = (pool_size + 4095u) & ~(size_t)4095u;
 
 #if defined(__NXDK__) || defined(_XBOX)
     s_pool_virt = MmAllocateContiguousMemoryEx(
@@ -78,7 +78,7 @@ int apu_mem_init(size_t pool_size) {
     if (!s_host_raw_pool) {
         return -1;
     }
-    s_pool_virt = (void *)(((uintptr_t)s_host_raw_pool + 4095u) & ~4095u);
+    s_pool_virt = (void *)(((uintptr_t)s_host_raw_pool + 4095u) & ~(uintptr_t)4095u);
     s_pool_phys = 0x01000000u;
 #endif
 

@@ -13,6 +13,7 @@
 #include "al_buffer.h"
 #include "al_source.h"
 #include "al_listener.h"
+#include "apu_spatial.h"
 
 /*
  * ============================================================================
@@ -103,6 +104,16 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
         }
         memset(s_hw_voice_table_virt, 0, NV_PAPU_VOICE_ARRAY_SIZE_3D);
 
+        /* 2b. Hardware ITD Circular Buffer Pool (16KB) */
+        if (apu_itd_subsystem_init() != 0) {
+            apu_mem_free_phys(s_hw_voice_table_virt);
+            s_hw_voice_table_virt = NULL;
+            s_hw_voice_table_phys = 0;
+            apu_mem_shutdown();
+            alc_set_error(NULL, ALC_OUT_OF_MEMORY);
+            return NULL;
+        }
+
         /* 3. Output Processor (EP) stereo FIFO routing */
         apu_write32(apu_base, NV_PAPU_EP_FIFO_CONFIG, NV_PAPU_EP_FIFO_CONFIG_STEREO);
         apu_write32(apu_base, NV_PAPU_EP_FIFO_ROUTE, NV_PAPU_EP_ROUTE_DEFAULT);
@@ -111,6 +122,7 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
         /* 4. Global Processor (GP) DSP 5.1 passthrough microcode */
         int ucode_res = apu_gp_load_microcode(apu_base, gp_passthrough_51_bin, GP_PASSTHROUGH_51_SIZE);
         if (ucode_res != 0) {
+            apu_itd_subsystem_deinit();
             apu_mem_free_phys(s_hw_voice_table_virt);
             s_hw_voice_table_virt = NULL;
             s_hw_voice_table_phys = 0;
@@ -124,6 +136,7 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
         int vp_res = apu_voice_subsystem_init(apu_base, s_hw_voice_table_virt, s_hw_voice_table_phys);
         if (vp_res != 0) {
             apu_gp_stop(apu_base);
+            apu_itd_subsystem_deinit();
             apu_mem_free_phys(s_hw_voice_table_virt);
             s_hw_voice_table_virt = NULL;
             s_hw_voice_table_phys = 0;
@@ -145,6 +158,7 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
             apu_voice_subsystem_deinit(apu_base);
             apu_gp_stop(apu_base);
             apu_write32(apu_base, NV_PAPU_EP_CONTROL, 0u);
+            apu_itd_subsystem_deinit();
             apu_mem_free_phys(s_hw_voice_table_virt);
             s_hw_voice_table_virt = NULL;
             s_hw_voice_table_phys = 0;
@@ -193,6 +207,9 @@ ALC_API ALCboolean ALC_APIENTRY alcCloseDevice(ALCdevice *device) {
             al_source_cleanup_subsystem();
             al_buffer_cleanup_subsystem();
             al_listener_reset();
+
+            /* Deinitialize ITD circular buffer subsystem */
+            apu_itd_subsystem_deinit();
 
             /* Deinitialize hardware subsystems */
             apu_voice_subsystem_deinit(device->apu_base);
