@@ -4,9 +4,11 @@
 
 #include "alc_context.h"
 #include <AL/al.h>
+#include <AL/alext.h>
 #include <string.h>
 #include <stdlib.h>
 #include "apu_hardware.h"
+#include "apu_ep.h"
 #include "apu_mem.h"
 #include "apu_voice.h"
 #include "apu_gp_ucode.h"
@@ -126,14 +128,23 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
             return NULL;
         }
 
-        /* 3. Output Processor (EP) FIFO routing & enable */
-        apu_write32(apu_base, NV_PAPU_EP_FIFO_ROUTE, NV_PAPU_EP_ROUTE_DEFAULT);
-        apu_write32(apu_base, NV_PAPU_EP_CONTROL, NV_PAPU_EP_CONTROL_ENABLE);
+        /* 3. Output Processor (EP) subsystem initialization */
+        int ep_res = apu_ep_subsystem_init(apu_base, device->topology);
+        if (ep_res != 0) {
+            apu_itd_subsystem_deinit();
+            apu_mem_free_phys(s_hw_voice_table_virt);
+            s_hw_voice_table_virt = NULL;
+            s_hw_voice_table_phys = 0;
+            apu_mem_shutdown();
+            free(device);
+            alc_set_error(NULL, ALC_INVALID_VALUE);
+            return NULL;
+        }
 
         /* 4. Global Processor (GP) DSP microcode & EP FIFO configuration */
         int ucode_res = apu_gp_load_topology_microcode(apu_base, device->topology);
         if (ucode_res != 0) {
-            apu_write32(apu_base, NV_PAPU_EP_CONTROL, 0u);
+            apu_ep_subsystem_deinit(apu_base);
             apu_itd_subsystem_deinit();
             apu_mem_free_phys(s_hw_voice_table_virt);
             s_hw_voice_table_virt = NULL;
@@ -149,7 +160,7 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
         int vp_res = apu_voice_subsystem_init(apu_base, s_hw_voice_table_virt, s_hw_voice_table_phys);
         if (vp_res != 0) {
             apu_gp_stop(apu_base);
-            apu_write32(apu_base, NV_PAPU_EP_CONTROL, 0u);
+            apu_ep_subsystem_deinit(apu_base);
             apu_itd_subsystem_deinit();
             apu_mem_free_phys(s_hw_voice_table_virt);
             s_hw_voice_table_virt = NULL;
@@ -213,7 +224,7 @@ ALC_API ALCboolean ALC_APIENTRY alcCloseDevice(ALCdevice *device) {
             /* Deinitialize hardware subsystems */
             apu_voice_subsystem_deinit(device->apu_base);
             apu_gp_stop(device->apu_base);
-            apu_write32(device->apu_base, NV_PAPU_EP_CONTROL, 0u);
+            apu_ep_subsystem_deinit(device->apu_base);
 
             if (s_hw_voice_table_virt != NULL) {
                 apu_mem_free_phys(s_hw_voice_table_virt);
@@ -503,7 +514,9 @@ ALC_API ALCboolean ALC_APIENTRY alcIsExtensionPresent(ALCdevice *device, const A
 
 ALC_API void * ALC_APIENTRY alcGetProcAddress(ALCdevice *device, const ALCchar *funcname) {
     (void)device;
-    (void)funcname;
+    if (funcname != NULL && strcmp(funcname, "alXboxGetHardwareStatus") == 0) {
+        return (void *)alXboxGetHardwareStatus;
+    }
     return NULL;
 }
 
@@ -546,3 +559,119 @@ ALC_API void ALC_APIENTRY alcCaptureSamples(ALCdevice *device, ALCvoid *buffer, 
     (void)buffer;
     (void)samples;
 }
+
+/*
+ * ============================================================================
+ * OpenAL 1.1 Extension Query APIs
+ * ============================================================================
+ */
+
+AL_API const ALchar * AL_APIENTRY alGetString(ALenum param) {
+    switch (param) {
+        case AL_VENDOR:
+            return "NVIDIA / nxdk-ex";
+        case AL_VERSION:
+            return "1.1";
+        case AL_RENDERER:
+            return "MCPX APU";
+        case AL_EXTENSIONS:
+            return "AL_EXT_MCFORMATS AL_XBOX_hardware_status";
+        default:
+            alSetError(AL_INVALID_ENUM);
+            return NULL;
+    }
+}
+
+AL_API ALboolean AL_APIENTRY alIsExtensionPresent(const ALchar *extname) {
+    if (extname == NULL) {
+        return AL_FALSE;
+    }
+    if (strcmp(extname, "AL_EXT_MCFORMATS") == 0 ||
+        strcmp(extname, "AL_XBOX_hardware_status") == 0) {
+        return AL_TRUE;
+    }
+    return AL_FALSE;
+}
+
+AL_API void * AL_APIENTRY alGetProcAddress(const ALchar *fname) {
+    if (fname == NULL) {
+        return NULL;
+    }
+    if (strcmp(fname, "alXboxGetHardwareStatus") == 0) {
+        return (void *)alXboxGetHardwareStatus;
+    }
+    return NULL;
+}
+
+AL_API ALenum AL_APIENTRY alGetEnumValue(const ALchar *ename) {
+    (void)ename;
+    return 0;
+}
+
+/*
+ * ============================================================================
+ * Xbox Hardware Status Extension API (AL_XBOX_hardware_status)
+ * ============================================================================
+ */
+
+AL_API void AL_APIENTRY alXboxGetHardwareStatus(ALenum param, ALint *value) {
+    if (!value) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+
+    switch (param) {
+        case AL_XBOX_HW_VOICE_COUNT:
+            *value = 64;
+            break;
+
+        case AL_XBOX_AV_PACK_TYPE: {
+            uint32_t pack = apu_query_smbus_av_pack();
+            ALint pack_token = AL_XBOX_AV_PACK_NONE;
+            switch (pack) {
+                case APU_AV_PACK_SCART:
+                    pack_token = AL_XBOX_AV_PACK_SCART;
+                    break;
+                case APU_AV_PACK_HDTV:
+                    pack_token = AL_XBOX_AV_PACK_HDTV;
+                    break;
+                case APU_AV_PACK_VGA:
+                    pack_token = AL_XBOX_AV_PACK_VGA;
+                    break;
+                case APU_AV_PACK_RFU:
+                    pack_token = AL_XBOX_AV_PACK_RFU;
+                    break;
+                case APU_AV_PACK_SVIDEO:
+                    pack_token = AL_XBOX_AV_PACK_SVIDEO;
+                    break;
+                case APU_AV_PACK_STANDARD:
+                    pack_token = AL_XBOX_AV_PACK_COMPOSITE;
+                    break;
+                case APU_AV_PACK_NONE:
+                default:
+                    pack_token = AL_XBOX_AV_PACK_NONE;
+                    break;
+            }
+            *value = pack_token;
+            break;
+        }
+
+        case AL_XBOX_DOLBY_DIGITAL_ACTIVE:
+            *value = apu_is_dolby_digital_active(s_alc_apu_base) ? 1 : 0;
+            break;
+
+        case AL_XBOX_VP_BASE_PHYS: {
+            uint32_t phys_addr = apu_read32(s_alc_apu_base, NV_PAPU_VP_BASE_ADDR);
+            if (phys_addr == 0 && s_hw_voice_table_phys != 0) {
+                phys_addr = s_hw_voice_table_phys;
+            }
+            *value = (ALint)phys_addr;
+            break;
+        }
+
+        default:
+            alSetError(AL_INVALID_ENUM);
+            break;
+    }
+}
+
