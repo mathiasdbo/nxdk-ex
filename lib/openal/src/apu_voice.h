@@ -222,6 +222,13 @@ int apu_voice_pause(uintptr_t apu_base, uint32_t index, int pause);
  */
 int apu_voice_is_active(uintptr_t apu_base, uint32_t index);
 
+/**
+ * Number of apu_voice_stop() calls on valid voice indices since program start
+ * (wraps at 2^32). Regression-test aid: lets a test observe that a voice was
+ * halted before its context was rewritten.
+ */
+uint32_t apu_voice_debug_stop_count(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -22,6 +22,9 @@ extern "C" {
  *   priority_base: 3.0f for looping sources, 1.0f for one-shot sources.
  *   effective_gain: src->gain * distance_gain * cone_gain * listener_gain.
  *   If gain or effective_gain < 0.001f, priority is strictly 0.0f.
+ *
+ * Preemption is mute-then-halt in a single call (no ramp; a real fade needs
+ * several frame ticks and is not implemented). See lib/openal/docs/XEMU_VERIFICATION.md.
  * ============================================================================
  */
 
@@ -40,7 +43,9 @@ void apu_voice_mgr_deinit(void);
  *
  * Pass 1: Searches for an unused slot or completed one-shot voice.
  * Pass 2: If all 64 slots are busy, performs priority stealing against the
- *         victim with lowest priority if P_src > P_victim.
+ *         victim with lowest priority (oldest ALsource.play_seq on ties) if
+ *         P_src >= P_victim and P_src > 0 (ties favour the newcomer; a silent
+ *         source never evicts).
  *
  * @param src Source requesting a hardware voice slot.
  * @return Assigned hardware voice index (0..63) or AL_HW_VOICE_INVALID (-1)
@@ -50,7 +55,8 @@ int apu_voice_mgr_allocate(ALsource *src);
 
 /**
  * Release a hardware voice slot bound to a source object.
- * Silences master volume/mixbins, halts voice in hardware, and clears owner.
+ * Zeroes the shadow-context master volume/mixbin gains, then halts the voice
+ * in the same call (mute-then-halt, no ramp), and clears owner.
  *
  * @param src Source releasing its hardware voice slot.
  */
@@ -58,7 +64,8 @@ void apu_voice_mgr_release(ALsource *src);
 
 /**
  * Frame update tick: reaps completed one-shot hardware voices and promotes
- * highest-priority playing virtual standby sources to newly available slots.
+ * highest-priority playing virtual standby sources to newly available slots
+ * (priorities computed once per tick; ties go to the lowest source id).
  *
  * @param apu_base APU MMIO base address (0 to use configured default).
  */

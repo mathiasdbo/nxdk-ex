@@ -10,6 +10,7 @@ static uintptr_t s_apu_base = NV_PAPU_BASE;
 static NVAPU_VOICE_CONTEXT_3D *s_voice_contexts = NULL;
 static uint32_t s_voice_contexts_phys = 0;
 static bool s_subsystem_initialized = false;
+static uint32_t s_stop_calls = 0;
 
 /*
  * ----------------------------------------------------------------------------
@@ -147,6 +148,8 @@ int apu_voice_stop(uintptr_t apu_base, uint32_t index)
         return -1;
     }
 
+    s_stop_calls++;
+
     base = (apu_base != 0) ? apu_base : s_apu_base;
 
     /* Clear internal context active status if registered */
@@ -204,4 +207,9 @@ int apu_voice_is_active(uintptr_t apu_base, uint32_t index)
     } else {
         return (apu_read32(base, NV_PAPU_VP_ACTIVE_1) & (1u << (index - 32u))) ? 1 : 0;
     }
+}
+
+uint32_t apu_voice_debug_stop_count(void)
+{
+    return s_stop_calls;
 }

@@ -25,6 +25,19 @@ static ALuint create_test_buffer(ALenum format, ALsizei freq) {
     return buf;
 }
 
+/*
+ * Resume a standby source through the voice manager (steal or free slot, then
+ * restore the saved position). alSourcePlay() on a playing source restarts it
+ * from the beginning, so tests that check position preservation drive this
+ * resume path directly.
+ */
+static void resume_from_standby(ALsource *src) {
+    int idx = apu_voice_mgr_allocate(src);
+    if (idx >= 0) {
+        al_source_program_hw_voice(src, (uint32_t)idx);
+    }
+}
+
 int main(void) {
     printf("=== OpenAL Voice Preemption & Standby Resumption Host Test ===\n");
 
@@ -55,9 +68,9 @@ int main(void) {
     assert(alGetError() == AL_NO_ERROR);
 
     /* ====================================================================== */
-    /* Test 1: Click-Prevention Preemption Protocol & DC Offset Clearing      */
+    /* Test 1: Preemption Protocol (mute-then-halt, no ramp)                  */
     /* ====================================================================== */
-    printf("[1] Testing click-free preemption protocol (DC offset clearing & halt confirmation)...\n");
+    printf("[1] Testing preemption protocol (mute-then-halt & halt confirmation)...\n");
     ALuint buf = create_test_buffer(AL_FORMAT_MONO16, 44100);
     ALuint sources[64] = {0};
     alGenSources(64, sources);
@@ -116,7 +129,7 @@ int main(void) {
     assert(victim->hw_voice_idx == AL_HW_VOICE_INVALID);
     assert(victim->state == AL_PLAYING);
 
-    /* 1c. Validate DC offset clearing: master volumes and mixbins zeroed */
+    /* 1c. Validate mute: master volumes and mixbins zeroed (abrupt cut, no ramp) */
     assert(vctx->master_vol_left == 0);
     assert(vctx->master_vol_right == 0);
     for (int m = 0; m < 16; m++) {
@@ -135,7 +148,7 @@ int main(void) {
     assert(apu_voice_is_active((uintptr_t)mock_mmio, (uint32_t)victim_slot) == 1);
     assert(vctx->master_vol_left > 0);
     assert(vctx->master_vol_right > 0);
-    printf("    -> Click-free preemption protocol verified (gains zeroed, halt confirmed, progress preserved).\n");
+    printf("    -> Preemption protocol verified (gains zeroed, halt confirmed, progress preserved).\n");
 
     /* ====================================================================== */
     /* Test 2: Preempted Standby Resumption with Preserved Sample Position    */
@@ -181,9 +194,9 @@ int main(void) {
     printf("    -> Standby resumption verified (resumed at PRD 5, frac 0x12345678, full gains restored).\n");
 
     /* ====================================================================== */
-    /* Test 3: Standby Resumption via Direct alSourcePlay                     */
+    /* Test 3: Direct alSourcePlay on a Standby Source Restarts It            */
     /* ====================================================================== */
-    printf("[3] Testing standby resumption via direct alSourcePlay()...\n");
+    printf("[3] Testing direct alSourcePlay() on a standby source (restart from beginning)...\n");
     {
         /* Simulate source 64 preempted again */
         vctx0->current_prd_index = 9;
@@ -207,21 +220,22 @@ int main(void) {
         alSourceStop(sources[1]);
         assert(apu_voice_is_active((uintptr_t)mock_mmio, 1) == 0);
 
-        /* Call alSourcePlay on victim 64 while in standby */
+        /* OpenAL 1.1: Play on a playing (standby) source restarts it, so the
+         * saved position is dropped (resumption is done by promotion, Test 2). */
         alSourcePlay(victim->id);
 
-        /* Victim should acquire the free slot 1 and resume from saved offset */
+        /* Victim should acquire the free slot 1 and start from the beginning */
         assert(victim->hw_voice_idx == 1);
         assert(victim->saved_prd_index == 0);
         assert(victim->saved_sample_pos_frac == 0);
 
         NVAPU_VOICE_CONTEXT_3D *vctx1 = apu_voice_get_context(1);
         assert(vctx1 != NULL);
-        assert(vctx1->current_prd_index == 9);
-        assert(vctx1->sample_pos_frac == 0xABCDEF00);
+        assert(vctx1->current_prd_index == 0);
+        assert(vctx1->sample_pos_frac == 0);
         assert(apu_voice_is_active((uintptr_t)mock_mmio, 1) == 1);
     }
-    printf("    -> Direct alSourcePlay() preemption resumption verified.\n");
+    printf("    -> Direct alSourcePlay() on a standby source restarts from the beginning.\n");
 
     /* ====================================================================== */
     /* Test 4: Manual Stop and Rewind Resets Saved Preemption Progress        */
@@ -340,11 +354,11 @@ int main(void) {
             alSource3f(batch_a[i], AL_POSITION, 0.0f, 0.0f, 0.2f + 0.0005f * (float)i);
         }
 
-        /* Play all Batch A sources -> preempts all Batch B voices back */
+        /* Resume all Batch A sources -> preempts all Batch B voices back */
         for (int i = 0; i < 64; i++) {
-            alSourcePlay(batch_a[i]);
             ALsource *sa = al_source_get(batch_a[i]);
             assert(sa != NULL);
+            resume_from_standby(sa);
             assert(sa->hw_voice_idx >= 0 && sa->hw_voice_idx < 64);
             /* Saved offsets consumed and restored into HW */
             assert(sa->saved_prd_index == 0);
@@ -382,9 +396,9 @@ int main(void) {
         }
 
         for (int i = 0; i < 64; i++) {
-            alSourcePlay(batch_b[i]);
             ALsource *sb = al_source_get(batch_b[i]);
             assert(sb != NULL);
+            resume_from_standby(sb);
             assert(sb->hw_voice_idx >= 0 && sb->hw_voice_idx < 64);
             assert(sb->saved_prd_index == 0);
             assert(sb->saved_sample_pos_frac == 0);
