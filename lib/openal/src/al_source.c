@@ -1,5 +1,6 @@
 #include "al_source.h"
 #include "al_listener.h"
+#include "apu_voice_mgr.h"
 #include <string.h>
 #include <math.h>
 #include <float.h>
@@ -11,7 +12,6 @@
  */
 static ALsource g_sources[AL_MAX_SOURCES];
 static bool s_subsystem_initialized = false;
-static int s_hw_voice_owner[NV_PAPU_NUM_3D_VOICES];
 static uintptr_t s_apu_base = NV_PAPU_BASE;
 
 /*
@@ -62,9 +62,7 @@ void al_source_init_subsystem(void) {
     for (size_t i = 0; i < AL_MAX_SOURCES; i++) {
         source_reset_defaults(&g_sources[i], (ALuint)(i + 1));
     }
-    for (size_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
-        s_hw_voice_owner[v] = AL_HW_VOICE_INVALID;
-    }
+    apu_voice_mgr_init();
     apu_spatial_reset();
     s_subsystem_initialized = true;
 }
@@ -74,9 +72,7 @@ void al_source_cleanup_subsystem(void) {
         ALsource *src = &g_sources[i];
         if (src->in_use) {
             if (src->state == AL_PLAYING || src->state == AL_PAUSED) {
-                if (src->hw_voice_idx >= 0) {
-                    apu_voice_stop(s_apu_base, (uint32_t)src->hw_voice_idx);
-                }
+                apu_voice_mgr_release(src);
             }
             if (src->buffer != NULL) {
                 al_buffer_release(src->buffer);
@@ -85,9 +81,7 @@ void al_source_cleanup_subsystem(void) {
             source_reset_defaults(src, (ALuint)(i + 1));
         }
     }
-    for (size_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
-        s_hw_voice_owner[v] = AL_HW_VOICE_INVALID;
-    }
+    apu_voice_mgr_deinit();
     apu_spatial_reset();
     s_subsystem_initialized = false;
 }
@@ -342,123 +336,74 @@ void al_source_update_all_gains(void) {
 
 /*
  * ============================================================================
- * Dynamic Priority & Voice Virtualization Management
- * ============================================================================
- * Dynamic priority formula:
- *   P = base_priority * (gain / max(distance, 0.1))
- * Looping sources receive +2.0 priority boost (base = 3.0 vs 1.0).
- * Sources with gain < 0.001 are assigned priority 0.
+ * Hardware Voice Programming & Frame Tick
  * ============================================================================
  */
 
-static float calculate_source_priority(const ALsource *src) {
-    if (!src || src->gain < 0.001f) {
-        return 0.0f;
+void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
+    if (!src || src->buffer == NULL || hw_voice_idx >= NV_PAPU_NUM_3D_VOICES) {
+        return;
     }
 
-    float lis_pos[3] = {0.0f, 0.0f, 0.0f};
-    al_listener_get_position(lis_pos);
+    src->hw_voice_idx = (int)hw_voice_idx;
 
-    float dx = src->position[0];
-    float dy = src->position[1];
-    float dz = src->position[2];
-    if (!src->source_relative) {
-        dx -= lis_pos[0];
-        dy -= lis_pos[1];
-        dz -= lis_pos[2];
-    }
-    float dist = sqrtf(dx * dx + dy * dy + dz * dz);
-    if (dist < 0.1f) {
-        dist = 0.1f;
+    NVAPU_VOICE_CONTEXT_3D ctx;
+    apu_voice_context_reset(&ctx);
+
+    ctx.format = (src->buffer->bits == 8) ? NVAPU_VOICE_FORMAT_PCM8 : NVAPU_VOICE_FORMAT_PCM16;
+    ctx.channels = (src->buffer->channels == 2) ? NVAPU_VOICE_CHANNELS_STEREO : NVAPU_VOICE_CHANNELS_MONO;
+    ctx.loop_mode = src->looping ? NVAPU_VOICE_LOOP_ON : NVAPU_VOICE_LOOP_OFF;
+
+    ctx.prd_table_phys = src->buffer->prd_table_phys;
+    ctx.current_prd_index = 0;
+    ctx.sample_pos_frac = 0;
+    AL_SPATIAL_CALC calc;
+    al_source_calc_spatial(src, &calc);
+    ctx.pitch_step = source_calc_pitch_step(src->buffer->frequency, src->pitch * calc.doppler_pitch);
+
+    uint16_t master_vol = (uint16_t)(calc.effective_gain * 65535.0f + 0.5f);
+    ctx.master_vol_left = master_vol;
+    ctx.master_vol_right = master_vol;
+
+    if (src->buffer->channels == 1) {
+        ctx.mode_3d = 1;
+        ctx.itd_delay_left = calc.itd_delay_left;
+        ctx.itd_delay_right = calc.itd_delay_right;
+        ctx.itd_delay_buffer = apu_itd_get_voice_buffer_phys(hw_voice_idx);
+        ctx.hrtf_b0 = calc.hrtf_coeffs.b0;
+        ctx.hrtf_b1 = calc.hrtf_coeffs.b1;
+        ctx.hrtf_b2 = calc.hrtf_coeffs.b2;
+        ctx.hrtf_a1 = calc.hrtf_coeffs.a1;
+        ctx.hrtf_a2 = calc.hrtf_coeffs.a2;
+        ctx.mixbin_routing_mask = 0x0000003F;
+        memcpy(ctx.mixbin_gain, calc.mixbin_gain, sizeof(ctx.mixbin_gain));
+    } else {
+        ctx.mode_3d = 0;
+        ctx.itd_delay_left = 0;
+        ctx.itd_delay_right = 0;
+        ctx.itd_delay_buffer = 0;
+        APU_BIQUAD_COEFFS_Q14 pass;
+        apu_get_biquad_passthrough_q14(&pass);
+        ctx.hrtf_b0 = pass.b0;
+        ctx.hrtf_b1 = pass.b1;
+        ctx.hrtf_b2 = pass.b2;
+        ctx.hrtf_a1 = pass.a1;
+        ctx.hrtf_a2 = pass.a2;
+        ctx.mixbin_routing_mask = 0x00000003;
+        memset(ctx.mixbin_gain, 0, sizeof(ctx.mixbin_gain));
+        ctx.mixbin_gain[0] = 0xFF;
+        ctx.mixbin_gain[1] = 0xFF;
     }
 
-    float base_priority = src->looping ? 3.0f : 1.0f;
-    return base_priority * (src->gain / dist);
+    apu_voice_setup(hw_voice_idx, &ctx);
+    apu_voice_pause(s_apu_base, hw_voice_idx, 0);
+    apu_voice_trigger(s_apu_base, hw_voice_idx);
 }
 
-static int allocate_hw_voice(ALsource *src) {
-    /* Check if current source already holds a valid voice */
-    if (src->hw_voice_idx >= 0 && src->hw_voice_idx < (int)NV_PAPU_NUM_3D_VOICES) {
-        if (s_hw_voice_owner[src->hw_voice_idx] == (int)src->id) {
-            return src->hw_voice_idx;
-        }
-    }
-
-    /* 1. First pass: look for an unassigned voice or an inactive voice */
-    for (uint32_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
-        int owner_id = s_hw_voice_owner[v];
-        if (owner_id <= 0) {
-            s_hw_voice_owner[v] = (int)src->id;
-            src->hw_voice_idx = (int)v;
-            return (int)v;
-        }
-
-        ALsource *owner = al_source_get((ALuint)owner_id);
-        if (!owner || owner->state != AL_PLAYING) {
-            if (owner) {
-                owner->hw_voice_idx = AL_HW_VOICE_INVALID;
-            }
-            s_hw_voice_owner[v] = (int)src->id;
-            src->hw_voice_idx = (int)v;
-            return (int)v;
-        }
-
-        /* Check if one-shot voice playback completed in hardware */
-        if (!owner->looping && apu_voice_is_active(s_apu_base, v) == 0) {
-            owner->state = AL_STOPPED;
-            owner->hw_voice_idx = AL_HW_VOICE_INVALID;
-            s_hw_voice_owner[v] = (int)src->id;
-            src->hw_voice_idx = (int)v;
-            return (int)v;
-        }
-    }
-
-    /* 2. Second pass: All 64 voices active, execute priority stealing */
-    float new_priority = calculate_source_priority(src);
-    int victim_voice = -1;
-    float min_priority = 1e30f;
-
-    for (uint32_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
-        int owner_id = s_hw_voice_owner[v];
-        ALsource *owner = al_source_get((ALuint)owner_id);
-        float p = owner ? calculate_source_priority(owner) : 0.0f;
-        if (p < min_priority) {
-            min_priority = p;
-            victim_voice = (int)v;
-        }
-    }
-
-    if (victim_voice >= 0 && new_priority > min_priority) {
-        /*
-         * Click-prevention preemption protocol:
-         * 1. Zero master volume and mixbin gains to eliminate DC offsets/clicks.
-         * 2. Clear active bit in hardware register.
-         * 3. Disconnect victim source (marks as virtualized/standby).
-         * 4. Assign hardware voice slot to the new higher-priority source.
-         */
-        NVAPU_VOICE_CONTEXT_3D *vctx = apu_voice_get_context((uint32_t)victim_voice);
-        if (vctx) {
-            vctx->master_vol_left = 0;
-            vctx->master_vol_right = 0;
-            memset(vctx->mixbin_gain, 0, sizeof(vctx->mixbin_gain));
-        }
-        apu_voice_stop(s_apu_base, (uint32_t)victim_voice);
-
-        int victim_owner_id = s_hw_voice_owner[victim_voice];
-        ALsource *victim = al_source_get((ALuint)victim_owner_id);
-        if (victim) {
-            victim->hw_voice_idx = AL_HW_VOICE_INVALID;
-        }
-
-        s_hw_voice_owner[victim_voice] = (int)src->id;
-        src->hw_voice_idx = victim_voice;
-        return victim_voice;
-    }
-
-    /* Fallback: Voice remains logically playing but virtualized */
-    src->hw_voice_idx = AL_HW_VOICE_INVALID;
-    return AL_HW_VOICE_INVALID;
+void al_source_update_frame(void) {
+    apu_voice_mgr_update(s_apu_base);
 }
+
 
 /*
  * ============================================================================
@@ -542,6 +487,7 @@ AL_API void AL_APIENTRY alDeleteSources(ALsizei n, const ALuint *sources) {
         ALsource *src = &g_sources[id - 1];
         if (src->in_use) {
             alSourceStop(id);
+            apu_voice_mgr_release(src);
             if (src->buffer) {
                 al_buffer_release(src->buffer);
                 src->buffer = NULL;
@@ -1003,9 +949,8 @@ AL_API void AL_APIENTRY alGetSourcei(ALuint source, ALenum param, ALint *value) 
                 if (src->hw_voice_idx >= 0) {
                     int active = apu_voice_is_active(s_apu_base, (uint32_t)src->hw_voice_idx);
                     if (!active && !src->looping) {
+                        apu_voice_mgr_release(src);
                         src->state = AL_STOPPED;
-                        s_hw_voice_owner[src->hw_voice_idx] = AL_HW_VOICE_INVALID;
-                        src->hw_voice_idx = AL_HW_VOICE_INVALID;
                     }
                 }
             }
@@ -1135,79 +1080,10 @@ AL_API void AL_APIENTRY alSourcePlay(ALuint source) {
     }
 
     /* Allocate or bind hardware voice index (0..63) */
-    int idx = allocate_hw_voice(src);
-    if (idx < 0) {
-        /* Virtualized playback (logical AL_PLAYING without hardware voice) */
-        src->state = AL_PLAYING;
-        return;
+    int idx = apu_voice_mgr_allocate(src);
+    if (idx >= 0) {
+        al_source_program_hw_voice(src, (uint32_t)idx);
     }
-
-    /* Populate NVAPU_VOICE_CONTEXT_3D */
-    NVAPU_VOICE_CONTEXT_3D ctx;
-    apu_voice_context_reset(&ctx);
-
-    /* Format: 0 for 16-bit PCM, 1 for 8-bit PCM */
-    ctx.format = (src->buffer->bits == 8) ? NVAPU_VOICE_FORMAT_PCM8 : NVAPU_VOICE_FORMAT_PCM16;
-    /* Channels: 1 for stereo, 0 for mono */
-    ctx.channels = (src->buffer->channels == 2) ? NVAPU_VOICE_CHANNELS_STEREO : NVAPU_VOICE_CHANNELS_MONO;
-    /* Loop mode */
-    ctx.loop_mode = src->looping ? NVAPU_VOICE_LOOP_ON : NVAPU_VOICE_LOOP_OFF;
-
-    ctx.prd_table_phys = src->buffer->prd_table_phys;
-    ctx.current_prd_index = 0;
-    ctx.sample_pos_frac = 0;
-    AL_SPATIAL_CALC calc;
-    al_source_calc_spatial(src, &calc);
-    ctx.pitch_step = source_calc_pitch_step(src->buffer->frequency, src->pitch * calc.doppler_pitch);
-
-    uint16_t master_vol = (uint16_t)(calc.effective_gain * 65535.0f + 0.5f);
-    ctx.master_vol_left = master_vol;
-    ctx.master_vol_right = master_vol;
-
-    /* 3D mode, ITD, and HRTF configuration: mono sources enable full 3D processing */
-    if (src->buffer->channels == 1) {
-        ctx.mode_3d = 1;
-        ctx.itd_delay_left = calc.itd_delay_left;
-        ctx.itd_delay_right = calc.itd_delay_right;
-        ctx.itd_delay_buffer = apu_itd_get_voice_buffer_phys((uint32_t)idx);
-        ctx.hrtf_b0 = calc.hrtf_coeffs.b0;
-        ctx.hrtf_b1 = calc.hrtf_coeffs.b1;
-        ctx.hrtf_b2 = calc.hrtf_coeffs.b2;
-        ctx.hrtf_a1 = calc.hrtf_coeffs.a1;
-        ctx.hrtf_a2 = calc.hrtf_coeffs.a2;
-    } else {
-        ctx.mode_3d = 0;
-        ctx.itd_delay_left = 0;
-        ctx.itd_delay_right = 0;
-        ctx.itd_delay_buffer = 0;
-        APU_BIQUAD_COEFFS_Q14 pass;
-        apu_get_biquad_passthrough_q14(&pass);
-        ctx.hrtf_b0 = pass.b0;
-        ctx.hrtf_b1 = pass.b1;
-        ctx.hrtf_b2 = pass.b2;
-        ctx.hrtf_a1 = pass.a1;
-        ctx.hrtf_a2 = pass.a2;
-    }
-
-    /* Configure MixBin routing mask and gains */
-    if (src->buffer->channels == 1) {
-        /* Mono 3D positional: 5.1 multichannel routing mask enables MixBins 0..5 */
-        ctx.mixbin_routing_mask = 0x0000003F;
-        memcpy(ctx.mixbin_gain, calc.mixbin_gain, sizeof(ctx.mixbin_gain));
-    } else {
-        /* Stereo 2D direct: direct route to MixBins 0 and 1 at unity multiplier */
-        ctx.mixbin_routing_mask = 0x00000003;
-        memset(ctx.mixbin_gain, 0, sizeof(ctx.mixbin_gain));
-        ctx.mixbin_gain[0] = 0xFF;
-        ctx.mixbin_gain[1] = 0xFF;
-    }
-
-
-    /* Program hardware voice context, ensure unpaused, and trigger */
-    apu_voice_setup((uint32_t)idx, &ctx);
-    apu_voice_pause(s_apu_base, (uint32_t)idx, 0);
-    apu_voice_trigger(s_apu_base, (uint32_t)idx);
-
     src->state = AL_PLAYING;
 }
 
@@ -1238,17 +1114,7 @@ AL_API void AL_APIENTRY alSourceStop(ALuint source) {
     }
 
     if (src->state == AL_PLAYING || src->state == AL_PAUSED) {
-        if (src->hw_voice_idx >= 0) {
-            NVAPU_VOICE_CONTEXT_3D *vctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
-            if (vctx) {
-                vctx->master_vol_left = 0;
-                vctx->master_vol_right = 0;
-                memset(vctx->mixbin_gain, 0, sizeof(vctx->mixbin_gain));
-            }
-            apu_voice_stop(s_apu_base, (uint32_t)src->hw_voice_idx);
-            s_hw_voice_owner[src->hw_voice_idx] = AL_HW_VOICE_INVALID;
-            src->hw_voice_idx = AL_HW_VOICE_INVALID;
-        }
+        apu_voice_mgr_release(src);
         src->state = AL_STOPPED;
     }
 }
@@ -1263,21 +1129,11 @@ AL_API void AL_APIENTRY alSourceRewind(ALuint source) {
     }
 
     if (src->state == AL_PLAYING || src->state == AL_PAUSED || src->state == AL_STOPPED) {
-        if (src->hw_voice_idx >= 0) {
-            NVAPU_VOICE_CONTEXT_3D *vctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
-            if (vctx) {
-                vctx->master_vol_left = 0;
-                vctx->master_vol_right = 0;
-                vctx->sample_pos_frac = 0;
-                vctx->current_prd_index = 0;
-            }
-            apu_voice_stop(s_apu_base, (uint32_t)src->hw_voice_idx);
-            s_hw_voice_owner[src->hw_voice_idx] = AL_HW_VOICE_INVALID;
-            src->hw_voice_idx = AL_HW_VOICE_INVALID;
-        }
+        apu_voice_mgr_release(src);
         src->state = AL_INITIAL;
     }
 }
+
 
 AL_API void AL_APIENTRY alSourcePlayv(ALsizei n, const ALuint *sources) {
     ensure_subsystem_initialized();

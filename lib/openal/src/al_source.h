@@ -117,6 +117,19 @@ void al_source_calc_spatial(const ALsource *src, AL_SPATIAL_CALC *calc);
  */
 void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc);
 
+/**
+ * Update APU voice manager frame tick (detect completed voices, promote virtual sources).
+ */
+void al_source_update_frame(void);
+
+/**
+ * Configure hardware voice context and trigger playback for a source.
+ *
+ * @param src Source to program into hardware.
+ * @param hw_voice_idx Hardware voice slot index (0..63).
+ */
+void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx);
+
 /*
  * ============================================================================
  * OpenAL 1.1 Source API Prototypes
