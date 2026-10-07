@@ -26,7 +26,8 @@ TESTS = test_alc_context \
         test_surround_validation \
         test_voice_mgr \
         test_wav_loader \
-        test_scene_engine
+        test_scene_engine \
+        test_interactive_modes
 
 .PHONY: all test clean $(TESTS)
 
@@ -40,13 +41,16 @@ test: all
 		echo "[ RUN      ] $$t"; \
 		./$$t || exit 1; \
 	done
-	@echo "All 19 tests passed successfully!"
+	@echo "All 20 tests passed successfully!"
 
 test_wav_loader: test_wav_loader.c $(OPENAL_DIR)/libopenal.a $(NXDK_DIR)/samples/openal_showcase/wav_loader.c
 	$(CC) $(CFLAGS) -I$(NXDK_DIR)/samples/openal_showcase test_wav_loader.c $(NXDK_DIR)/samples/openal_showcase/wav_loader.c $(OPENAL_DIR)/libopenal.a -lm -o $@
 
 test_scene_engine: test_scene_engine.c $(OPENAL_DIR)/libopenal.a $(NXDK_DIR)/samples/openal_showcase/showcase_input.c $(NXDK_DIR)/samples/openal_showcase/showcase_ui.c
 	$(CC) $(CFLAGS) -I$(NXDK_DIR)/samples/openal_showcase test_scene_engine.c $(NXDK_DIR)/samples/openal_showcase/showcase_input.c $(NXDK_DIR)/samples/openal_showcase/showcase_ui.c $(OPENAL_DIR)/libopenal.a -lm -o $@
+
+test_interactive_modes: test_interactive_modes.c $(OPENAL_DIR)/libopenal.a $(NXDK_DIR)/samples/openal_showcase/wav_loader.c $(NXDK_DIR)/samples/openal_showcase/showcase_input.c $(NXDK_DIR)/samples/openal_showcase/showcase_ui.c $(NXDK_DIR)/samples/openal_showcase/showcase_modes.c
+	$(CC) $(CFLAGS) -I$(NXDK_DIR)/samples/openal_showcase test_interactive_modes.c $(NXDK_DIR)/samples/openal_showcase/wav_loader.c $(NXDK_DIR)/samples/openal_showcase/showcase_input.c $(NXDK_DIR)/samples/openal_showcase/showcase_ui.c $(NXDK_DIR)/samples/openal_showcase/showcase_modes.c $(OPENAL_DIR)/libopenal.a -lm -o $@
 
 %: %.c $(OPENAL_DIR)/libopenal.a
 	$(CC) $(CFLAGS) $< $(OPENAL_DIR)/libopenal.a -lm -o $@
