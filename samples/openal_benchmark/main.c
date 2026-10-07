@@ -17,6 +17,10 @@
  * ============================================================================
  * Xbox Hardware Profiling Constants (Pentium III Coppermine 733.333 MHz)
  * ============================================================================
+ * The TSC frequency is ASSUMED to be 733.333 MHz; the microsecond and CPU load
+ * figures below are derived from the measured RDTSC cycles with that constant.
+ * What is timed is the CPU cost of the per-frame 3D source updates (software
+ * spatial math); no APU voice processing is measured.
  */
 #define XBOX_CPU_HZ             733333333ULL
 #define CYCLES_PER_MICROSECOND  (733.333333)
@@ -65,8 +69,8 @@ int main(void)
     XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
 
     debugPrint("====================================================\n");
-    debugPrint("  nxdk OpenAL 1.1 Pentium III RDTSC Benchmark\n");
-    debugPrint("  MCPX APU Hardware Offload vs CPU Frame Budget\n");
+    debugPrint("  nxdk OpenAL RDTSC Benchmark\n");
+    debugPrint("  CPU cost of per-frame 3D source updates\n");
     debugPrint("====================================================\n\n");
 
     debugPrint("[1/4] Opening MCPX APU Audio Device & Context...\n");
@@ -175,7 +179,8 @@ int main(void)
     }
 
     debugPrint("\n====================================================\n");
-    debugPrint("  BENCHMARK RESULTS SUMMARY (Xbox 733 MHz CPU)\n");
+    debugPrint("  BENCHMARK RESULTS SUMMARY\n");
+    debugPrint("  (time/load derived from RDTSC at an assumed 733.33 MHz)\n");
     debugPrint("====================================================\n");
     debugPrint(" Voices | Avg Cycles | Avg Time (us) | CPU Load %% (60 FPS)\n");
     debugPrint("----------------------------------------------------\n");
@@ -189,8 +194,11 @@ int main(void)
                    results[t].cpu_percent);
     }
     debugPrint("====================================================\n");
-    debugPrint(" Conclusion: APU Hardware Mixing consumes < 0.5%% CPU\n");
-    debugPrint(" Zero software mixing load on Pentium III CPU!\n");
+    debugPrint(" Measured: %u sources cost %.2f %% of a 60 FPS frame\n",
+               results[num_tiers - 1].voice_count,
+               results[num_tiers - 1].cpu_percent);
+    debugPrint(" for the software 3D update (CPU time only).\n");
+    debugPrint(" APU voice processing is not measured here.\n");
     debugPrint("====================================================\n\n");
 
     /* Continuous interactive animation loop */

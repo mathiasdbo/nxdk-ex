@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 
-#if defined(__NXDK__) || defined(_XBOX)
+#if defined(NXDK) || defined(__NXDK__) || defined(_XBOX)
 #  include <windows.h>
 #  include <hal/debug.h>
 #else

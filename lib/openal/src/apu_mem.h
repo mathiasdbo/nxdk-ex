@@ -24,9 +24,15 @@ extern "C" {
 
 /**
  * Maximum buffer chunk size that can be described by a single PRD entry.
- * Control register bits [0:15] can address up to 65535 (0xFFFF) bytes.
+ *
+ * The 16-bit size field (control bits [0:15]) could hold 65535, but an odd
+ * maximum would start every chunk after the first at an odd address and split
+ * 16-bit samples. 0xF000 (61440) is a multiple of 4096 (the hardware buffer
+ * path addresses memory in 4 KiB SGE pages, see lib/openal/docs/XEMU_VERIFICATION.md) and
+ * of every PCM frame size (1, 2, 4), so every chunk except the last is a whole
+ * number of pages and all chunk starts stay frame aligned.
  */
-#define NV_PAPU_PRD_MAX_CHUNK           65535u
+#define NV_PAPU_PRD_MAX_CHUNK           0xF000u
 
 /**
  * End-of-Table (EOT) flag set on bit 31 of PRD control DWORD.
@@ -49,7 +55,7 @@ extern "C" {
  */
 typedef struct {
     uint32_t physical_address;          /**< 32-bit physical RAM address of PCM data chunk */
-    uint32_t control;                   /**< [0:15] Size in bytes (<= 65535), [31] EOT flag */
+    uint32_t control;                   /**< [0:15] Size in bytes (<= NV_PAPU_PRD_MAX_CHUNK), [31] EOT flag */
 } __attribute__((packed)) NVAPU_PRD_ENTRY;
 
 /**
@@ -94,7 +100,7 @@ void apu_mem_shutdown(void);
 /**
  * Calculate the number of PRD entries required for a buffer of given size.
  *
- * Buffers exceeding 65535 bytes require multiple PRD entries.
+ * Buffers exceeding NV_PAPU_PRD_MAX_CHUNK (61440 bytes) require multiple PRD entries.
  *
  * @param buffer_size Buffer size in bytes.
  * @return Number of NVAPU_PRD_ENTRY elements needed.
@@ -104,9 +110,10 @@ size_t apu_prd_calculate_count(size_t buffer_size);
 /**
  * Build a Physical Region Descriptor (PRD) table from a physical buffer address.
  *
- * Buffers larger than NV_PAPU_PRD_MAX_CHUNK (65535 bytes) are split across
- * consecutive PRDs advancing the physical address accordingly. The final entry
- * has the NV_PAPU_PRD_EOT (bit 31) flag set.
+ * Buffers larger than NV_PAPU_PRD_MAX_CHUNK (61440 bytes) are split across
+ * consecutive PRDs advancing the physical address accordingly. All chunks but
+ * the last are NV_PAPU_PRD_MAX_CHUNK bytes. The final entry has the
+ * NV_PAPU_PRD_EOT (bit 31) flag set.
  *
  * @param buffer_phys Base physical address of contiguous audio buffer.
  * @param size Total buffer size in bytes.

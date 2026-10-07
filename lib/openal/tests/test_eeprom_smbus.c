@@ -71,6 +71,29 @@ int main(void) {
     printf("    -> EEPROM audio flag combinations queried accurately [PASS]\n");
 
     /*
+     * Flag layout follows the (unverified here) XDK convention: basic mode in the
+     * low 16 bits, encoded-output enables in the high 16 bits. SURROUND is a mode
+     * value (2), not a separate high bit, so it must not collide with AC3/DTS.
+     */
+    printf("[3b] Testing EEPROM audio flag layout (XDK convention)...\n");
+    /* MONO/STEREO numbering is unconfirmed (see apu_eeprom.h); this only pins the library's current values */
+    assert(XC_AUDIO_FLAGS_MONO == 0x00000000u);
+    assert(XC_AUDIO_FLAGS_STEREO == 0x00000001u);
+    assert(XC_AUDIO_FLAGS_SURROUND == 0x00000002u);
+    assert(XC_AUDIO_FLAGS_ENABLE_AC3 == 0x00010000u);
+    assert(XC_AUDIO_FLAGS_ENABLE_DTS == 0x00020000u);
+    assert((XC_AUDIO_FLAGS_SURROUND & 0xFFFF0000u) == 0);
+    assert((XC_AUDIO_FLAGS_ENABLE_AC3 & 0x0000FFFFu) == 0);
+    assert((XC_AUDIO_FLAGS_ENABLE_DTS & 0x0000FFFFu) == 0);
+    assert((XC_AUDIO_FLAGS_ENABLE_AC3 & XC_AUDIO_FLAGS_ENABLE_DTS) == 0);
+    /* Surround mode alone must not look like AC-3, so it cannot select 5.1 by itself */
+    apu_eeprom_set_mock(true, XC_AUDIO_FLAGS_SURROUND, APU_AV_PACK_HDTV);
+    assert(apu_detect_audio_topology() == APU_TOPOLOGY_STEREO_20);
+    apu_eeprom_set_mock(true, XC_AUDIO_FLAGS_SURROUND | XC_AUDIO_FLAGS_ENABLE_AC3, APU_AV_PACK_HDTV);
+    assert(apu_detect_audio_topology() == APU_TOPOLOGY_SURROUND_51);
+    printf("    -> SURROUND = 0x00000002, AC3/DTS in the high 16 bits [PASS]\n");
+
+    /*
      * ------------------------------------------------------------------------
      * Test 4: Topology Determination Matrix
      * ------------------------------------------------------------------------
@@ -129,9 +152,9 @@ int main(void) {
     apu_eeprom_set_mock(true, XC_AUDIO_FLAGS_MONO | XC_AUDIO_FLAGS_ENABLE_AC3, APU_AV_PACK_HDTV);
     assert(apu_detect_audio_topology() == APU_TOPOLOGY_SURROUND_51);
 
-    /* Case N: HDTV Pack + Full flags combination (Stereo + AC-3 + DTS + Surround) -> Surround 5.1 */
+    /* Case N: HDTV Pack + Full flags combination (Surround mode + AC-3 + DTS) -> Surround 5.1 */
     apu_eeprom_set_mock(true,
-        XC_AUDIO_FLAGS_STEREO | XC_AUDIO_FLAGS_ENABLE_AC3 | XC_AUDIO_FLAGS_ENABLE_DTS | XC_AUDIO_FLAGS_SURROUND,
+        XC_AUDIO_FLAGS_SURROUND | XC_AUDIO_FLAGS_ENABLE_AC3 | XC_AUDIO_FLAGS_ENABLE_DTS,
         APU_AV_PACK_HDTV);
     assert(apu_detect_audio_topology() == APU_TOPOLOGY_SURROUND_51);
 

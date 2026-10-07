@@ -115,7 +115,7 @@ typedef void ALvoid;
 #define AL_INVALID_OPERATION                     0xA004
 #define AL_OUT_OF_MEMORY                         0xA005
 
-/* Context String Queries */
+/* Context String Queries (AL_RENDERER also names the active backend, see AL_XBOX_BACKEND in alext.h) */
 #define AL_VENDOR                                0xB001
 #define AL_VERSION                               0xB002
 #define AL_RENDERER                              0xB003

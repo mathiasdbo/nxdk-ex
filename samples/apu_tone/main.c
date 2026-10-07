@@ -54,6 +54,24 @@ int main(void)
     debugPrint("  MCPX APU Bare-Metal Voice 0 Audio Playback POC\n");
     debugPrint("====================================================\n\n");
 
+#ifndef OPENAL_APU_REAL_MMIO
+    /*
+     * Gate: this POC programs the library's own APU register model directly
+     * into BAR0, and that model is not xemu-conformant (the GP microcode
+     * upload trips an assert and aborts xemu). Do not touch any APU MMIO
+     * unless the build explicitly opts in. See lib/openal/docs/XEMU_VERIFICATION.md.
+     */
+    debugPrint("This POC drives the raw MCPX APU register model, which is\n");
+    debugPrint("NOT xemu-conformant: running it can disturb or abort xemu\n");
+    debugPrint("(see lib/openal/docs/XEMU_VERIFICATION.md).\n\n");
+    debugPrint("Nothing was run and no APU register was touched.\n");
+    debugPrint("To run it anyway add -DOPENAL_APU_REAL_MMIO to CFLAGS in the\n");
+    debugPrint("environment (CFLAGS=-DOPENAL_APU_REAL_MMIO make); a CFLAGS=... on\n");
+    debugPrint("the make command line would drop the Makefile include paths.\n");
+    Sleep(10000); /* keep the message on screen */
+    return 0;
+#endif
+
     /* Verify hardware data structure contract sizes */
     assert(sizeof(NVAPU_VOICE_CONTEXT_3D) == 128);
     assert(sizeof(NVAPU_PRD_ENTRY) == 8);

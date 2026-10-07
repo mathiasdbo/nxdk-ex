@@ -16,7 +16,13 @@ extern "C" {
  * ============================================================================
  * The Output Processor (EP) mixes and routes the 6 GP FIFO channels to:
  * - AC'97 Codec (Stereo Front Left / Front Right analog output)
- * - Dolby Digital DSE Realtime Interactive Encoder (5.1 AC-3 TOSLink optical S/PDIF)
+ * - Dolby Digital DSE Realtime Interactive Encoder (5.1 AC-3 TOSLink optical S/PDIF), as
+ *   modelled by this library; xemu has no such encoder or control bit
+ *
+ * NOTE: this register layout is the library's own model and is not
+ * xemu-conformant (see lib/openal/docs/XEMU_VERIFICATION.md). By default alcOpenDevice()
+ * applies it to a RAM stand-in, not to the real BAR0 (AL_XBOX_BACKEND).
+ * alXboxGetHardwareStatus(AL_XBOX_DOLBY_DIGITAL_ACTIVE) does not read it.
  *
  * Register configuration:
  * - NV_PAPU_EP_FIFO_CONFIG (0x3004): 0x03 (Stereo 2.0) or 0x3F (Surround 5.1)
@@ -31,7 +37,8 @@ extern "C" {
  * Initialize the Output Processor (EP) subsystem for the specified topology.
  *
  * Configures EP FIFO channels, default routing matrix, and hardware
- * Dolby Digital DSE encoder when 5.1 surround topology is requested.
+ * Dolby Digital DSE enable bit (a model value, not a verified register) when 5.1
+ * surround topology is requested.
  *
  * @param apu_base Base MMIO address of APU (or 0 for default NV_PAPU_BASE).
  * @param topology Target audio topology (APU_TOPOLOGY_STEREO_20 or APU_TOPOLOGY_SURROUND_51).

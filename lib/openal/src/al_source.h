@@ -51,6 +51,7 @@ typedef struct ALsource {
     ALfloat lfe_gain;
     uint32_t saved_prd_index;        /* Preserved PRD index upon hardware preemption */
     uint32_t saved_sample_pos_frac;   /* Preserved sample position fractional phase upon preemption */
+    uint32_t play_seq;               /* Start order (monotonic, set by alSourcePlay); oldest loses priority ties */
 } ALsource;
 
 
@@ -88,24 +89,28 @@ ALsource *al_source_get(ALuint id);
 /**
  * Override the APU base MMIO address used by the source subsystem (host testing support).
  *
- * @param base Base MMIO address, or 0 to restore default NV_PAPU_BASE.
+ * @param base Base MMIO address, or 0 to restore the default: NV_PAPU_BASE
+ *             with -DOPENAL_APU_REAL_MMIO, otherwise an internal RAM stand-in
+ *             for the voice ACTIVE/PAUSE registers (never the real BAR0).
  */
 void al_source_set_apu_base(uintptr_t base);
 
 /**
- * Get current APU base MMIO address used by the source subsystem.
+ * Get current APU base MMIO address used by the source subsystem
+ * (the default described at al_source_set_apu_base() when none is set).
  */
 uintptr_t al_source_get_apu_base(void);
 
 /**
- * Update hardware master volume words for all active playing sources.
- * Called immediately when global listener gain changes.
+ * Update hardware master volume words for all playing or paused sources that
+ * hold a hardware voice. Called immediately when global listener gain changes.
  */
 void al_source_update_all_gains(void);
 
 /**
  * Recompute 3D spatial attenuation, cone gains, and Doppler pitch steps
- * and update hardware voice context registers for all active playing sources.
+ * and update hardware voice context registers for all playing or paused
+ * sources that hold a hardware voice (one spatial computation per source).
  * Called immediately when listener position/velocity/orientation or global models change.
  */
 void al_source_update_all_spatial(void);
@@ -138,6 +143,18 @@ void al_source_update_frame(void);
  * @param hw_voice_idx Hardware voice slot index (0..63).
  */
 void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx);
+
+/*
+ * ----------------------------------------------------------------------------
+ * Diagnostics
+ * ----------------------------------------------------------------------------
+ */
+
+/**
+ * Number of full spatial computations (al_source_compute_spatial calls) since
+ * program start; wraps at 2^32. Profiling and regression-test aid only.
+ */
+uint32_t al_source_debug_spatial_calc_count(void);
 
 /*
  * ============================================================================
