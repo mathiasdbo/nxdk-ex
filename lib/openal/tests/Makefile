@@ -24,7 +24,8 @@ TESTS = test_alc_context \
         test_spatial_attenuation \
         test_stereo_downmix \
         test_surround_validation \
-        test_voice_mgr
+        test_voice_mgr \
+        test_wav_loader
 
 .PHONY: all test clean $(TESTS)
 
@@ -38,7 +39,10 @@ test: all
 		echo "[ RUN      ] $$t"; \
 		./$$t || exit 1; \
 	done
-	@echo "All 17 tests passed successfully!"
+	@echo "All 18 tests passed successfully!"
+
+test_wav_loader: test_wav_loader.c $(OPENAL_DIR)/libopenal.a $(NXDK_DIR)/samples/openal_showcase/wav_loader.c
+	$(CC) $(CFLAGS) -I$(NXDK_DIR)/samples/openal_showcase test_wav_loader.c $(NXDK_DIR)/samples/openal_showcase/wav_loader.c $(OPENAL_DIR)/libopenal.a -lm -o $@
 
 %: %.c $(OPENAL_DIR)/libopenal.a
 	$(CC) $(CFLAGS) $< $(OPENAL_DIR)/libopenal.a -lm -o $@
