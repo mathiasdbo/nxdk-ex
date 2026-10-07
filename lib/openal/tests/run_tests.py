@@ -113,7 +113,7 @@ def run_all_tests(clang, openal_dir, lib_path):
                 os.path.join(showcase_dir, "showcase_input.c"),
                 os.path.join(showcase_dir, "showcase_ui.c")
             ])
-        elif "test_interactive_modes.c" in tname:
+        elif "test_interactive_modes.c" in tname or "test_showcase_qa.c" in tname:
             compile_cmd.extend([
                 os.path.join(showcase_dir, "wav_loader.c"),
                 os.path.join(showcase_dir, "showcase_input.c"),
