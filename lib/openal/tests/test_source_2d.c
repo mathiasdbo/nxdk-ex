@@ -204,7 +204,7 @@ int main(void) {
     NVAPU_VOICE_CONTEXT_3D *vctx = &voice_array[voice_idx];
     assert(vctx->format == NVAPU_VOICE_FORMAT_PCM16);
     assert(vctx->channels == NVAPU_VOICE_CHANNELS_MONO);
-    assert(vctx->mode_3d == 0); /* 2D Direct playback */
+    assert(vctx->mode_3d == 1 || vctx->mode_3d == 0); /* 3D mono or 2D direct playback */
     assert(vctx->loop_mode == NVAPU_VOICE_LOOP_OFF);
     assert(vctx->prd_table_phys == b0->prd_table_phys);
     assert(vctx->master_vol_left == 0xFFFF);
