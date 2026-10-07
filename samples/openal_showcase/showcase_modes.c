@@ -258,12 +258,12 @@ void showcase_app_update(showcase_app_t *app, const showcase_input_t *input) {
             while (azimuth_deg >= 360.0f) azimuth_deg -= 360.0f;
 
             snprintf(app->telemetry_buf, sizeof(app->telemetry_buf),
-                     " [3D Positional Orbit & Psychoacoustic Filtering]\n"
+                     " [3D Positional Orbit & Spatial Model]\n"
                      " Source Pos: (%5.2f, %5.2f, %5.2f) | Distance: %5.2fm\n"
                      " Azimuth: %5.1f deg | Orbit Speed: %5.2f rad/s\n"
                      " Camera Yaw: %5.1f deg | Pitch: %5.1f deg\n"
-                     " Hardware Offload: Woodworth ITD (0-64 samples delay) active\n"
-                     " Hardware Offload: Q14 Butterworth HRTF Biquad active\n",
+                     " Spatial model: Woodworth ITD up to 31 samples\n"
+                     " HRTF model: Q14 biquad (library model, default backend is silent)\n",
                      x, y, z, app->orbit_radius,
                      azimuth_deg, app->orbit_speed,
                      app->camera_yaw * 180.0f / (float)M_PI,
@@ -306,8 +306,8 @@ void showcase_app_update(showcase_app_t *app, const showcase_input_t *input) {
                      " [High-Speed Fly-By & Doppler Pitch Shift]\n"
                      " Projectile State: %s\n"
                      " Position: (%5.2f, %5.2f, %5.2f) | Speed: %5.1f m/s (151 km/h)\n"
-                     " Real-Time Pitch Resampler Multiplier: %5.3fx\n"
-                     " Hardware Offload: APU Polyphase Pitch Resampler (16.16 format)\n",
+                     " Doppler Pitch Multiplier: %5.3fx\n"
+                     " Pitch step: linear 16.16 (library model, not APU 4.12 log2)\n",
                      app->doppler_flying ? "FLYING (Crossing at z = -1.2m)" : "STANDBY (Pull RT to Launch)",
                      app->doppler_pos_x, app->doppler_pos_y, app->doppler_pos_z,
                      app->doppler_flying ? app->doppler_speed : 0.0f,
@@ -339,12 +339,12 @@ void showcase_app_update(showcase_app_t *app, const showcase_input_t *input) {
             snprintf(app->telemetry_buf, sizeof(app->telemetry_buf),
                      " [Multichannel 5.1 Surround & LFE Discrete Channel Test]\n"
                      " Active Speaker: %s\n"
-                     " Hardware Topology: %s | TOSLink AC-3 Bitstream: %s\n"
-                     " Output Processor (EP) FIFO Mask: 0x%02X\n"
+                     " Topology: %s | Dolby Digital: %s\n"
+                     " EP FIFO config (library model value): 0x%02X\n"
                      " Subwoofer LFE Factor: %s\n",
                      ch_names[app->surround_channel_idx],
                      (app->topology == 1) ? "Surround 5.1" : "Stereo 2.0 (Downmixed)",
-                     app->dolby_dse_active ? "ENABLED" : "DISABLED",
+                     app->dolby_dse_active ? "configured (no AC-3 encoder)" : "not configured",
                      (app->topology == 1) ? 0x3F : 0x03,
                      (app->surround_channel_idx == 5) ? "1.0 (Full 100% Subwoofer Output)" : "0.0 (Satellite Only)");
 
@@ -376,8 +376,8 @@ void showcase_app_update(showcase_app_t *app, const showcase_input_t *input) {
             uint32_t standby = apu_voice_mgr_get_virtual_standby_count();
 
             snprintf(app->telemetry_buf, sizeof(app->telemetry_buf),
-                     " [64 Hardware Voice Polyphony & Priority Stealing Stress Test]\n"
-                     " Active Hardware APU Voices: %2u / 64\n"
+                     " [64-Voice Polyphony & Priority Stealing Stress Test]\n"
+                     " Active Voice Slots (library model): %2u / 64\n"
                      " Virtualized Standby Queue:   %2u sources\n"
                      " Preemption Protocol:         Mute-then-halt (no ramp)\n"
                      " Backend:                     %s\n",
@@ -408,7 +408,7 @@ void showcase_app_update(showcase_app_t *app, const showcase_input_t *input) {
                      " [Concurrent 2D Direct Stereo Music & 3D Positional Audio]\n"
                      " 2D Stereo Music Status: %s (Direct Front Left / Front Right)\n"
                      " 3D Positional Voice:    ACTIVE (Orbiting at radius 5.0m)\n"
-                     " Bus Bandwidth:          Validated (Concurrent 2D Direct + 3D ITD/HRTF)\n",
+                     " Concurrency:            2D stereo source + 3D source (library model)\n",
                      app->bgm_playing ? "PLAYING" : "PAUSED");
 
             snprintf(app->footer_buf, sizeof(app->footer_buf),
@@ -428,7 +428,7 @@ void showcase_app_render_ui(showcase_app_t *app) {
 
     const char *mode_titles[] = {
         "None",
-        "Orbit 3D & Headphone ITD/HRTF",
+        "Orbit 3D & ITD/HRTF Model",
         "Doppler Fly-By Pitch Shifter",
         "5.1 Surround & LFE Channels",
         "64-Voice Polyphony Stress",
