@@ -140,7 +140,7 @@ static const char *get_av_pack_name(ALint pack)
 static const char *get_topology_name(ALCint topo)
 {
     switch (topo) {
-        case 1:  return "Surround 5.1 (Dolby Digital DSE / Optical S/PDIF)";
+        case 1:  return "Surround 5.1 (configuration only; no AC-3 encoder)";
         case 0:  return "Stereo 2.0 (AC'97 Analog Downmix)";
         default: return "Unknown Topology";
     }
@@ -153,7 +153,7 @@ int main(void)
 
     debugPrint("====================================================\n");
     debugPrint("  OpenAL 1.1 Multichannel 5.1 Surround Test Demo    \n");
-    debugPrint("  MCPX APU Discrete Channel Isolation & DSE Lock   \n");
+    debugPrint("  Discrete 5.1 channel routing test (library model)\n");
     debugPrint("====================================================\n\n");
 
     /*
@@ -201,7 +201,7 @@ int main(void)
     debugPrint("\n=== Hardware Configuration Diagnostics ===\n");
     debugPrint("  AV Pack Detected : %s (0x%02X)\n", get_av_pack_name(av_pack), (unsigned int)av_pack);
     debugPrint("  Audio Topology   : %s\n", get_topology_name(topology));
-    debugPrint("  Dolby Digital DSE: %s\n", dse_active ? "ACTIVE (Optical TOSLink Lock)" : "INACTIVE (AC'97 Stereo)");
+    debugPrint("  Dolby Digital    : %s\n", dse_active ? "configured (no AC-3 encoder)" : "not configured (stereo)");
     debugPrint("==========================================\n\n");
 
     /*

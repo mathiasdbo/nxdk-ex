@@ -23,9 +23,10 @@
  * Because every harmonic phase aligns perfectly at sample 0 and sample 4800,
  * the 100 ms buffer loops seamlessly with zero phase discontinuities or clicks.
  *
- * Rich harmonics up to ~16 kHz (36 harmonics) ensure that HRTF pinna/elevation
- * biquad filtering (10 kHz - 18 kHz cutoff) and Woodworth ITD phase shifts
- * are clearly audible on headphones.
+ * Rich harmonics up to ~16 kHz (36 harmonics) give the library's HRTF
+ * pinna/elevation biquad model (10 kHz - 18 kHz cutoff) and its Woodworth ITD
+ * model broadband content to act on. The default backend outputs no sound, so
+ * none of this is audible unless a real output path is added.
  * ============================================================================
  */
 #define SAMPLE_RATE_HZ          48000
@@ -104,7 +105,7 @@ int main(void)
 
     debugPrint("====================================================\n");
     debugPrint("  nxdk OpenAL 1.1 3D Spatial Audio Demo\n");
-    debugPrint("  MCPX APU Hardware 3D Spatializer & HRTF/ITD\n");
+    debugPrint("  3D spatializer (library model: ITD + elevation filter)\n");
     debugPrint("====================================================\n\n");
 
     /*
