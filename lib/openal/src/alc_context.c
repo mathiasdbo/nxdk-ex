@@ -11,6 +11,7 @@
 #include "apu_ep.h"
 #include "apu_mem.h"
 #include "apu_voice.h"
+#include "apu_voice_mgr.h"
 #include "apu_gp_ucode.h"
 #include "al_buffer.h"
 #include "al_source.h"
@@ -170,6 +171,7 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
             alc_set_error(NULL, ALC_INVALID_VALUE);
             return NULL;
         }
+        apu_voice_mgr_init();
 
         /* 6. OpenAL object subsystems */
         al_buffer_init_subsystem();
@@ -222,6 +224,7 @@ ALC_API ALCboolean ALC_APIENTRY alcCloseDevice(ALCdevice *device) {
             apu_itd_subsystem_deinit();
 
             /* Deinitialize hardware subsystems */
+            apu_voice_mgr_deinit();
             apu_voice_subsystem_deinit(device->apu_base);
             apu_gp_stop(device->apu_base);
             apu_ep_subsystem_deinit(device->apu_base);
