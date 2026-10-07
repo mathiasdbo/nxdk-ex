@@ -97,14 +97,18 @@ def run_all_tests(clang, openal_dir, lib_path):
 
     for idx, tf in enumerate(test_files, 1):
         tname = os.path.basename(tf)
+        showcase_dir = os.path.abspath(os.path.join(openal_dir, "..", "..", "samples", "openal_showcase"))
         compile_cmd = [
             clang,
             "-I", inc_dir,
             "-I", src_dir,
+            "-I", showcase_dir,
             "-Wall", "-Werror", "-pedantic", "-std=c99",
-            tf, lib_path,
-            "-o", temp_exe
+            tf
         ]
+        if "test_wav_loader.c" in tname:
+            compile_cmd.append(os.path.join(showcase_dir, "wav_loader.c"))
+        compile_cmd.extend([lib_path, "-o", temp_exe])
         compile_res = subprocess.run(compile_cmd, capture_output=True, text=True)
         if compile_res.returncode != 0:
             print(f"[{idx:02d}/{len(test_files):02d}] [FAIL - COMPILE] {tname}")
