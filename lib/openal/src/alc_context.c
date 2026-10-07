@@ -83,10 +83,20 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
         apu_base = NV_PAPU_BASE;
     }
 
+    /* Allocate device handle and detect audio topology */
+    ALCdevice *device = (ALCdevice *)calloc(1, sizeof(ALCdevice));
+    if (!device) {
+        alc_set_error(NULL, ALC_OUT_OF_MEMORY);
+        return NULL;
+    }
+
+    device->topology = apu_detect_audio_topology();
+
     /* Initialize hardware resources on first open device */
     if (s_active_device_count == 0) {
         /* 1. Contiguous physical memory pool */
         if (apu_mem_init(0) != 0) {
+            free(device);
             alc_set_error(NULL, ALC_OUT_OF_MEMORY);
             return NULL;
         }
@@ -99,6 +109,7 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
         );
         if (!s_hw_voice_table_virt) {
             apu_mem_shutdown();
+            free(device);
             alc_set_error(NULL, ALC_OUT_OF_MEMORY);
             return NULL;
         }
@@ -110,23 +121,25 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
             s_hw_voice_table_virt = NULL;
             s_hw_voice_table_phys = 0;
             apu_mem_shutdown();
+            free(device);
             alc_set_error(NULL, ALC_OUT_OF_MEMORY);
             return NULL;
         }
 
-        /* 3. Output Processor (EP) stereo FIFO routing */
-        apu_write32(apu_base, NV_PAPU_EP_FIFO_CONFIG, NV_PAPU_EP_FIFO_CONFIG_STEREO);
+        /* 3. Output Processor (EP) FIFO routing & enable */
         apu_write32(apu_base, NV_PAPU_EP_FIFO_ROUTE, NV_PAPU_EP_ROUTE_DEFAULT);
         apu_write32(apu_base, NV_PAPU_EP_CONTROL, NV_PAPU_EP_CONTROL_ENABLE);
 
-        /* 4. Global Processor (GP) DSP 5.1 passthrough microcode */
-        int ucode_res = apu_gp_load_microcode(apu_base, gp_passthrough_51_bin, GP_PASSTHROUGH_51_SIZE);
+        /* 4. Global Processor (GP) DSP microcode & EP FIFO configuration */
+        int ucode_res = apu_gp_load_topology_microcode(apu_base, device->topology);
         if (ucode_res != 0) {
+            apu_write32(apu_base, NV_PAPU_EP_CONTROL, 0u);
             apu_itd_subsystem_deinit();
             apu_mem_free_phys(s_hw_voice_table_virt);
             s_hw_voice_table_virt = NULL;
             s_hw_voice_table_phys = 0;
             apu_mem_shutdown();
+            free(device);
             alc_set_error(NULL, ALC_INVALID_VALUE);
             return NULL;
         }
@@ -136,11 +149,13 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
         int vp_res = apu_voice_subsystem_init(apu_base, s_hw_voice_table_virt, s_hw_voice_table_phys);
         if (vp_res != 0) {
             apu_gp_stop(apu_base);
+            apu_write32(apu_base, NV_PAPU_EP_CONTROL, 0u);
             apu_itd_subsystem_deinit();
             apu_mem_free_phys(s_hw_voice_table_virt);
             s_hw_voice_table_virt = NULL;
             s_hw_voice_table_phys = 0;
             apu_mem_shutdown();
+            free(device);
             alc_set_error(NULL, ALC_INVALID_VALUE);
             return NULL;
         }
@@ -150,22 +165,6 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
         al_source_init_subsystem();
         al_listener_init();
         al_source_set_apu_base(apu_base);
-    }
-
-    ALCdevice *device = (ALCdevice *)calloc(1, sizeof(ALCdevice));
-    if (!device) {
-        if (s_active_device_count == 0) {
-            apu_voice_subsystem_deinit(apu_base);
-            apu_gp_stop(apu_base);
-            apu_write32(apu_base, NV_PAPU_EP_CONTROL, 0u);
-            apu_itd_subsystem_deinit();
-            apu_mem_free_phys(s_hw_voice_table_virt);
-            s_hw_voice_table_virt = NULL;
-            s_hw_voice_table_phys = 0;
-            apu_mem_shutdown();
-        }
-        alc_set_error(NULL, ALC_OUT_OF_MEMORY);
-        return NULL;
     }
 
     device->is_open = true;
@@ -474,6 +473,14 @@ ALC_API void ALC_APIENTRY alcGetIntegerv(ALCdevice *device, ALCenum param, ALCsi
 
         case ALC_CAPTURE_SAMPLES:
             *values = 0;
+            break;
+
+        case ALC_XBOX_TOPOLOGY:
+            if (device != NULL) {
+                *values = (ALCint)device->topology;
+            } else {
+                *values = (ALCint)apu_detect_audio_topology();
+            }
             break;
 
         default:
