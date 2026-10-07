@@ -9,3 +9,4 @@ include $(NXDK_DIR)/lib/zlib/Makefile
 include $(NXDK_DIR)/lib/libpng/Makefile
 include $(NXDK_DIR)/lib/libjpeg/Makefile
 include $(NXDK_DIR)/lib/xboxkrnl/Makefile
+include $(NXDK_DIR)/lib/openal/Makefile
