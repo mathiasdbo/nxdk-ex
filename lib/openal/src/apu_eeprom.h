@@ -12,9 +12,16 @@ extern "C" {
  * ============================================================================
  * Xbox Hardware AV Pack Identifiers (PIC SMBus Slave 0x20, Command 0x04)
  * ============================================================================
- * The Xbox System Management Controller (SMC PIC) samples the AV pack ID
- * pins at boot and runtime.
- * Optical-capable packs feature an integrated TOSLink port:
+ * The Xbox System Management Controller (SMC PIC) reports the connected AV
+ * pack in register 0x04. That register returns RAW pack codes (APU_SMC_AV_PACK_*
+ * below), which are NOT the same numbers as the APU_AV_PACK_* identifiers used
+ * by this library. APU_AV_PACK_* mirrors the kernel AV_PACK_* enum
+ * (xboxkrnl.h) and is what apu_query_smbus_av_pack() returns; the raw code is
+ * translated with apu_av_pack_from_smc().
+ *
+ * ASSUMPTION (unverified; xemu only reports the pack code and says nothing
+ * about optical output): the packs treated as having an integrated TOSLink
+ * port are
  * - APU_AV_PACK_SCART  (Advanced SCART AV Pack - Europe)
  * - APU_AV_PACK_HDTV   (High Definition AV Pack - Component YPbPr + Optical)
  * - APU_AV_PACK_SVIDEO (Advanced AV Pack - S-Video + Composite + Optical)
@@ -29,15 +36,37 @@ extern "C" {
 #define APU_AV_PACK_SVIDEO      0x06u
 
 /*
+ * Raw SMC register 0x04 pack codes (xemu hw/xbox/smbus_xbox_smc.c,
+ * SMC_REG_AVPACK_*). See lib/openal/docs/XEMU_VERIFICATION.md.
+ */
+#define APU_SMC_AV_PACK_SCART       0x00u
+#define APU_SMC_AV_PACK_HDTV        0x01u
+#define APU_SMC_AV_PACK_VGA         0x02u
+#define APU_SMC_AV_PACK_RFU         0x03u
+#define APU_SMC_AV_PACK_SVIDEO      0x04u
+#define APU_SMC_AV_PACK_COMPOSITE   0x06u
+#define APU_SMC_AV_PACK_NONE        0x07u
+
+/*
  * ============================================================================
  * Xbox EEPROM Non-Volatile Audio Settings Flags
  * ============================================================================
  * Queried via ExQueryNonVolatileSetting(XC_AUDIO, ...).
  * Configured by user in MS Dashboard / Audio Settings.
+ *
+ * ASSUMPTION (UNVERIFIED: neither xemu nor the nxdk headers define these
+ * flags): the basic output mode lives in the low 16 bits and is a mode, not
+ * independent bits; SURROUND is 2; the encoded-output enables live in the high
+ * 16 bits (AC3 0x00010000, DTS 0x00020000), as in the Microsoft XDK. The
+ * numbering of MONO (0) and STEREO (1) is NOT confirmed (XDK-style headers may
+ * order them the other way round); nothing in this library depends on it,
+ * because apu_detect_audio_topology() only tests the AC3 bit.
  * ============================================================================
  */
+/* Identical spelling to xboxkrnl.h (0x0009) so including both in either order
+ * is a benign identical redefinition, not a macro-redefined warning. */
 #ifndef XC_AUDIO
-#define XC_AUDIO                0x0009u
+#define XC_AUDIO                0x0009
 #endif
 
 #ifndef XC_AUDIO_FLAGS_MONO
@@ -57,7 +86,7 @@ extern "C" {
 #endif
 
 #ifndef XC_AUDIO_FLAGS_SURROUND
-#define XC_AUDIO_FLAGS_SURROUND     0x00040000u
+#define XC_AUDIO_FLAGS_SURROUND     0x00000002u
 #endif
 
 /*
@@ -96,21 +125,37 @@ typedef enum APU_AUDIO_TOPOLOGY {
 uint32_t apu_query_eeprom_audio_flags(void);
 
 /**
+ * Translate a raw SMC AV pack code (SMBus register 0x04) to APU_AV_PACK_*.
+ *
+ * Only the low 8 bits of raw_smc are used (the register is one byte wide, so
+ * 0x106 decodes like 0x06). Codes the SMC does not define (0x05 and anything
+ * above 0x07) decode to APU_AV_PACK_NONE, which is not an optical pack.
+ *
+ * @param raw_smc Raw value read from SMC register 0x04 (APU_SMC_AV_PACK_*).
+ * @return AV pack identifier (APU_AV_PACK_*).
+ */
+uint32_t apu_av_pack_from_smc(uint32_t raw_smc);
+
+/**
  * Query connected AV Pack type from the System Management Controller (PIC).
  *
  * On Xbox hardware, reads register 0x04 from SMBus PIC slave 0x20 via
- * HalReadSMBusValue. Falls back to APU_AV_PACK_STANDARD on failure.
+ * HalReadSMBusValue and decodes the raw code with apu_av_pack_from_smc().
+ * If the SMBus read fails, falls back to APU_AV_PACK_STANDARD (no optical
+ * output assumed, so the topology resolves to stereo). Host builds always
+ * return APU_AV_PACK_STANDARD unless mocked.
  *
- * @return AV Pack identifier (APU_AV_PACK_*).
+ * @return AV Pack identifier (APU_AV_PACK_*), never a raw SMC code.
  */
 uint32_t apu_query_smbus_av_pack(void);
 
 /**
  * Determine if the specified AV Pack type has TOSLink optical digital output.
  *
- * Optical packs include HDTV, Advanced S-Video, and Advanced SCART.
+ * Treats HDTV, Advanced S-Video, and Advanced SCART as optical. Which packs
+ * actually expose TOSLink is an UNVERIFIED assumption (xemu is silent on it).
  *
- * @param av_pack AV pack identifier (APU_AV_PACK_*).
+ * @param av_pack AV pack identifier (APU_AV_PACK_*), not a raw SMC code.
  * @return true if AV pack supports optical S/PDIF output, false otherwise.
  */
 bool apu_is_optical_pack_connected(uint32_t av_pack);
@@ -138,7 +183,8 @@ APU_AUDIO_TOPOLOGY apu_detect_audio_topology(void);
  *
  * @param enable If true, mock values are returned by query functions.
  * @param audio_flags Simulated EEPROM flags bitmask.
- * @param av_pack Simulated SMBus AV pack identifier.
+ * @param av_pack Simulated AV pack, an already decoded APU_AV_PACK_* value (the
+ *                result of apu_av_pack_from_smc(), not a raw SMC code).
  */
 void apu_eeprom_set_mock(bool enable, uint32_t audio_flags, uint32_t av_pack);
 

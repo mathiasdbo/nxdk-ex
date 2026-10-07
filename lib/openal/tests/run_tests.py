@@ -1,14 +1,27 @@
 #!/usr/bin/env python3
 """
 Master Regression Test Runner for nxdk-ex OpenAL MCPX APU Subsystem
-Compiles libopenal.a and executes all 17 host unit tests.
+
+Compiles lib/openal/src/*.c into a static library and then builds and runs
+every lib/openal/tests/test_*.c host unit test against it. Tests are
+discovered by globbing, so a new test_*.c file is picked up automatically
+(tests/Makefile derives its test list from the same files).
+
+All build products (objects, libopenal.a, test executables) are written to a
+temporary directory that is removed on exit; nothing is left in the source
+tree.
 """
 
 import os
 import sys
 import glob
 import shutil
+import tempfile
 import subprocess
+
+# Upper bound for a single test run, so a hanging test fails instead of
+# blocking the runner forever.
+TEST_TIMEOUT_SECONDS = 180
 
 def find_llvm_tools():
     clang = shutil.which("clang")
@@ -30,32 +43,31 @@ def find_llvm_tools():
 
     return clang, llvm_ar
 
-def build_static_library(clang, llvm_ar, openal_dir):
+def math_link_flags():
+    # The tests call sinf/cosf/powf/...; on Linux and macOS libm has to be
+    # linked explicitly, whereas the Windows (MSVC ABI) clang provides it.
+    if sys.platform.startswith("win"):
+        return []
+    return ["-lm"]
+
+def build_static_library(clang, llvm_ar, openal_dir, build_dir):
     src_dir = os.path.join(openal_dir, "src")
     inc_dir = os.path.join(openal_dir, "include")
-    lib_path = os.path.join(openal_dir, "libopenal.a")
+    lib_path = os.path.join(build_dir, "libopenal.a")
 
-    src_files = [
-        "apu_mem.c",
-        "apu_voice.c",
-        "apu_spatial.c",
-        "apu_eeprom.c",
-        "apu_ep.c",
-        "apu_voice_mgr.c",
-        "al_buffer.c",
-        "al_listener.c",
-        "al_source.c",
-        "alc_context.c"
-    ]
+    src_files = sorted(glob.glob(os.path.join(src_dir, "*.c")))
+    if not src_files:
+        print(f"[ERROR] No library sources found in {src_dir}")
+        sys.exit(1)
 
     print("================================================================================")
     print(" Compiling OpenAL Static Library (libopenal.a)...")
     print("================================================================================")
 
     objs = []
-    for src in src_files:
-        c_path = os.path.join(src_dir, src)
-        obj_path = os.path.join(src_dir, src.replace(".c", ".obj"))
+    for c_path in src_files:
+        src = os.path.basename(c_path)
+        obj_path = os.path.join(build_dir, src.replace(".c", ".obj"))
         cmd = [
             clang, "-c",
             "-I", inc_dir,
@@ -76,17 +88,19 @@ def build_static_library(clang, llvm_ar, openal_dir):
         print(f"[FAIL] Error archiving libopenal.a:\n{res.stderr}")
         sys.exit(1)
 
-    print(f"  [AR]  Successfully created {lib_path}\n")
+    print(f"  [AR]  Successfully created {os.path.basename(lib_path)} ({len(objs)} objects)\n")
     return lib_path
 
-def run_all_tests(clang, openal_dir, lib_path):
+def run_all_tests(clang, openal_dir, lib_path, build_dir):
     src_dir = os.path.join(openal_dir, "src")
     inc_dir = os.path.join(openal_dir, "include")
     tests_dir = os.path.join(openal_dir, "tests")
 
     test_files = sorted(glob.glob(os.path.join(tests_dir, "test_*.c")))
-    temp_dir = os.environ.get("TEMP", ".")
-    temp_exe = os.path.join(temp_dir, "nxdk_al_test_runner.exe")
+    if not test_files:
+        print(f"[ERROR] No test_*.c files found in {tests_dir}")
+        sys.exit(1)
+    temp_exe = os.path.join(build_dir, "nxdk_al_test_runner.exe")
 
     print("================================================================================")
     print(f" Running {len(test_files)} Unit Tests against libopenal.a...")
@@ -120,7 +134,7 @@ def run_all_tests(clang, openal_dir, lib_path):
                 os.path.join(showcase_dir, "showcase_ui.c"),
                 os.path.join(showcase_dir, "showcase_modes.c")
             ])
-        compile_cmd.extend([lib_path, "-o", temp_exe])
+        compile_cmd.extend([lib_path] + math_link_flags() + ["-o", temp_exe])
         compile_res = subprocess.run(compile_cmd, capture_output=True, text=True)
         if compile_res.returncode != 0:
             print(f"[{idx:02d}/{len(test_files):02d}] [FAIL - COMPILE] {tname}")
@@ -128,7 +142,16 @@ def run_all_tests(clang, openal_dir, lib_path):
             failed_count += 1
             continue
 
-        run_res = subprocess.run([temp_exe], capture_output=True, text=True)
+        # cwd is tests/ to match "make test" (the Makefile runs every test from
+        # there). No test currently opens or writes a file, so this is not
+        # load-bearing today; it only keeps the two runners equivalent.
+        try:
+            run_res = subprocess.run([temp_exe], capture_output=True, text=True,
+                                     cwd=tests_dir, timeout=TEST_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            print(f"[{idx:02d}/{len(test_files):02d}] [FAIL - TIMEOUT] {tname} (> {TEST_TIMEOUT_SECONDS}s)")
+            failed_count += 1
+            continue
         if run_res.returncode != 0:
             print(f"[{idx:02d}/{len(test_files):02d}] [FAIL - RUNTIME] {tname}")
             print(f"       Details: {(run_res.stderr or run_res.stdout).strip()[:200]}")
@@ -137,12 +160,6 @@ def run_all_tests(clang, openal_dir, lib_path):
 
         print(f"[{idx:02d}/{len(test_files):02d}] [PASS] {tname}")
         passed_count += 1
-
-    if os.path.exists(temp_exe):
-        try:
-            os.remove(temp_exe)
-        except OSError:
-            pass
 
     print("================================================================================")
     print(f" SUMMARY: {passed_count}/{len(test_files)} PASSED | {failed_count} FAILED")
@@ -156,8 +173,9 @@ def main():
     openal_dir = os.path.abspath(os.path.join(script_dir, ".."))
 
     clang, llvm_ar = find_llvm_tools()
-    lib_path = build_static_library(clang, llvm_ar, openal_dir)
-    run_all_tests(clang, openal_dir, lib_path)
+    with tempfile.TemporaryDirectory(prefix="nxdk_al_tests_") as build_dir:
+        lib_path = build_static_library(clang, llvm_ar, openal_dir, build_dir)
+        run_all_tests(clang, openal_dir, lib_path, build_dir)
 
 if __name__ == "__main__":
     main()

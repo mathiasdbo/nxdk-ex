@@ -15,12 +15,35 @@ extern "C" {
  * ============================================================================
  * Motorola DSP56300 Global Processor (GP) Microcode Definitions
  * ============================================================================
- * The MCPX APU Global Processor executes 24-bit DSP instructions mapped
- * into 32-bit DWORDs in Program RAM (NV_PAPU_GPDSP_PRAM @ 0xFE820000).
+ * WARNING: the two microcode listings below are NOT valid DSP56300 programs
+ * as commented, and they cannot run on the APU as modelled by xemu (478b4f4).
+ * Do not load them into a real or emulated GP. alcOpenDevice() nevertheless
+ * still writes them to the model register file (apu_gp_load_topology_microcode
+ * and apu_gp_start): into a RAM stand-in with the default null backend, into
+ * the real BAR0 only with -DOPENAL_APU_REAL_MMIO. The host tests compare
+ * against these arrays. Decoded with xemu's opcode tables (dsp_cpu.c), the
+ * commented-out mnemonics do not match:
+ *  - 0x00000C (commented WAIT) is RTS; WAIT is 0x000086, and it is a no-op in
+ *    xemu's interpreter. An RTS with an empty stack asserts in xemu.
+ *  - 0x0E4000 / 0x0E4900 / 0x0E4D00 (commented MOVE) are conditional jumps
+ *    (jcc xxx); 0x08E040 is a movep, not an indexed X move.
+ *  - 0x0000F8 is the complete one-word "ori #0,mr", so 0x001000 is executed as
+ *    an instruction of its own and matches no opcode (assert). xemu's DSP
+ *    core has no saturation-mode bit to set.
+ *  - Only NOP (0x000000) and the long JMP pairs (0x0AF080 + address) decode as
+ *    commented.
+ * The address map is wrong as well. In xemu the MixBins are X:0x1400 + 32 * bin
+ * (32 samples per bin and frame, aliased at X:0x0C00); X:0x0000.. is plain
+ * RAM. Y RAM has 2048 words, so Y:$FFB0 is out of range (an access asserts in
+ * xemu's interpreter). Peripherals live at X:0xFFFF80 and up: a program ends
+ * each 32-sample frame by writing bit 0 to X:$FFFFC4, and output leaves the GP
+ * through the DMA engine into 4 GP output FIFOs (not six EP FIFOs in Y RAM).
+ * Audio frames are 32 samples, not one sample per 48 kHz tick.
  *
- * Audio frames run synchronously at 48 kHz triggered by hardware frame ticks.
- * - Input:  32 discrete MixBins mapped in X-RAM (X:$0000 .. X:$001F)
- * - Output: 6 EP FIFOs mapped in Y-RAM (Y:$FFB0 .. Y:$FFB5)
+ * Likewise apu_gp_load_microcode() / apu_gp_start() / apu_gp_stop() drive the
+ * software-model registers of apu_hardware.h: on xemu 0x20000 is the VP
+ * method window (GP program memory is at BAR0 + 0x3A000, released through
+ * GPRST) and 0x2000 is SECTL. See lib/openal/docs/XEMU_VERIFICATION.md.
  * ============================================================================
  */
 
@@ -40,7 +63,8 @@ extern "C" {
  * ----------------------------------------------------------------------------
  * 5.1 Surround Passthrough Microcode (81 DWORDs)
  * ----------------------------------------------------------------------------
- * Routes 6 discrete MixBins directly to 6 Output Processor FIFOs:
+ * NOT valid DSP56300 as commented (see the banner). Intended behaviour of
+ * the model: route 6 discrete MixBins directly to 6 Output Processor FIFOs:
  *   X:$0000 -> Y:$FFB0 (Front Left)
  *   X:$0001 -> Y:$FFB1 (Front Right)
  *   X:$0002 -> Y:$FFB2 (Surround Left)
@@ -83,6 +107,8 @@ static const uint32_t gp_passthrough_51_bin[GP_UCODE_PASSTHROUGH_51_DWORDS] APU_
  * ----------------------------------------------------------------------------
  * Stereo Downmix Microcode (ITU-R BS.775 with Saturation Mode, 86 DWORDs)
  * ----------------------------------------------------------------------------
+ * NOT valid DSP56300 as commented (see the banner). The equations below are
+ * what the host reference function apu_dsp56k_itur_downmix() computes.
  * Equations:
  *   L = FL + 0.7071 * C + 0.7071 * SL
  *   R = FR + 0.7071 * C + 0.7071 * SR

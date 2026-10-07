@@ -12,7 +12,20 @@
  */
 static ALsource g_sources[AL_MAX_SOURCES];
 static bool s_subsystem_initialized = false;
-static uintptr_t s_apu_base = NV_PAPU_BASE;
+static uintptr_t s_apu_base = 0; /* 0: no base installed, see al_source_get_apu_base() */
+static uint32_t s_spatial_calc_count = 0;
+static uint32_t s_play_seq = 0;
+
+#ifndef OPENAL_APU_REAL_MMIO
+/*
+ * Voice-control stand-in used while no base is installed (before the first
+ * alcOpenDevice() and after the last alcCloseDevice()). Sources can be
+ * generated and played without a device and real MMIO is opt-in, so the
+ * ACTIVE/PAUSE bit accesses land here instead of the real BAR0. Covers every
+ * register the source subsystem and the voice manager touch.
+ */
+static uint32_t s_parked_vp_regs[(NV_PAPU_VP_PAUSE_1 + 4u) / 4u];
+#endif
 
 /*
  * ============================================================================
@@ -21,11 +34,24 @@ static uintptr_t s_apu_base = NV_PAPU_BASE;
  */
 
 void al_source_set_apu_base(uintptr_t base) {
-    s_apu_base = (base != 0) ? base : NV_PAPU_BASE;
+    s_apu_base = base;
+#ifndef OPENAL_APU_REAL_MMIO
+    if (base == 0) {
+        /* Start every unconfigured period with no voice bits set */
+        memset(s_parked_vp_regs, 0, sizeof(s_parked_vp_regs));
+    }
+#endif
 }
 
 uintptr_t al_source_get_apu_base(void) {
-    return s_apu_base;
+    if (s_apu_base != 0) {
+        return s_apu_base;
+    }
+#ifdef OPENAL_APU_REAL_MMIO
+    return NV_PAPU_BASE;
+#else
+    return (uintptr_t)s_parked_vp_regs;
+#endif
 }
 
 static void source_reset_defaults(ALsource *src, ALuint id) {
@@ -58,6 +84,7 @@ static void source_reset_defaults(ALsource *src, ALuint id) {
     src->lfe_gain = 0.0f;
     src->saved_prd_index = 0;
     src->saved_sample_pos_frac = 0;
+    src->play_seq = 0;
 }
 
 void al_source_reset(ALsource *src) {
@@ -73,6 +100,7 @@ void al_source_init_subsystem(void) {
     }
     apu_voice_mgr_init();
     apu_spatial_reset();
+    s_play_seq = 0;
     s_subsystem_initialized = true;
 }
 
@@ -123,6 +151,7 @@ void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc) {
     if (!src || !calc) {
         return;
     }
+    s_spatial_calc_count++;
 
     float lis_pos[3] = {0.0f, 0.0f, 0.0f};
     float lis_vel[3] = {0.0f, 0.0f, 0.0f};
@@ -237,6 +266,10 @@ void al_source_calc_spatial(const ALsource *src, AL_SPATIAL_CALC *calc) {
     al_source_compute_spatial((ALsource *)src, calc);
 }
 
+uint32_t al_source_debug_spatial_calc_count(void) {
+    return s_spatial_calc_count;
+}
+
 /*
  * ============================================================================
  * Hardware Pitch & Master Volume Mapping Helpers
@@ -255,71 +288,61 @@ static uint32_t source_calc_pitch_step(ALsizei freq, float pitch) {
     return step;
 }
 
-static uint16_t source_calc_master_volume(const ALsource *src) {
+/* Voice context fields refreshed by source_update_hw() */
+#define SRC_HW_GAIN    0x01u
+#define SRC_HW_PITCH   0x02u
+#define SRC_HW_ITD     0x04u
+#define SRC_HW_HRTF    0x08u
+#define SRC_HW_MIXBINS 0x10u
+#define SRC_HW_SPATIAL (SRC_HW_GAIN | SRC_HW_PITCH | SRC_HW_ITD | SRC_HW_HRTF | SRC_HW_MIXBINS)
+
+/*
+ * Voice context of a playing or paused source that holds a hardware voice,
+ * NULL otherwise (stopped, initial, or in virtual standby).
+ */
+static NVAPU_VOICE_CONTEXT_3D *source_live_context(const ALsource *src) {
+    if ((src->state != AL_PLAYING && src->state != AL_PAUSED) || src->hw_voice_idx < 0) {
+        return NULL;
+    }
+    return apu_voice_get_context((uint32_t)src->hw_voice_idx);
+}
+
+/*
+ * Refresh the requested voice context fields from a single spatial
+ * computation. Paused sources are updated too so that a resume is current.
+ */
+static void source_update_hw(const ALsource *src, unsigned fields) {
+    NVAPU_VOICE_CONTEXT_3D *ctx = source_live_context(src);
+    if (!ctx) {
+        return;
+    }
+
     AL_SPATIAL_CALC calc;
     al_source_calc_spatial(src, &calc);
-    return (uint16_t)(calc.effective_gain * 65535.0f + 0.5f);
-}
 
-static void source_update_hw_pitch(const ALsource *src) {
-    if (src->state == AL_PLAYING && src->hw_voice_idx >= 0 && src->buffer != NULL) {
-        NVAPU_VOICE_CONTEXT_3D *ctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
-        if (ctx) {
-            AL_SPATIAL_CALC calc;
-            al_source_calc_spatial(src, &calc);
-            float eff_pitch = src->pitch * calc.doppler_pitch;
-            ctx->pitch_step = source_calc_pitch_step(src->buffer->frequency, eff_pitch);
-        }
+    if (fields & SRC_HW_GAIN) {
+        uint16_t master_vol = (uint16_t)(calc.effective_gain * 65535.0f + 0.5f);
+        ctx->master_vol_left = master_vol;
+        ctx->master_vol_right = master_vol;
     }
-}
-
-static void source_update_hw_gain(const ALsource *src) {
-    if (src->state == AL_PLAYING && src->hw_voice_idx >= 0) {
-        NVAPU_VOICE_CONTEXT_3D *ctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
-        if (ctx) {
-            uint16_t master_vol = source_calc_master_volume(src);
-            ctx->master_vol_left = master_vol;
-            ctx->master_vol_right = master_vol;
-        }
+    if ((fields & SRC_HW_PITCH) && src->buffer != NULL) {
+        float eff_pitch = src->pitch * calc.doppler_pitch;
+        ctx->pitch_step = source_calc_pitch_step(src->buffer->frequency, eff_pitch);
     }
-}
-
-static void source_update_hw_itd(const ALsource *src) {
-    if (src->state == AL_PLAYING && src->hw_voice_idx >= 0) {
-        NVAPU_VOICE_CONTEXT_3D *ctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
-        if (ctx && ctx->mode_3d) {
-            AL_SPATIAL_CALC calc;
-            al_source_calc_spatial(src, &calc);
-            ctx->itd_delay_left = calc.itd_delay_left;
-            ctx->itd_delay_right = calc.itd_delay_right;
-        }
+    if ((fields & SRC_HW_ITD) && ctx->mode_3d) {
+        ctx->itd_delay_left = calc.itd_delay_left;
+        ctx->itd_delay_right = calc.itd_delay_right;
     }
-}
-
-static void source_update_hw_hrtf(const ALsource *src) {
-    if (src->state == AL_PLAYING && src->hw_voice_idx >= 0) {
-        NVAPU_VOICE_CONTEXT_3D *ctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
-        if (ctx && ctx->mode_3d) {
-            AL_SPATIAL_CALC calc;
-            al_source_calc_spatial(src, &calc);
-            ctx->hrtf_b0 = calc.hrtf_coeffs.b0;
-            ctx->hrtf_b1 = calc.hrtf_coeffs.b1;
-            ctx->hrtf_b2 = calc.hrtf_coeffs.b2;
-            ctx->hrtf_a1 = calc.hrtf_coeffs.a1;
-            ctx->hrtf_a2 = calc.hrtf_coeffs.a2;
-        }
+    if ((fields & SRC_HW_HRTF) && ctx->mode_3d) {
+        ctx->hrtf_b0 = calc.hrtf_coeffs.b0;
+        ctx->hrtf_b1 = calc.hrtf_coeffs.b1;
+        ctx->hrtf_b2 = calc.hrtf_coeffs.b2;
+        ctx->hrtf_a1 = calc.hrtf_coeffs.a1;
+        ctx->hrtf_a2 = calc.hrtf_coeffs.a2;
     }
-}
-
-static void source_update_hw_mixbins(const ALsource *src) {
-    if (src->state == AL_PLAYING && src->hw_voice_idx >= 0 && src->buffer != NULL) {
-        NVAPU_VOICE_CONTEXT_3D *ctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
-        if (ctx && src->buffer->channels == 1) {
-            AL_SPATIAL_CALC calc;
-            al_source_calc_spatial(src, &calc);
-            for (size_t i = 0; i < 6; i++) {
-                ctx->mixbin_gain[i] = calc.mixbin_gain[i];
-            }
+    if ((fields & SRC_HW_MIXBINS) && src->buffer != NULL && src->buffer->channels == 1) {
+        for (size_t i = 0; i < 6; i++) {
+            ctx->mixbin_gain[i] = calc.mixbin_gain[i];
         }
     }
 }
@@ -328,12 +351,8 @@ void al_source_update_all_spatial(void) {
     ensure_subsystem_initialized();
     for (size_t i = 0; i < AL_MAX_SOURCES; i++) {
         ALsource *src = &g_sources[i];
-        if (src->in_use && src->state == AL_PLAYING && src->hw_voice_idx >= 0) {
-            source_update_hw_gain(src);
-            source_update_hw_pitch(src);
-            source_update_hw_itd(src);
-            source_update_hw_hrtf(src);
-            source_update_hw_mixbins(src);
+        if (src->in_use) {
+            source_update_hw(src, SRC_HW_SPATIAL);
         }
     }
 }
@@ -412,12 +431,12 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
     }
 
     apu_voice_setup(hw_voice_idx, &ctx);
-    apu_voice_pause(s_apu_base, hw_voice_idx, 0);
-    apu_voice_trigger(s_apu_base, hw_voice_idx);
+    apu_voice_pause(al_source_get_apu_base(), hw_voice_idx, 0);
+    apu_voice_trigger(al_source_get_apu_base(), hw_voice_idx);
 }
 
 void al_source_update_frame(void) {
-    apu_voice_mgr_update(s_apu_base);
+    apu_voice_mgr_update(al_source_get_apu_base());
 }
 
 
@@ -544,7 +563,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->pitch = value;
-            source_update_hw_pitch(src);
+            source_update_hw(src, SRC_HW_PITCH);
             break;
 
         case AL_GAIN:
@@ -553,7 +572,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->gain = value;
-            source_update_hw_gain(src);
+            source_update_hw(src, SRC_HW_GAIN);
             break;
 
         case AL_MIN_GAIN:
@@ -562,7 +581,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->min_gain = value;
-            source_update_hw_gain(src);
+            source_update_hw(src, SRC_HW_GAIN);
             break;
 
         case AL_MAX_GAIN:
@@ -571,7 +590,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->max_gain = value;
-            source_update_hw_gain(src);
+            source_update_hw(src, SRC_HW_GAIN);
             break;
 
         case AL_REFERENCE_DISTANCE:
@@ -580,7 +599,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->reference_distance = value;
-            source_update_hw_gain(src);
+            source_update_hw(src, SRC_HW_GAIN);
             break;
 
         case AL_MAX_DISTANCE:
@@ -589,7 +608,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->max_distance = value;
-            source_update_hw_gain(src);
+            source_update_hw(src, SRC_HW_GAIN);
             break;
 
         case AL_ROLLOFF_FACTOR:
@@ -598,7 +617,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->rolloff_factor = value;
-            source_update_hw_gain(src);
+            source_update_hw(src, SRC_HW_GAIN);
             break;
 
         case AL_CONE_INNER_ANGLE:
@@ -607,7 +626,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->cone_inner_angle = value;
-            source_update_hw_gain(src);
+            source_update_hw(src, SRC_HW_GAIN);
             break;
 
         case AL_CONE_OUTER_ANGLE:
@@ -616,7 +635,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->cone_outer_angle = value;
-            source_update_hw_gain(src);
+            source_update_hw(src, SRC_HW_GAIN);
             break;
 
         case AL_CONE_OUTER_GAIN:
@@ -625,7 +644,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->cone_outer_gain = value;
-            source_update_hw_gain(src);
+            source_update_hw(src, SRC_HW_GAIN);
             break;
 
         case AL_XBOX_LFE_GAIN:
@@ -634,7 +653,7 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
                 return;
             }
             src->lfe_gain = value;
-            source_update_hw_mixbins(src);
+            source_update_hw(src, SRC_HW_MIXBINS);
             break;
 
         default:
@@ -657,25 +676,21 @@ AL_API void AL_APIENTRY alSource3f(ALuint source, ALenum param, ALfloat v1, ALfl
             src->position[0] = v1;
             src->position[1] = v2;
             src->position[2] = v3;
-            source_update_hw_gain(src);
-            source_update_hw_pitch(src);
-            source_update_hw_itd(src);
-            source_update_hw_hrtf(src);
-            source_update_hw_mixbins(src);
+            source_update_hw(src, SRC_HW_SPATIAL);
             break;
 
         case AL_VELOCITY:
             src->velocity[0] = v1;
             src->velocity[1] = v2;
             src->velocity[2] = v3;
-            source_update_hw_pitch(src);
+            source_update_hw(src, SRC_HW_PITCH);
             break;
 
         case AL_DIRECTION:
             src->direction[0] = v1;
             src->direction[1] = v2;
             src->direction[2] = v3;
-            source_update_hw_gain(src);
+            source_update_hw(src, SRC_HW_GAIN);
             break;
 
         default:
@@ -761,8 +776,8 @@ AL_API void AL_APIENTRY alSourcei(ALuint source, ALenum param, ALint value) {
                 return;
             }
             src->looping = (ALboolean)value;
-            if (src->state == AL_PLAYING && src->hw_voice_idx >= 0) {
-                NVAPU_VOICE_CONTEXT_3D *ctx = apu_voice_get_context((uint32_t)src->hw_voice_idx);
+            {
+                NVAPU_VOICE_CONTEXT_3D *ctx = source_live_context(src);
                 if (ctx) {
                     ctx->loop_mode = src->looping ? NVAPU_VOICE_LOOP_ON : NVAPU_VOICE_LOOP_OFF;
                 }
@@ -775,11 +790,7 @@ AL_API void AL_APIENTRY alSourcei(ALuint source, ALenum param, ALint value) {
                 return;
             }
             src->source_relative = (ALboolean)value;
-            source_update_hw_gain(src);
-            source_update_hw_pitch(src);
-            source_update_hw_itd(src);
-            source_update_hw_hrtf(src);
-            source_update_hw_mixbins(src);
+            source_update_hw(src, SRC_HW_SPATIAL);
             break;
 
 
@@ -963,7 +974,7 @@ AL_API void AL_APIENTRY alGetSourcei(ALuint source, ALenum param, ALint *value) 
         case AL_SOURCE_STATE:
             if (src->state == AL_PLAYING) {
                 if (src->hw_voice_idx >= 0) {
-                    int active = apu_voice_is_active(s_apu_base, (uint32_t)src->hw_voice_idx);
+                    int active = apu_voice_is_active(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx);
                     if (!active && !src->looping) {
                         apu_voice_mgr_release(src);
                         src->state = AL_STOPPED;
@@ -1088,17 +1099,30 @@ AL_API void AL_APIENTRY alSourcePlay(ALuint source) {
         return;
     }
 
-    /* If paused and HW voice is intact, unpause directly */
+    /* If paused and HW voice is intact, unpause directly. Spatial, gain and
+     * pitch updates were applied while paused, so the context is current. */
     if (src->state == AL_PAUSED && src->hw_voice_idx >= 0) {
-        apu_voice_pause(s_apu_base, (uint32_t)src->hw_voice_idx, 0);
+        apu_voice_pause(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx, 0);
         src->state = AL_PLAYING;
         return;
     }
 
+    /* OpenAL 1.1: Play on a playing source restarts it from the beginning.
+     * Halt the voice before it is reprogrammed and drop any saved position.
+     * A source in virtual standby holds no voice, only a saved position. */
+    if (src->state == AL_PLAYING) {
+        if (src->hw_voice_idx >= 0) {
+            apu_voice_stop(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx);
+        }
+        src->saved_prd_index = 0;
+        src->saved_sample_pos_frac = 0;
+    }
+    src->play_seq = ++s_play_seq;
+
     /* Allocate or bind hardware voice index (0..63).
-     * If resuming from preemption, al_source_program_hw_voice restores
-     * saved_prd_index and saved_sample_pos_frac into the hardware context
-     * and clears them. */
+     * If resuming from preemption (paused standby source), al_source_program_hw_voice
+     * restores saved_prd_index and saved_sample_pos_frac into the hardware
+     * context and clears them. */
     int idx = apu_voice_mgr_allocate(src);
     if (idx >= 0) {
         al_source_program_hw_voice(src, (uint32_t)idx);
@@ -1117,7 +1141,7 @@ AL_API void AL_APIENTRY alSourcePause(ALuint source) {
 
     if (src->state == AL_PLAYING) {
         if (src->hw_voice_idx >= 0) {
-            apu_voice_pause(s_apu_base, (uint32_t)src->hw_voice_idx, 1);
+            apu_voice_pause(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx, 1);
         }
         src->state = AL_PAUSED;
     }

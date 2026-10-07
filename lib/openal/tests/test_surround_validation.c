@@ -250,6 +250,12 @@ int main(void) {
     alcDestroyContext(ctx);
     alcCloseDevice(device);
 
+    /* No device open: the Dolby status is cached software state and reads 0 (no MMIO access) */
+    dse_val = -1;
+    alXboxGetHardwareStatus(AL_XBOX_DOLBY_DIGITAL_ACTIVE, &dse_val);
+    assert(alGetError() == AL_NO_ERROR);
+    assert(dse_val == 0);
+
     /* Case B: Standard Composite Pack + AC3 disabled -> Stereo 2.0 */
     apu_eeprom_set_mock(true, XC_AUDIO_FLAGS_STEREO, APU_AV_PACK_STANDARD);
     assert(apu_detect_audio_topology() == APU_TOPOLOGY_STEREO_20);

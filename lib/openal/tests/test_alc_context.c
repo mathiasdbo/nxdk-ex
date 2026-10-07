@@ -33,6 +33,10 @@ int main(void) {
     assert(strcmp(dev->name, "MCPX APU 5.1 Surround") == 0);
     assert(alcGetError(dev) == ALC_NO_ERROR);
 
+    /* A mock base is used as given (null/software-model backend, no real MMIO) */
+    assert(dev->apu_base == (uintptr_t)mock_mmio);
+    assert(alc_get_apu_base() == (uintptr_t)mock_mmio);
+
     /* Verify APU Output Processor (EP) register programming */
     uint32_t ep_fifo = apu_read32((uintptr_t)mock_mmio, NV_PAPU_EP_FIFO_CONFIG);
     uint32_t ep_route = apu_read32((uintptr_t)mock_mmio, NV_PAPU_EP_FIFO_ROUTE);
@@ -124,6 +128,13 @@ int main(void) {
 
     assert(alcMakeContextCurrent(NULL) == ALC_TRUE);
     assert(alcGetCurrentContext() == NULL);
+
+    /* Processing a valid context is legal (it also runs the voice frame tick); invalid is an error */
+    alcProcessContext(ctx1);
+    assert(alcGetError(dev) == ALC_NO_ERROR);
+    assert(alcGetError(NULL) == ALC_NO_ERROR);
+    alcProcessContext(NULL);
+    assert(alcGetError(NULL) == ALC_INVALID_CONTEXT);
     printf("    -> Context switching verified [PASS]\n");
 
     /* Test 5: Context Destruction Safety */

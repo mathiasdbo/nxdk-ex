@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#if defined(__NXDK__) || defined(_XBOX)
+#if defined(NXDK) || defined(__NXDK__) || defined(_XBOX)
 #  include <hal/video.h>
 #  include <hal/debug.h>
 #  include <pbkit/pbkit.h>
@@ -49,16 +49,16 @@ void showcase_ui_draw_header(const char *mode_title, int mode_idx, int total_mod
                              bool dse_active, int topology, bool controller_connected) {
     char header_buf[512];
     const char *topo_str = (topology == 1) ? "Surround 5.1" : "Stereo 2.0";
-    const char *dse_str = dse_active ? "ACTIVE (TOSLink AC-3)" : "INACTIVE (RCA)";
+    const char *dse_str = dse_active ? "configured (no AC-3 encoder)" : "not configured";
     const char *ctrl_str = controller_connected ? "GAMEPAD CONNECTED" : "AUTO-TOUR MODE";
 
     snprintf(header_buf, sizeof(header_buf),
              "======================================================================\n"
-             " nxdk-ex OpenAL MCPX APU Showcase Demo (64 HW Voice Polyphony)\n"
+             " nxdk-ex OpenAL Showcase (MCPX APU voice-layer model)\n"
              "======================================================================\n"
              " Mode [%d/%d]: %-30s | %s\n"
-             " Topology: %s | Dolby Digital DSE: %s\n"
-             " HW Voices: %2u / 64 active | Standby Queue: %u virtual sources\n"
+             " Topology: %s | Dolby Digital: %s\n"
+             " Voice slots: %2u / 64 active | Standby Queue: %u virtual sources\n"
              "----------------------------------------------------------------------\n",
              mode_idx, total_modes, mode_title, ctrl_str,
              topo_str, dse_str,

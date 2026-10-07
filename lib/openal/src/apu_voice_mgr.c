@@ -11,6 +11,9 @@
  */
 static int s_hw_voice_owner[NV_PAPU_NUM_3D_VOICES];
 
+/* Per-update standby candidate priorities, indexed by source id - 1 (0 = not a candidate) */
+static float s_promo_priority[AL_MAX_SOURCES];
+
 /*
  * ============================================================================
  * Voice Manager Subsystem Lifecycle
@@ -82,7 +85,15 @@ float apu_voice_mgr_calc_priority(const ALsource *src) {
  * ============================================================================
  * Hardware Voice Allocation & Priority Stealing
  * ============================================================================
+ * Victim = lowest priority, ties broken by the oldest play_seq. A newcomer
+ * steals when its priority >= the victim's (ties favour the newcomer), but
+ * never when its own priority is 0 (a silent source must not evict an audible one).
  */
+
+/* True if start order a is older than b (wrap-safe for spans below 2^31) */
+static bool play_seq_older(uint32_t a, uint32_t b) {
+    return (int32_t)(a - b) < 0;
+}
 
 int apu_voice_mgr_allocate(ALsource *src) {
     if (!src) {
@@ -127,28 +138,34 @@ int apu_voice_mgr_allocate(ALsource *src) {
         }
     }
 
-    /* Pass 2: all 64 slots busy, calculate priority of src and find victim */
+    /* Pass 2: all 64 slots busy, calculate priority of src and find victim
+     * (lowest priority, oldest play_seq on ties) */
     float new_priority = apu_voice_mgr_calc_priority(src);
     int victim_voice = -1;
     float min_priority = 1e30f;
+    uint32_t victim_seq = 0;
 
     for (uint32_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
         int owner_id = s_hw_voice_owner[v];
         ALsource *owner = al_source_get((ALuint)owner_id);
         float p = owner ? apu_voice_mgr_calc_priority(owner) : 0.0f;
-        if (p < min_priority) {
+        uint32_t seq = owner ? owner->play_seq : 0u;
+        if (victim_voice < 0 || p < min_priority ||
+            (p == min_priority && play_seq_older(seq, victim_seq))) {
             min_priority = p;
+            victim_seq = seq;
             victim_voice = (int)v;
         }
     }
 
-    if (victim_voice >= 0 && new_priority > min_priority) {
+    if (victim_voice >= 0 && new_priority > 0.0f && new_priority >= min_priority) {
         int victim_owner_id = s_hw_voice_owner[victim_voice];
         ALsource *victim = al_source_get((ALuint)victim_owner_id);
         NVAPU_VOICE_CONTEXT_3D *vctx = apu_voice_get_context((uint32_t)victim_voice);
 
         /*
-         * Click-prevention preemption protocol:
+         * Preemption protocol (mute-then-halt; no ramp, a real fade needs
+         * several frame ticks and is not implemented, see lib/openal/docs/XEMU_VERIFICATION.md):
          * 1. Preserve victim progress (PRD index and fractional sample phase).
          */
         if (vctx && victim) {
@@ -157,7 +174,8 @@ int apu_voice_mgr_allocate(ALsource *src) {
         }
 
         /*
-         * 2. Zero gains to eliminate clicks/pops and DC offsets before halting.
+         * 2. Mute: zero the shadow-context gains. The halt follows in this same
+         *    call, so this is an abrupt cut, not a click-free fade.
          */
         if (vctx) {
             vctx->master_vol_left = 0;
@@ -166,7 +184,7 @@ int apu_voice_mgr_allocate(ALsource *src) {
         }
 
         /*
-         * 3. Halt channel and confirm halt in hardware registers.
+         * 3. Halt the channel: clear its ACTIVE bit (the register readback only echoes the write).
          */
         apu_voice_stop(apu_base, (uint32_t)victim_voice);
         if (apu_voice_is_active(apu_base, (uint32_t)victim_voice) != 0) {
@@ -188,7 +206,10 @@ int apu_voice_mgr_allocate(ALsource *src) {
         return victim_voice;
     }
 
-    /* Fallback: voice remains logically playing but virtualized in standby */
+    /* Fallback: voice remains logically playing but virtualized in standby.
+     * Known limitation: a standby voice carries no clock, so a starved one-shot
+     * stays AL_PLAYING while it waits and restarts from sample 0 when promoted
+     * (a preempted one resumes from its saved position instead). */
     src->hw_voice_idx = AL_HW_VOICE_INVALID;
     return AL_HW_VOICE_INVALID;
 }
@@ -207,6 +228,7 @@ void apu_voice_mgr_release(ALsource *src) {
     if (src->hw_voice_idx >= 0 && src->hw_voice_idx < (int)NV_PAPU_NUM_3D_VOICES) {
         uint32_t v = (uint32_t)src->hw_voice_idx;
         NVAPU_VOICE_CONTEXT_3D *vctx = apu_voice_get_context(v);
+        /* Mute-then-halt in one call (no ramp, see the preemption protocol above) */
         if (vctx) {
             vctx->master_vol_left = 0;
             vctx->master_vol_right = 0;
@@ -259,34 +281,47 @@ void apu_voice_mgr_update(uintptr_t apu_base) {
         }
     }
 
-    /* 2. Promotion phase: promote highest-priority virtual standby sources to free slots */
+    /* 2. Promotion phase: promote highest-priority virtual standby sources to free slots.
+     * Each standby candidate's priority is computed once per update; free slots
+     * then take the best remaining candidate (ties: lowest source id). */
+    bool candidates_ready = false;
     for (uint32_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
-        if (s_hw_voice_owner[v] == AL_HW_VOICE_INVALID) {
-            ALsource *best_candidate = NULL;
-            float best_priority = 0.0f;
+        if (s_hw_voice_owner[v] != AL_HW_VOICE_INVALID) {
+            continue;
+        }
 
+        if (!candidates_ready) {
             for (ALuint id = 1; id <= AL_MAX_SOURCES; id++) {
                 ALsource *src = al_source_get(id);
+                s_promo_priority[id - 1] = 0.0f;
                 if (src && src->in_use && src->state == AL_PLAYING &&
                     src->hw_voice_idx == AL_HW_VOICE_INVALID && src->buffer != NULL) {
-                    float p = apu_voice_mgr_calc_priority(src);
-                    if (p > best_priority) {
-                        best_priority = p;
-                        best_candidate = src;
-                    }
+                    s_promo_priority[id - 1] = apu_voice_mgr_calc_priority(src);
                 }
             }
+            candidates_ready = true;
+        }
 
-            if (best_candidate != NULL && best_priority > 0.0f) {
-                s_hw_voice_owner[v] = (int)best_candidate->id;
-                best_candidate->hw_voice_idx = (int)v;
-                /* Promoted candidate restores saved_prd_index and saved_sample_pos_frac,
-                 * clears them, configures 3D voice context, unpauses, and triggers playback. */
-                al_source_program_hw_voice(best_candidate, v);
-            } else {
-                break;
+        ALuint best_id = 0;
+        float best_priority = 0.0f;
+        for (ALuint id = 1; id <= AL_MAX_SOURCES; id++) {
+            if (s_promo_priority[id - 1] > best_priority) {
+                best_priority = s_promo_priority[id - 1];
+                best_id = id;
             }
         }
+
+        if (best_id == 0) {
+            break;
+        }
+
+        ALsource *best_candidate = al_source_get(best_id);
+        s_promo_priority[best_id - 1] = 0.0f;
+        s_hw_voice_owner[v] = (int)best_candidate->id;
+        best_candidate->hw_voice_idx = (int)v;
+        /* Promoted candidate restores saved_prd_index and saved_sample_pos_frac,
+         * clears them, configures 3D voice context, unpauses, and triggers playback. */
+        al_source_program_hw_voice(best_candidate, v);
     }
 }
 

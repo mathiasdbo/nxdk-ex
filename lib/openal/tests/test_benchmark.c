@@ -23,6 +23,9 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+/* XBOX_CPU_HZ, CYCLES_PER_US and FRAME_TIME_US are not used: this host test
+ * prints raw host timer ticks (the TSC on x86, clock() elsewhere) and does not
+ * convert them to time or CPU load. */
 #define XBOX_CPU_HZ             733333333ULL
 #define CYCLES_PER_US           (733.333333)
 #define FRAME_TIME_US           (16666.6667)
@@ -31,6 +34,7 @@
 
 static int16_t s_pcm_data[4800];
 
+/* TSC ticks on x86 hosts, clock() ticks on any other host (the unit differs). */
 static inline uint64_t get_host_ticks(void) {
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
     uint32_t lo, hi;
@@ -50,7 +54,7 @@ static void setup_test_tone(void) {
 }
 
 int main(void) {
-    printf("=== OpenAL Pentium III RDTSC CPU Profiling Benchmark Test ===\n");
+    printf("=== OpenAL Host Timing Test (source update path incl. mock voice-context writes) ===\n");
 
     setup_test_tone();
 
@@ -137,15 +141,19 @@ int main(void) {
         }
 
         double avg_ticks = (double)total_ticks / (double)BENCH_FRAMES;
-        printf("    -> Tier %2u Voices: Avg Cycles = %8.0f | Verified active count = %u [PASS]\n",
+        printf("    -> Tier %2u Voices: Avg host ticks per frame (x86 TSC, else clock()) = %8.0f | active count = %u [PASS]\n",
                active_count, avg_ticks, apu_voice_mgr_get_active_hw_count());
     }
 
-    /* Test 3: Validate CPU frame budget compliance (< 0.5% overhead) */
-    printf("[3] Verifying CPU frame budget overhead on full 64 HW voice saturation...\n");
+    /* Test 3: all 64 voices are still active after the last tier. The tick
+     * counts above are informational only: this test asserts no timing budget.
+     * The timed region is the library's source update path (the spatial math
+     * plus the writes of voice contexts into mock memory) and the harness' own
+     * sinf/cosf; it is not APU mixing. */
+    printf("[3] Verifying full 64 HW voice saturation after profiling...\n");
     uint32_t active_hw = apu_voice_mgr_get_active_hw_count();
     assert(active_hw == 64);
-    printf("    -> 64 HW voice polyphony sustained at near zero CPU audio mixing time [PASS]\n");
+    printf("    -> 64 HW voices still active (no timing threshold is asserted) [PASS]\n");
 
     /* Teardown */
     printf("[4] Tearing down benchmark sources and buffers...\n");
@@ -159,6 +167,6 @@ int main(void) {
     free(mock_mmio);
     apu_mem_shutdown();
 
-    printf("=== All Pentium III RDTSC CPU Profiling Benchmark Tests Passed! ===\n");
+    printf("=== Host Timing Test Passed! ===\n");
     return 0;
 }
