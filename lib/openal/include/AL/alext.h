@@ -27,6 +27,7 @@ extern "C" {
 #define AL_XBOX_AV_PACK_TYPE                     0x7002
 #define AL_XBOX_DOLBY_DIGITAL_ACTIVE             0x7003
 #define AL_XBOX_VP_BASE_PHYS                     0x7004
+#define AL_XBOX_LFE_GAIN                         0x7005
 
 /* Xbox AV Pack Encodings for AL_XBOX_AV_PACK_TYPE Query */
 #define AL_XBOX_AV_PACK_SCART                    0x0000
