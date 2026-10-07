@@ -1,9 +1,11 @@
-#include "apu_eeprom.h"
+#include "apu_platform.h"
 #include <string.h>
 
-#if defined(__NXDK__) || defined(_XBOX)
+/* Kernel header first so apu_eeprom.h's XC_AUDIO guard sees the kernel's definition */
+#ifdef OPENAL_TARGET_XBOX
 #include <xboxkrnl/xboxkrnl.h>
 #endif
+#include "apu_eeprom.h"
 
 /*
  * ============================================================================
@@ -25,7 +27,7 @@ uint32_t apu_query_eeprom_audio_flags(void) {
         return s_mock_flags;
     }
 
-#if defined(__NXDK__) || defined(_XBOX)
+#ifdef OPENAL_TARGET_XBOX
     ULONG type = 0;
     ULONG flags = 0;
     ULONG res_len = 0;
@@ -39,17 +41,38 @@ uint32_t apu_query_eeprom_audio_flags(void) {
 #endif
 }
 
+/*
+ * SMC register 0x04 returns raw pack codes: xemu hw/xbox/smbus_xbox_smc.c
+ * lines 66-73 (SMC_REG_AVPACK_*), served by smc_receive_byte() at line 185.
+ * The SMC sits at 7-bit I2C address 0x10 (hw/xbox/xbox.c:300), i.e. 0x20 as the
+ * 8-bit SlaveAddress passed to HalReadSMBusValue. See lib/openal/docs/XEMU_VERIFICATION.md.
+ */
+uint32_t apu_av_pack_from_smc(uint32_t raw_smc) {
+    switch (raw_smc & 0xFFu) {
+    case APU_SMC_AV_PACK_SCART:     return APU_AV_PACK_SCART;
+    case APU_SMC_AV_PACK_HDTV:      return APU_AV_PACK_HDTV;
+    case APU_SMC_AV_PACK_VGA:       return APU_AV_PACK_VGA;
+    case APU_SMC_AV_PACK_RFU:       return APU_AV_PACK_RFU;
+    case APU_SMC_AV_PACK_SVIDEO:    return APU_AV_PACK_SVIDEO;
+    case APU_SMC_AV_PACK_COMPOSITE: return APU_AV_PACK_STANDARD;
+    case APU_SMC_AV_PACK_NONE:      return APU_AV_PACK_NONE;
+    default:                        return APU_AV_PACK_NONE;
+    }
+}
+
 uint32_t apu_query_smbus_av_pack(void) {
     if (s_mock_enabled) {
+        /* Mock values are already decoded APU_AV_PACK_* identifiers */
         return s_mock_av_pack;
     }
 
-#if defined(__NXDK__) || defined(_XBOX)
+#ifdef OPENAL_TARGET_XBOX
     ULONG pack_val = 0;
     NTSTATUS status = HalReadSMBusValue(0x20, 0x04, FALSE, &pack_val);
     if (NT_SUCCESS(status)) {
-        return (uint32_t)pack_val;
+        return apu_av_pack_from_smc((uint32_t)pack_val);
     }
+    /* SMBus failure: assume a standard (non-optical) pack so topology stays stereo */
     return APU_AV_PACK_STANDARD;
 #else
     return APU_AV_PACK_STANDARD;
@@ -57,6 +80,7 @@ uint32_t apu_query_smbus_av_pack(void) {
 }
 
 bool apu_is_optical_pack_connected(uint32_t av_pack) {
+    /* Which packs expose TOSLink is an UNVERIFIED assumption (xemu is silent on it) */
     return (av_pack == APU_AV_PACK_HDTV ||
             av_pack == APU_AV_PACK_SVIDEO ||
             av_pack == APU_AV_PACK_SCART);
