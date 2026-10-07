@@ -379,9 +379,9 @@ void showcase_app_update(showcase_app_t *app, const showcase_input_t *input) {
                      " [64 Hardware Voice Polyphony & Priority Stealing Stress Test]\n"
                      " Active Hardware APU Voices: %2u / 64\n"
                      " Virtualized Standby Queue:   %2u sources\n"
-                     " Preemption Protocol:         Click-Free Preemption (Zero Clicks)\n"
-                     " CPU Mixing Overhead:         0.0%% (100%% APU Hardware Mixing)\n",
-                     active_hw, standby);
+                     " Preemption Protocol:         Mute-then-halt (no ramp)\n"
+                     " Backend:                     %s\n",
+                     active_hw, standby, alGetString(AL_RENDERER));
 
             snprintf(app->footer_buf, sizeof(app->footer_buf),
                      "[Hold Button A] Spawn Streams of 100+ Rapid Spatial Sources");

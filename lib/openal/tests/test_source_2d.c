@@ -336,8 +336,8 @@ int main(void) {
     alGetSourcei(sources[1], AL_SOURCE_STATE, &state);
     assert(state == AL_INITIAL);
 
-    /* Test 11: Priority Stealing & Click Prevention Preemption */
-    printf("[11] Testing 64-voice priority preemption and click prevention...\n");
+    /* Test 11: Priority Stealing & Mute-Then-Halt Preemption */
+    printf("[11] Testing 64-voice priority preemption (mute-then-halt)...\n");
     ALuint test_sources[65];
     alGenSources(65, test_sources);
     assert(alGetError() == AL_NO_ERROR);
