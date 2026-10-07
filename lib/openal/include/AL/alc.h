@@ -86,6 +86,7 @@ typedef void ALCvoid;
 /* Context Management */
 ALC_API ALCcontext * ALC_APIENTRY alcCreateContext(ALCdevice *device, const ALCint *attrlist);
 ALC_API ALCboolean   ALC_APIENTRY alcMakeContextCurrent(ALCcontext *context);
+/* alcProcessContext also runs one voice frame tick (see alXboxUpdateVoices in alext.h) */
 ALC_API void         ALC_APIENTRY alcProcessContext(ALCcontext *context);
 ALC_API void         ALC_APIENTRY alcSuspendContext(ALCcontext *context);
 ALC_API void         ALC_APIENTRY alcDestroyContext(ALCcontext *context);

@@ -10,6 +10,32 @@
 
 #define MOCK_MMIO_SIZE 0x30000
 
+/* void * -> function pointer without a cast that -std=c99 -pedantic rejects */
+typedef void (*ANY_FN)(void);
+
+static ANY_FN ptr_to_fn(void *p) {
+    ANY_FN fn = NULL;
+    memcpy(&fn, &p, sizeof(fn));
+    return fn;
+}
+
+/* True if name is a whole space-separated token of list */
+static int token_in_list(const char *list, const char *name) {
+    size_t n = strlen(name);
+    const char *p = list;
+    while (*p) {
+        size_t len = strcspn(p, " ");
+        if (len == n && strncmp(p, name, n) == 0) {
+            return 1;
+        }
+        p += len;
+        while (*p == ' ') {
+            p++;
+        }
+    }
+    return 0;
+}
+
 int main(void) {
     printf("====================================================\n");
     printf(" OpenAL Static Library Build & Link Verification\n");
@@ -64,6 +90,9 @@ int main(void) {
     const ALchar *renderer = alGetString(AL_RENDERER);
     const ALchar *extensions = alGetString(AL_EXTENSIONS);
     assert(vendor != NULL && version != NULL && renderer != NULL && extensions != NULL);
+    /* Renderer keeps the "MCPX APU" prefix and names the (mock => null) backend */
+    assert(strncmp(renderer, "MCPX APU", 8) == 0);
+    assert(strstr(renderer, "null") != NULL);
 
     ALboolean b_val = alGetBoolean(AL_DOPPLER_FACTOR);
     ALboolean b_vals[1] = {0};
@@ -89,10 +118,71 @@ int main(void) {
     assert(err == AL_INVALID_ENUM);
     assert(alGetError() == AL_NO_ERROR);
 
-    ALboolean al_ext_pres = alIsExtensionPresent("AL_EXT_MCFORMATS");
-    assert(al_ext_pres == AL_TRUE);
+    /*
+     * Extension honesty: every advertised extension must be functional, and
+     * alIsExtensionPresent must agree with the alGetString list.
+     */
+    {
+        const char *p = extensions;
+        char name[64];
+        int advertised = 0;
+        while (*p) {
+            size_t len = strcspn(p, " ");
+            if (len == 0) {
+                p++;
+                continue;
+            }
+            assert(len < sizeof(name));
+            memcpy(name, p, len);
+            name[len] = '\0';
+            assert(alIsExtensionPresent(name) == AL_TRUE);
+
+            if (strcmp(name, "AL_XBOX_hardware_status") == 0) {
+                LPALXBOXGETHARDWARESTATUS get_status =
+                    (LPALXBOXGETHARDWARESTATUS)ptr_to_fn(alGetProcAddress("alXboxGetHardwareStatus"));
+                ALint vc = 0;
+                assert(get_status != NULL);
+                get_status(AL_XBOX_HW_VOICE_COUNT, &vc);
+                assert(vc == 64);
+            } else if (strcmp(name, "AL_XBOX_update") == 0) {
+                LPALXBOXUPDATEVOICES update =
+                    (LPALXBOXUPDATEVOICES)ptr_to_fn(alGetProcAddress("alXboxUpdateVoices"));
+                assert(update != NULL);
+                update();
+                assert(alGetError() == AL_NO_ERROR);
+            } else if (strcmp(name, "AL_EXT_MCFORMATS") == 0) {
+                /* checked below: formats must be accepted if (and only if) advertised */
+            } else {
+                printf("advertised extension without a functional check: %s\n", name);
+                assert(0);
+            }
+            advertised++;
+            p += len;
+        }
+        assert(advertised >= 1);
+
+        /* AL_EXT_MCFORMATS <=> alBufferData accepts the multichannel formats */
+        {
+            ALuint mcbuf = 0;
+            int16_t mcdata[64] = {0};
+            ALboolean mc_adv = alIsExtensionPresent("AL_EXT_MCFORMATS");
+            assert((mc_adv == AL_TRUE) == (token_in_list(extensions, "AL_EXT_MCFORMATS") != 0));
+            alGenBuffers(1, &mcbuf);
+            assert(mcbuf != 0);
+            while (alGetError() != AL_NO_ERROR) {}
+            alBufferData(mcbuf, AL_FORMAT_QUAD16, mcdata, (ALsizei)sizeof(mcdata), 48000);
+            assert((alGetError() == AL_NO_ERROR) == (mc_adv == AL_TRUE));
+            alBufferData(mcbuf, AL_FORMAT_51CHN16, mcdata, (ALsizei)sizeof(mcdata), 48000);
+            assert((alGetError() == AL_NO_ERROR) == (mc_adv == AL_TRUE));
+            alDeleteBuffers(1, &mcbuf);
+            while (alGetError() != AL_NO_ERROR) {}
+        }
+        assert(alIsExtensionPresent("AL_NONEXISTENT_EXT") == AL_FALSE);
+    }
     void *al_proc = alGetProcAddress("alXboxGetHardwareStatus");
     assert(al_proc != NULL);
+    assert(alGetProcAddress("alXboxUpdateVoices") != NULL);
+    assert(alcGetProcAddress(dev, "alXboxUpdateVoices") != NULL);
     ALenum al_enum_val = alGetEnumValue("AL_FORMAT_51CHN16");
     (void)al_enum_val;
 
@@ -237,7 +327,12 @@ int main(void) {
 
     ALint vp_base = 0;
     alXboxGetHardwareStatus(AL_XBOX_VP_BASE_PHYS, &vp_base);
-    (void)vp_base;
+    assert(vp_base != 0);
+
+    /* A mock base is reported as the null/software-model backend */
+    ALint backend = -1;
+    alXboxGetHardwareStatus(AL_XBOX_BACKEND, &backend);
+    assert(backend == AL_XBOX_BACKEND_NULL);
 
     /* 10. Capture Functions (Stub verification) */
     printf("[10] Verifying ALC capture function stubs...\n");

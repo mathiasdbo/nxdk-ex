@@ -18,6 +18,11 @@ extern "C" {
  * - AC'97 Codec (Stereo Front Left / Front Right analog output)
  * - Dolby Digital DSE Realtime Interactive Encoder (5.1 AC-3 TOSLink optical S/PDIF)
  *
+ * NOTE: this register layout is the library's own model and is not
+ * xemu-conformant (see lib/openal/docs/XEMU_VERIFICATION.md). By default alcOpenDevice()
+ * applies it to a RAM stand-in, not to the real BAR0 (AL_XBOX_BACKEND).
+ * alXboxGetHardwareStatus(AL_XBOX_DOLBY_DIGITAL_ACTIVE) does not read it.
+ *
  * Register configuration:
  * - NV_PAPU_EP_FIFO_CONFIG (0x3004): 0x03 (Stereo 2.0) or 0x3F (Surround 5.1)
  * - NV_PAPU_EP_FIFO_ROUTE  (0x3010): 0x00543210 (Default 6-channel routing)
