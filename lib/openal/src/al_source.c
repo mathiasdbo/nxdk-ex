@@ -12,9 +12,20 @@
  */
 static ALsource g_sources[AL_MAX_SOURCES];
 static bool s_subsystem_initialized = false;
-static uintptr_t s_apu_base = NV_PAPU_BASE;
+static uintptr_t s_apu_base = 0; /* 0: no base installed, see al_source_get_apu_base() */
 static uint32_t s_spatial_calc_count = 0;
 static uint32_t s_play_seq = 0;
+
+#ifndef OPENAL_APU_REAL_MMIO
+/*
+ * Voice-control stand-in used while no base is installed (before the first
+ * alcOpenDevice() and after the last alcCloseDevice()). Sources can be
+ * generated and played without a device and real MMIO is opt-in, so the
+ * ACTIVE/PAUSE bit accesses land here instead of the real BAR0. Covers every
+ * register the source subsystem and the voice manager touch.
+ */
+static uint32_t s_parked_vp_regs[(NV_PAPU_VP_PAUSE_1 + 4u) / 4u];
+#endif
 
 /*
  * ============================================================================
@@ -23,11 +34,24 @@ static uint32_t s_play_seq = 0;
  */
 
 void al_source_set_apu_base(uintptr_t base) {
-    s_apu_base = (base != 0) ? base : NV_PAPU_BASE;
+    s_apu_base = base;
+#ifndef OPENAL_APU_REAL_MMIO
+    if (base == 0) {
+        /* Start every unconfigured period with no voice bits set */
+        memset(s_parked_vp_regs, 0, sizeof(s_parked_vp_regs));
+    }
+#endif
 }
 
 uintptr_t al_source_get_apu_base(void) {
-    return s_apu_base;
+    if (s_apu_base != 0) {
+        return s_apu_base;
+    }
+#ifdef OPENAL_APU_REAL_MMIO
+    return NV_PAPU_BASE;
+#else
+    return (uintptr_t)s_parked_vp_regs;
+#endif
 }
 
 static void source_reset_defaults(ALsource *src, ALuint id) {
@@ -407,12 +431,12 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
     }
 
     apu_voice_setup(hw_voice_idx, &ctx);
-    apu_voice_pause(s_apu_base, hw_voice_idx, 0);
-    apu_voice_trigger(s_apu_base, hw_voice_idx);
+    apu_voice_pause(al_source_get_apu_base(), hw_voice_idx, 0);
+    apu_voice_trigger(al_source_get_apu_base(), hw_voice_idx);
 }
 
 void al_source_update_frame(void) {
-    apu_voice_mgr_update(s_apu_base);
+    apu_voice_mgr_update(al_source_get_apu_base());
 }
 
 
@@ -950,7 +974,7 @@ AL_API void AL_APIENTRY alGetSourcei(ALuint source, ALenum param, ALint *value) 
         case AL_SOURCE_STATE:
             if (src->state == AL_PLAYING) {
                 if (src->hw_voice_idx >= 0) {
-                    int active = apu_voice_is_active(s_apu_base, (uint32_t)src->hw_voice_idx);
+                    int active = apu_voice_is_active(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx);
                     if (!active && !src->looping) {
                         apu_voice_mgr_release(src);
                         src->state = AL_STOPPED;
@@ -1078,7 +1102,7 @@ AL_API void AL_APIENTRY alSourcePlay(ALuint source) {
     /* If paused and HW voice is intact, unpause directly. Spatial, gain and
      * pitch updates were applied while paused, so the context is current. */
     if (src->state == AL_PAUSED && src->hw_voice_idx >= 0) {
-        apu_voice_pause(s_apu_base, (uint32_t)src->hw_voice_idx, 0);
+        apu_voice_pause(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx, 0);
         src->state = AL_PLAYING;
         return;
     }
@@ -1088,7 +1112,7 @@ AL_API void AL_APIENTRY alSourcePlay(ALuint source) {
      * A source in virtual standby holds no voice, only a saved position. */
     if (src->state == AL_PLAYING) {
         if (src->hw_voice_idx >= 0) {
-            apu_voice_stop(s_apu_base, (uint32_t)src->hw_voice_idx);
+            apu_voice_stop(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx);
         }
         src->saved_prd_index = 0;
         src->saved_sample_pos_frac = 0;
@@ -1117,7 +1141,7 @@ AL_API void AL_APIENTRY alSourcePause(ALuint source) {
 
     if (src->state == AL_PLAYING) {
         if (src->hw_voice_idx >= 0) {
-            apu_voice_pause(s_apu_base, (uint32_t)src->hw_voice_idx, 1);
+            apu_voice_pause(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx, 1);
         }
         src->state = AL_PAUSED;
     }

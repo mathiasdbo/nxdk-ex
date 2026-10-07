@@ -89,12 +89,15 @@ ALsource *al_source_get(ALuint id);
 /**
  * Override the APU base MMIO address used by the source subsystem (host testing support).
  *
- * @param base Base MMIO address, or 0 to restore default NV_PAPU_BASE.
+ * @param base Base MMIO address, or 0 to restore the default: NV_PAPU_BASE
+ *             with -DOPENAL_APU_REAL_MMIO, otherwise an internal RAM stand-in
+ *             for the voice ACTIVE/PAUSE registers (never the real BAR0).
  */
 void al_source_set_apu_base(uintptr_t base);
 
 /**
- * Get current APU base MMIO address used by the source subsystem.
+ * Get current APU base MMIO address used by the source subsystem
+ * (the default described at al_source_set_apu_base() when none is set).
  */
 uintptr_t al_source_get_apu_base(void);
 
