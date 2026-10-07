@@ -56,6 +56,15 @@ static void source_reset_defaults(ALsource *src, ALuint id) {
     src->cone_outer_angle = 360.0f;
     src->cone_outer_gain = 0.0f;
     src->lfe_gain = 0.0f;
+    src->saved_prd_index = 0;
+    src->saved_sample_pos_frac = 0;
+}
+
+void al_source_reset(ALsource *src) {
+    if (!src) {
+        return;
+    }
+    source_reset_defaults(src, src->id);
 }
 
 void al_source_init_subsystem(void) {
@@ -355,8 +364,15 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
     ctx.loop_mode = src->looping ? NVAPU_VOICE_LOOP_ON : NVAPU_VOICE_LOOP_OFF;
 
     ctx.prd_table_phys = src->buffer->prd_table_phys;
-    ctx.current_prd_index = 0;
-    ctx.sample_pos_frac = 0;
+    if (src->saved_prd_index != 0 || src->saved_sample_pos_frac != 0) {
+        ctx.current_prd_index = src->saved_prd_index;
+        ctx.sample_pos_frac = src->saved_sample_pos_frac;
+        src->saved_prd_index = 0;
+        src->saved_sample_pos_frac = 0;
+    } else {
+        ctx.current_prd_index = 0;
+        ctx.sample_pos_frac = 0;
+    }
     AL_SPATIAL_CALC calc;
     al_source_calc_spatial(src, &calc);
     ctx.pitch_step = source_calc_pitch_step(src->buffer->frequency, src->pitch * calc.doppler_pitch);
@@ -1079,7 +1095,10 @@ AL_API void AL_APIENTRY alSourcePlay(ALuint source) {
         return;
     }
 
-    /* Allocate or bind hardware voice index (0..63) */
+    /* Allocate or bind hardware voice index (0..63).
+     * If resuming from preemption, al_source_program_hw_voice restores
+     * saved_prd_index and saved_sample_pos_frac into the hardware context
+     * and clears them. */
     int idx = apu_voice_mgr_allocate(src);
     if (idx >= 0) {
         al_source_program_hw_voice(src, (uint32_t)idx);
@@ -1117,6 +1136,8 @@ AL_API void AL_APIENTRY alSourceStop(ALuint source) {
         apu_voice_mgr_release(src);
         src->state = AL_STOPPED;
     }
+    src->saved_prd_index = 0;
+    src->saved_sample_pos_frac = 0;
 }
 
 AL_API void AL_APIENTRY alSourceRewind(ALuint source) {
@@ -1132,6 +1153,8 @@ AL_API void AL_APIENTRY alSourceRewind(ALuint source) {
         apu_voice_mgr_release(src);
         src->state = AL_INITIAL;
     }
+    src->saved_prd_index = 0;
+    src->saved_sample_pos_frac = 0;
 }
 
 

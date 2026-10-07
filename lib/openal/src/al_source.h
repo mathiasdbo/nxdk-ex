@@ -49,6 +49,8 @@ typedef struct ALsource {
     ALfloat cone_outer_angle;
     ALfloat cone_outer_gain;
     ALfloat lfe_gain;
+    uint32_t saved_prd_index;        /* Preserved PRD index upon hardware preemption */
+    uint32_t saved_sample_pos_frac;   /* Preserved sample position fractional phase upon preemption */
 } ALsource;
 
 
@@ -57,6 +59,13 @@ typedef struct ALsource {
  * Internal Source Subsystem and Lifecycle Management Helpers
  * ============================================================================
  */
+
+/**
+ * Reset an OpenAL source object to default state.
+ *
+ * @param src Source to reset.
+ */
+void al_source_reset(ALsource *src);
 
 /**
  * Initialize the OpenAL source subsystem pool and voice tracker.
