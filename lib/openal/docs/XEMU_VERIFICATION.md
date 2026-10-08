@@ -1238,7 +1238,156 @@ exclusive; the backend selection introduced alongside this document (`AL_XBOX_BA
 documentation honest: `README.md` states the current scope, and this document is the reference for anything
 hardware-related.
 
-### 8.2 Staged plan for route A
+### 8.1b Real-hardware observations (samples/apu_probe, rounds 1-17, one retail console, booted from the dashboard)
+
+Measured on silicon by reading registers back; not inferred from xemu. Each finding names the probe round
+(the logs are `E:\apu_probe*.txt` on the console).
+
+* **State left by the dashboard (DirectSound):** `SECTL = 0x00000007`, `FECTL = 0x0007138F`, `IEN = 0xD8`,
+  `GPRST = 0`, `EPRST = 1`, `FETFORCE1 = 0x8000`, table bases at 16 KiB-aligned addresses
+  (`VPVADDR 0x03680000`, `VPSGEADDR 0x0367C000`, `GPSADDR 0x03648000`, `EPSADDR 0x03630000`, ...). The GP/EP
+  memories still hold DirectSound's images after the dashboard hands over (round 4).
+* **PIO queue:** method writes go to a 32-entry queue mirrored at `BAR0 + 0x1400-0x14FF` as
+  `{0x000A0000 | method, value}` pairs; `0x1340` holds put (bits 23:16), get (15:8) and the pending count (7:0);
+  `PIO_FREE` (`0x20010`) counts free entries x 4 (0x80 when empty) (rounds 1-3). DirectSound also uses methods
+  `0x104` and `0x10C` (its last two before hand-over: `0x10C = 0`, `0x104 = 2`), which xemu does not implement.
+* **The front end executes exactly one queued method and then stops consuming the queue**, whatever the
+  method (`0x804`, `0x2F8`, `0x104`), with frames on or off, in every `FECTL` method mode (bits 7:5), with
+  `SECTL` stage bits 0-2 in any combination, with the DSPs in reset or running our own frame-ending loop, and
+  after sending `0x104 = 0` first (rounds 1-9). No `ISTS` bit is raised. Unresolved; this blocks every VP use
+  on hardware. Not explained yet; candidates: the semantics of `0x104`/`0x10C`, a per-method acknowledge
+  (trap/interrupt protocol, `FETFORCE1` bit 15), or a GP frame-end handshake that differs from xemu.
+* **`SECTL`:** bits 4:3 (`XCNTMODE`) = 1 runs the sample counter `XGSCNT` at ~48 000 per second; 2 and 3 do not
+  advance it. Bits 2:0 are set by DirectSound (meaning unknown). With bits 2:0 = 7 and frames on, the front end
+  once reported decode `0x8008` with parameter 1 and set `FECTL` bit 15 (round 2).
+* **`FECV` does not change on `SET_CURRENT_VOICE`** on hardware; `FEDECMETH`/`FEDECPARAM` do show the method
+  the front end decoded (bit 25 of `FEDECMETH` set in method mode `0xE0`) (rounds 3, 5).
+* **Table bases are 16 KiB-aligned:** `VPSGEADDR`/`VPSSLADDR` read back with bits 13:0 cleared (round 1);
+  `VPVADDR`, `GPSADDR` and `EPSADDR` accepted 16 KiB-aligned values unchanged (rounds 6, 8).
+* **DSP loading:** with `RST = 0` the P window reads 0 and ignores writes; with `RST = 1` (core held) P and X are
+  readable and writable through the window; the transition to `RST = 3` **runs the bootstrap** and overwrites
+  `P:0..` from the scratch SGE table, as in xemu (round 7, where a stale `GPSADDR` reloaded DirectSound's image).
+  Loading our image through our own 16 KiB-aligned scratch SGE table works: both DSPs read back
+  `08F484 000001 0C0000` after release and while frames run (round 8). The probe holds a DSP in reset if its
+  program memory is not ours, so no other code runs.
+* **The FE advances on `FECTL` method-mode writes (round 10).** After the one automatic method, writing
+  `FECTL` method mode `0xE0` (TRAPPED in xemu's naming) and then `0x80` (HALTED) made the front end consume
+  exactly one more queued method. The dashboard leaves the mode at `0x80`. Writing mode `0` (FREE_RUNNING), clearing
+  bits 12:8, the xemu trap-service sequence, `ISTS`/`IEN`/`FETFORCE1` writes did not.
+* **Stepping rule (round 11):** each write that *changes* the method mode to `0x80` consumes exactly one entry
+  (from `0xE0`, `0x00` or any other mode); rewriting `0x80` while already halted, and every other mode value,
+  consume none. Stepped this way, 21 voice methods were all consumed and decoded (`FEDECMETH` shows them), but
+  the voice record in RAM stayed all zero and `TVL2D` stayed `0xFFFF`: in halted mode the step decodes a method
+  for software without executing it. In free-running mode with frames on, nothing is consumed (rounds 10, 11).
+* **Free-running FE raises an internal message (round 12; also seen in round 2):** with `XCNTMODE = 1`, mode 0
+  and the DSPs loaded, the FE consumed one method, then `FEDECMETH` read `0x(8)008` with parameter 1 and
+  `FECTL` bit 15 set, and the queue stopped. xemu's only internal message is `SE2FE_IDLE_VOICE = 0x8000`; this
+  looks like another setup-engine-to-front-end message that software must service. Its meaning is unknown.
+* **DSP frame order (round 12, explained by xemu PR #3047, which was measured on silicon):** a DSP loop that waits for
+  `START_FRAME` before writing `x:$FFFFC4 = 1` counts no frames, because a latched start is only released by a
+  frame-complete write. With the loop `movep #1,x:$FFFFC4` / `jclr #1,x:$FFFFC5,*` / `movep #2,x:$FFFFC5`,
+  `XCNTMODE = 1` gives **151 GP and 19 EP frames per 100 ms** (1500/s and 1500/8 per second), none with frames off; the DSPs
+  run whatever the FE method mode is (round 13). With the DSPs completing frames the `0x8008` message no longer
+  appears, but the free-running FE still executes one method (`SET_CURRENT_VOICE 64`) and stalls on the second;
+  writing `FECTL` bit 15 does nothing. Round 14 diffs the FE registers around the stall and retries the
+  `FECTL` low-nibble and bits 18:16 combinations now that frames really run.
+* **Round 14:** bus mastering is on (PCI command `0x0006`). None of the 50 `FECTL` low-nibble x bits 18:16
+  combinations in mode 0 moves the queue (bits 18:16 read back 7 whatever is written). **`FEMEMADDR` (`0x1324`)
+  advances by 4 on its own**: on the halted -> free-running switch and on each method (`0x03688010`, `...14`, ...
+  `...24`, inside DirectSound's notifier area at `FENADDR = 0x03688000`, which we do not own). A `FEMEMDATA`
+  write stores the value at `FEMEMADDR` (our word received `0x12345678`) and advances the pointer by 8. The
+  notifier block at our `FENADDR` stays zero. Registers `0x120C`, `0x1218` and `0x121C` change all the time (counters). Probes
+  must point `FEMEMADDR` at their own memory first (round 15 does).
+* **`FEMEMADDR`/`FEMEMDATA` is a CPU memory port with auto-increment, not FE activity (round 15).** With the
+  pointer in our own buffer, it stays put through the free-running switch and the methods; it only advances on
+  `FEMEMDATA` accesses (a write stores the word and advances by 4; round 14's register snapshot read it, which
+  is why it moved there). The FE touches no memory through it. Filling the buffer with 0, 1, 2, `0xFFFFFFFF`,
+  `0x40`, `0x80000000` or `0x01000000` does not release the queue. Also: DirectSound's freed notifier page
+  is unmapped, so reading it through `0x80000000 | phys` faults (the first round 15 attempt hung there).
+* **The VP plays a voice whose record and list head the CPU wrote directly (round 16).** With frames on
+  (`XCNTMODE = 1`, DSPs running the complete-then-wait loop), a record built in RAM as xemu's methods would leave
+  it (VBIN `0x20`, FMT S16/B16/loop `0x52000000`, HRTF target `0xFFFF`, BA = PCM offset in the SGE space, EBO
+  47999, VOLA `0x000F000F`, VOLB/VOLC muted, PITCH_LINK `0x0000FFFF`, `PAR_STATE` = `ACTIVE_VOICE`) plus
+  `TVL2D = handle` plays: `CBO` advances by `0x12E0` = 4832 samples per 100 ms (48 kHz at pitch 0), with the
+  FE halted or free-running, on the 2D or the 3D list, with or without `NEW_VOICE`. The hardware writes back the
+  current volumes (`0x28`-`0x30` = the target volumes), the current physical page at `0x38` (PCM base + page of
+  `CBO`), `PAR_STATE = 0x00E00000` (bits 23:21) and `EALVL = 0xFF`. `CVL2D` follows the list head; list-head
+  writes stick with frames off. **So the VP works without the FE**: until the FE stall is understood, the
+  driver can manage records and list heads from the CPU.
+* **End-to-end audio on hardware (round 17, heard on the console).** GP program: `movep #1,x:$FFFFC4` /
+  `jclr #1,x:$FFFFC5,*` / `movep #2,x:$FFFFC5` / `movep #0,x:$FFFFD4` / `movep #1,x:$FFFFD6` / `jmp $0`, with the
+  descriptor `{0x004000, 0x000403, 0x000201, 0x001400}` at X:0 (interleave, to memory, FIFO 0, 16-bit, 32 x 2,
+  from `X:$1400`). FIFO 0 is a 64 KiB ring (`GPFADDR` SGE table of 16 pages, `GPFMAXSGE = 15`, `GPOFBASE0 = 0`,
+  `GPOFEND0 = 0x10000`). `GPOFCUR0` advances `0x4B80` bytes per 100 ms (48 kHz x 4 bytes). The VP mixes the
+  voice into the mixbins as 24-bit values (`0x1F3200` = 7986 << 8 at `X:$1400`, bin 1 at `X:$1420`). The CPU
+  forwarded 191 936 frames in 4 s to the AC97 with no resyncs or underruns. The 2 s capture has peak 8000 on
+  both channels and 1760 zero crossings, i.e. the 440 Hz test tone, bit-exact in level.
+* **`movep #1,x:$FFFFC4` does not stall the DSPs on hardware (round 10).** A loop that counts iterations
+  into `X:$10` around that instruction ran ~1.6 M iterations per 100 ms on both GP and EP, with frames off and
+  with `SECTL = 0x0F` alike: the frame handshake in xemu's model is not how silicon paces the DSPs.
+
+
+**Progress (executed on xemu 0.8.136, "Real-time DSP processing" off).** Not yet run on a real console.
+
+* Stage 1 done: `samples/apu_vp_voice` follows 7.2 steps 1-13 and 17-24 with the register model in
+  `src/mcpx_apu_regs.h`. A one-shot, a pitched one-shot and a looped voice switched off with `VOICE_OFF` all
+  advance `CBO`, clear `ACTIVE_VOICE`, write the notifier, raise the idle-voice trap and are unlinked; xemu does
+  not abort. The trace-event regression recipe is still to do.
+* Stage 2 mostly done, stage 3 started: `src/apu_vp.c` is the library's VP driver. With
+  `-DOPENAL_APU_REAL_MMIO` and the real BAR0, `alcOpenDevice()` runs it instead of the legacy EP/GP setup, and
+  the `apu_voice_*` calls drive VP handles 64-127. It implements the signed 4.12 log2 pitch, 12-bit attenuations,
+  eight-output routing, `SAMPLES_PER_BLOCK` = 1 for stereo, unsigned 8-bit, an SGE page allocator over the
+  24-bit linear space, locked live updates of pitch and volumes, and idle-trap service with unlinking.
+  `samples/openal_vp` runs six OpenAL phases on it (loop, distance and pitch sweeps, orbit, a three-voice
+  chord, one-shots that end as `AL_STOPPED`); all pass. `tests/test_apu_vp.c` checks the encodings against
+  4.6/4.7 and the register writes on a memory BAR0. Not done: `CBO` save/restore for preempted voices (a
+  re-promoted voice restarts from the beginning), notifier- or interrupt-driven completion (the driver polls
+  `ACTIVE_VOICE`; applications must call `alXboxUpdateVoices()` so the trap is serviced), and handles 128-255.
+* **Ported to the real-console path (after probe round 17), host-tested, not yet run on hardware:**
+  `apu_vp.c` no longer drives voices with methods. It writes each record as the methods would leave it, links it
+  at the 2D head and keeps a software list table. Pause unlinks the voice (keeping `CBO`), off unlinks it and
+  clears `PAR_STATE`, and ended one-shots are unlinked in `apu_vp_service()`. At init two `SET_CURRENT_VOICE`
+  methods probe the front end (`FEPIOQ`, `0x1340`, pending byte; xemu reads 0). If it stalls, the leftover
+  entry is stepped out and HRTF is disabled, because the table and xemu's per-voice latch need methods. Mono
+  sources then play on plain voices panned by volume, with the 5.1 pan folded into bins 0/1. Table bases are
+  16 KiB-aligned (`APU_TABLE_ALIGN`), and a locked instruction drains the write-combining pool before a list
+  head exposes a record. `apu_gp.c` runs the hardware frame loop (complete, wait, acknowledge, DMA, count at
+  `X:$10`) and writes the descriptor after the release. `apu_ac97.c` forwards the GP FIFO to the AC97 from
+  `apu_vp_service()` (512-frame buffers, 4 queued) when the front end stalls, i.e. on a real console.
+* **First hardware runs of `samples/openal_vp` (2026-10-07):**
+  * **`SECTL`:** writing only `0x08` runs no frames at all. Bits 2:0 must stay 7 as in every probe
+    (`MCPX_APU_SECTL_RUN = 0x0F`).
+  * **GP image:** loaded from the write-combining pool, the GP bootstrap ran stale code (`P:0 = 0x0BF080`).
+    APU tables and the GP image now come from `apu_mem_alloc_table()` (uncached, physically 16 KiB-aligned),
+    and `apu_gp_init()` reads P memory back and retries.
+  * **With both fixes, OpenAL is audible through the APU on the console:** the loop, distance sweep and pitch
+    sweep, with 0 AC97 underruns.
+  * **Freeze when a one-shot ends:** 24.5 s in, exactly when the first one-shot ping ended, frame processing
+    froze (GP frame counter stuck, `XGSCNT` still running) and the codec replayed stale buffers. With
+    `FETFORCE1` bit 15 set (as DirectSound leaves it), an ended voice still in a list apparently halts frames
+    until the front end is serviced, which the stalled method queue cannot do. On hardware the driver now
+    clears `FETFORCE1`, logs any `FECTL` bit-15 message, and the AC97 feed pads with silence when the GP
+    falls behind.
+  * **`FETFORCE1` was not the cause:** clearing it changed nothing. It froze again at ~36 700 frames, with no
+    `FECTL` bit-15 message. A voice that *reaches its end* on hardware stops all frame processing, while
+    voices unlinked by the CPU (stopping the chord) do not.
+  * **Workaround:** every OpenAL buffer now carries `APU_VP_SILENT_TAIL_BYTES` (256) of silence. On hardware a
+    one-shot loops over that tail (LBO = data frames, EBO = end of tail), and `apu_vp_service()` unlinks it once
+    `CBO` passes the data, so no voice ever ends by itself.
+  * **Verified on the console:** `samples/openal_vp` ran more than two full cycles of its six phases
+    (102 268 GP frames, about 68 s) with no freeze. It played the loop, distance and pitch sweeps, orbit,
+    three-voice chord and one-shot pings, with 0 AC97 underruns and 4 padded buffers (start-up). HRTF is still
+    unavailable there (it needs front-end methods).
+* Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
+  from a spherical-head model (Brown-Duda head-shadow shelf per ear as a 31-tap int8 FIR, Woodworth ITD in
+  s6.9; 32 azimuths x elevations -30/0/30/60; no measured data, no pinna cues). `apu_vp_init()` uploads it with
+  `SET_CURRENT_HRTF_ENTRY`/`SET_HRIR` x 15/`SET_HRIR_X` and sets `SET_HRTF_SUBMIXES` to bins 0-3 (front
+  L/R, surround L/R). Mono sources now play on handles 0-63 with `SET_VOICE_TAR_HRTF` latched to the entry of
+  the source direction, re-latched on every spatial update; outputs 0/1 and 2/3 carry the pan's front and rear
+  shares, output 5 the LFE share. Stereo sources stay on plain handles 64-127. `samples/openal_vp` shows the
+  latched entry following the orbit, with no xemu abort; `tests/test_apu_hrtf.c` and `tests/test_apu_vp.c`
+  cover the table and the upload. Whether real hardware L1-normalises the FIRs like xemu, and how its HRTF
+  output reaches the speakers, needs stage 5 and a console.
 
 1. **VP-only mono voice on xemu** (7.2 steps 1-13 and 17-24, route A): prove one 48 kHz PCM16 one-shot voice
    plays and completes without aborting; add a trace-event-based regression recipe.

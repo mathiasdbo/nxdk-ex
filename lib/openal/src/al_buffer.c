@@ -1,4 +1,5 @@
 #include "al_buffer.h"
+#include "apu_vp.h"
 #include <string.h>
 
 /*
@@ -289,7 +290,8 @@ AL_API void AL_APIENTRY alBufferData(ALuint buffer, ALenum format, const ALvoid 
     }
 
     uint32_t data_phys = 0;
-    void *data_virt = apu_mem_alloc_phys((size_t)size, 8, &data_phys);
+    /* The data is followed by APU_VP_SILENT_TAIL_BYTES of silence that real-console one-shots loop over */
+    void *data_virt = apu_mem_alloc_phys((size_t)size + APU_VP_SILENT_TAIL_BYTES, 8, &data_phys);
     if (!data_virt) {
         alSetError(AL_OUT_OF_MEMORY);
         return;
@@ -313,6 +315,7 @@ AL_API void AL_APIENTRY alBufferData(ALuint buffer, ALenum format, const ALvoid 
     }
 
     memcpy(data_virt, data, (size_t)size);
+    memset((uint8_t *)data_virt + size, (bits == 8) ? 0x80 : 0, APU_VP_SILENT_TAIL_BYTES);   /* U8 silence is 0x80 */
 
     /* Free previously attached PCM data and PRD table if re-specifying buffer data */
     if (buf->data_virt) {
