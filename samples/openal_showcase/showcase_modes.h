@@ -23,6 +23,39 @@ extern "C" {
 
 #define MAX_STRESS_SOURCES   128
 
+/* Controller inputs named by the on-screen legend */
+typedef enum {
+    SHOWCASE_BTN_NONE = 0,
+    SHOWCASE_BTN_A,
+    SHOWCASE_BTN_B,
+    SHOWCASE_BTN_X,
+    SHOWCASE_BTN_Y,
+    SHOWCASE_BTN_WHITE,
+    SHOWCASE_BTN_BLACK,
+    SHOWCASE_BTN_START,
+    SHOWCASE_BTN_BACK,
+    SHOWCASE_BTN_DPAD_LEFT_RIGHT,
+    SHOWCASE_BTN_DPAD_UP_DOWN,
+    SHOWCASE_BTN_DPAD_LEFT,
+    SHOWCASE_BTN_DPAD_RIGHT,
+    SHOWCASE_BTN_LSTICK,
+    SHOWCASE_BTN_RSTICK,
+    SHOWCASE_BTN_LTRIGGER,
+    SHOWCASE_BTN_RTRIGGER
+} showcase_button_t;
+
+#define SHOWCASE_LEGEND_MAX_BUTTONS 2
+#define SHOWCASE_LEGEND_MAX_ENTRIES 8
+
+/* One legend line: up to two alternative inputs and the action they trigger */
+typedef struct {
+    showcase_button_t buttons[SHOWCASE_LEGEND_MAX_BUTTONS];
+    const char *action;
+    bool hold;          /* input must be held, not just pressed */
+    bool combo;         /* buttons pressed together, not alternatives */
+    bool global;        /* applies in every mode (drawn in the right column) */
+} showcase_legend_entry_t;
+
 typedef struct {
     /* OpenAL Context & Device */
     ALCdevice  *device;
@@ -40,6 +73,8 @@ typedef struct {
     ALuint buf_laser;
     ALuint buf_voice;
     ALuint buf_bgm;
+    ALuint buf_rifle;
+    ALuint buf_glass;
 
     /* Primary Showcase Sources */
     ALuint src_orbit;
@@ -55,6 +90,7 @@ typedef struct {
 
     /* Mode State */
     int current_mode;
+    float dt;               /* seconds per update (set by the main loop; 0.02 = 50 Hz by default) */
 
     /* Mode 1: Orbit State */
     float orbit_angle;
@@ -62,6 +98,11 @@ typedef struct {
     float orbit_speed;
     float camera_yaw;
     float camera_pitch;
+
+    /* Listener walk (X toggles walk mode, B resets position and head) */
+    bool  walk_mode;
+    float listener_pos[3];
+    float listener_vel[3];
 
     /* Mode 2: Doppler State */
     bool  doppler_flying;
@@ -101,6 +142,21 @@ void showcase_app_update(showcase_app_t *app, const showcase_input_t *input);
  * @param app Pointer to showcase_app_t structure.
  */
 void showcase_app_render_ui(showcase_app_t *app);
+
+/**
+ * Short title of a mode (1..SHOWCASE_NUM_MODES), "" for anything else.
+ */
+const char *showcase_app_mode_title(int mode);
+
+/**
+ * Controller legend for the current mode: the mode's own controls first,
+ * then the global ones (mode navigation, exit).
+ * @param app Pointer to showcase_app_t structure.
+ * @param out Destination array.
+ * @param max Capacity of out.
+ * @return Number of entries written.
+ */
+int showcase_app_get_legend(const showcase_app_t *app, showcase_legend_entry_t *out, int max);
 
 /**
  * Release all OpenAL resources, stop sources, and close device.

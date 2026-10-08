@@ -93,6 +93,15 @@ void apu_mem_free(void *ptr);
 #define apu_mem_free_phys(ptr) apu_mem_free(ptr)
 
 /**
+ * Allocate an APU table or DSP image: zeroed, physically 16 KiB-aligned and,
+ * on the Xbox, uncached and outside the write-combining pool, so the APU's DMA
+ * always sees what the CPU wrote (the APU drops address bits 13:0 of its table
+ * bases; with the pool, the GP bootstrap loaded stale code on a real console).
+ * Free with apu_mem_free().
+ */
+void *apu_mem_alloc_table(size_t size, uint32_t *out_phys);
+
+/**
  * Release all resources and destroy the contiguous memory pool.
  */
 void apu_mem_shutdown(void);

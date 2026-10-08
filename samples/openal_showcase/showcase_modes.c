@@ -1,6 +1,8 @@
 #include "showcase_modes.h"
 #include "wav_loader.h"
 #include "sound_assets.h"
+#include "sound_assets_sfx.h"
+#include "showcase_fmt.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -130,22 +132,27 @@ int showcase_app_init(showcase_app_t *app) {
     app->av_pack_type = (int)pack_val;
     app->topology = (int)topo_val;
 
-    /* 3. Generate Buffers & Load Standardized Audio Assets */
-    ALuint bufs[6];
-    alGenBuffers(6, bufs);
+    /* 3. Generate Buffers & Load Audio Assets: recorded CC0 effects and music
+     * (sound_assets_sfx.h), plus the synthesized laser and center-channel voice */
+    ALuint bufs[8];
+    alGenBuffers(8, bufs);
     app->buf_orbit     = bufs[0];
     app->buf_siren     = bufs[1];
     app->buf_explosion = bufs[2];
     app->buf_laser     = bufs[3];
     app->buf_voice     = bufs[4];
     app->buf_bgm       = bufs[5];
+    app->buf_rifle     = bufs[6];
+    app->buf_glass     = bufs[7];
 
-    wav_load_to_buffer(app->buf_orbit, g_sound_orbit_mono_wav, sizeof(g_sound_orbit_mono_wav));
-    wav_load_to_buffer(app->buf_siren, g_sound_siren_doppler_wav, sizeof(g_sound_siren_doppler_wav));
-    wav_load_to_buffer(app->buf_explosion, g_sound_explosion_lfe_wav, sizeof(g_sound_explosion_lfe_wav));
+    wav_load_to_buffer(app->buf_orbit, g_sfx_helicopter_loop_wav, sizeof(g_sfx_helicopter_loop_wav));
+    wav_load_to_buffer(app->buf_siren, g_sfx_siren_loop_wav, sizeof(g_sfx_siren_loop_wav));
+    wav_load_to_buffer(app->buf_explosion, g_sfx_explosion_wav, sizeof(g_sfx_explosion_wav));
     wav_load_to_buffer(app->buf_laser, g_sound_laser_stress_wav, sizeof(g_sound_laser_stress_wav));
     wav_load_to_buffer(app->buf_voice, g_sound_voice_center_wav, sizeof(g_sound_voice_center_wav));
-    wav_load_to_buffer(app->buf_bgm, g_sound_bgm_stereo_wav, sizeof(g_sound_bgm_stereo_wav));
+    wav_load_to_buffer(app->buf_bgm, g_sfx_music_loop_wav, sizeof(g_sfx_music_loop_wav));
+    wav_load_to_buffer(app->buf_rifle, g_sfx_rifle_shot_wav, sizeof(g_sfx_rifle_shot_wav));
+    wav_load_to_buffer(app->buf_glass, g_sfx_glass_break_wav, sizeof(g_sfx_glass_break_wav));
 
     /* 4. Generate & Configure Showcase Sources */
     alGenSources(1, &app->src_orbit);
@@ -178,7 +185,9 @@ int showcase_app_init(showcase_app_t *app) {
 
     alGenSources(MAX_STRESS_SOURCES, app->src_stress);
     for (int i = 0; i < MAX_STRESS_SOURCES; i++) {
-        alSourcei(app->src_stress[i], AL_BUFFER, app->buf_laser);
+        /* Mostly short lasers, with a rifle shot and breaking glass in every six */
+        ALuint b = ((i % 6) == 2) ? app->buf_rifle : ((i % 6) == 5) ? app->buf_glass : app->buf_laser;
+        alSourcei(app->src_stress[i], AL_BUFFER, b);
         alSourcei(app->src_stress[i], AL_LOOPING, AL_FALSE);
         alSourcef(app->src_stress[i], AL_REFERENCE_DISTANCE, 3.0f);
         alSourcef(app->src_stress[i], AL_MAX_DISTANCE, 20.0f);
@@ -187,6 +196,7 @@ int showcase_app_init(showcase_app_t *app) {
 
     /* 5. Set Initial State */
     app->current_mode = MODE_ORBIT_3D;
+    app->dt = 0.02f;
     app->orbit_radius = 5.0f;
     app->orbit_speed = 0.8f;
     app->orbit_angle = 0.0f;
@@ -216,8 +226,11 @@ void showcase_app_update(showcase_app_t *app, const showcase_input_t *input) {
     }
 
     /* Common Listener Update (Camera Orientation via Right Stick) */
-    app->camera_yaw += input->rstick_x * 0.04f;
-    app->camera_pitch -= input->rstick_y * 0.03f;
+    /* Rates were tuned per 50 Hz frame; k scales them to the real time step */
+    float dt = (app->dt > 0.0f) ? app->dt : 0.02f;
+    float k = dt / 0.02f;
+    app->camera_yaw += input->rstick_x * 0.04f * k;
+    app->camera_pitch -= input->rstick_y * 0.03f * k;
     if (app->camera_pitch > 1.2f) app->camera_pitch = 1.2f;
     if (app->camera_pitch < -1.2f) app->camera_pitch = -1.2f;
 
@@ -226,21 +239,51 @@ void showcase_app_update(showcase_app_t *app, const showcase_input_t *input) {
     float fwd_z = -cosf(app->camera_yaw) * cosf(app->camera_pitch);
     float listener_ori[6] = { fwd_x, fwd_y, fwd_z, 0.0f, 1.0f, 0.0f };
     alListenerfv(AL_ORIENTATION, listener_ori);
-    alListener3f(AL_POSITION, 0.0f, 0.0f, 0.0f);
-    alListener3f(AL_VELOCITY, 0.0f, 0.0f, 0.0f);
+
+    /* X: walk mode on/off. B: back to the centre, facing forward */
+    if (input->pressed_x) {
+        app->walk_mode = !app->walk_mode;
+    }
+    if (input->pressed_b) {
+        memset(app->listener_pos, 0, sizeof(app->listener_pos));
+        app->camera_yaw = 0.0f;
+        app->camera_pitch = 0.0f;
+    }
+
+    /* Walking: left stick up/down = forward/back, left/right = strafe, in the
+     * direction the head faces (on the ground plane). The velocity goes to
+     * OpenAL too, so walking towards or away from a source shifts its pitch. */
+    memset(app->listener_vel, 0, sizeof(app->listener_vel));
+    if (app->walk_mode) {
+        const float walk_speed = 3.0f;   /* m/s */
+        float ahead = -input->lstick_y, side = input->lstick_x;
+        float sy = sinf(app->camera_yaw), cy = cosf(app->camera_yaw);
+        app->listener_vel[0] = (sy * ahead + cy * side) * walk_speed;
+        app->listener_vel[2] = (-cy * ahead + sy * side) * walk_speed;
+        for (int i = 0; i < 3; i += 2) {
+            app->listener_pos[i] += app->listener_vel[i] * dt;
+            if (app->listener_pos[i] > 20.0f) app->listener_pos[i] = 20.0f;
+            if (app->listener_pos[i] < -20.0f) app->listener_pos[i] = -20.0f;
+        }
+    }
+    alListener3f(AL_POSITION, app->listener_pos[0], app->listener_pos[1], app->listener_pos[2]);
+    alListener3f(AL_VELOCITY, app->listener_vel[0], app->listener_vel[1], app->listener_vel[2]);
 
     /* Update Mode-Specific Kinematics & Audio Parameters */
     switch (app->current_mode) {
         case MODE_ORBIT_3D: {
-            app->orbit_radius -= input->lstick_y * 0.10f;
+            /* The left stick walks instead while walk mode is on */
+            float orbit_ly = app->walk_mode ? 0.0f : input->lstick_y;
+            float orbit_lx = app->walk_mode ? 0.0f : input->lstick_x;
+            app->orbit_radius -= orbit_ly * 0.10f * k;
             if (app->orbit_radius < 1.5f) app->orbit_radius = 1.5f;
             if (app->orbit_radius > 15.0f) app->orbit_radius = 15.0f;
 
-            app->orbit_speed += input->lstick_x * 0.02f;
+            app->orbit_speed += orbit_lx * 0.02f * k;
             if (app->orbit_speed > 2.5f) app->orbit_speed = 2.5f;
             if (app->orbit_speed < -2.5f) app->orbit_speed = -2.5f;
 
-            app->orbit_angle += app->orbit_speed * 0.02f; /* 50 FPS dt = 0.02s */
+            app->orbit_angle += app->orbit_speed * dt;
 
             float x = app->orbit_radius * sinf(app->orbit_angle);
             float z = -app->orbit_radius * cosf(app->orbit_angle);
@@ -259,15 +302,16 @@ void showcase_app_update(showcase_app_t *app, const showcase_input_t *input) {
 
             snprintf(app->telemetry_buf, sizeof(app->telemetry_buf),
                      " [3D Positional Orbit & Spatial Model]\n"
-                     " Source Pos: (%5.2f, %5.2f, %5.2f) | Distance: %5.2fm\n"
-                     " Azimuth: %5.1f deg | Orbit Speed: %5.2f rad/s\n"
-                     " Camera Yaw: %5.1f deg | Pitch: %5.1f deg\n"
+                     " Source Pos: (%s, %s, %s) | Distance: %sm\n"
+                     " Azimuth: %s deg | Orbit Speed: %s rad/s\n"
+                     " Camera Yaw: %s deg | Pitch: %s deg\n"
                      " Spatial model: Woodworth ITD up to 31 samples\n"
-                     " HRTF model: Q14 biquad (library model, default backend is silent)\n",
-                     x, y, z, app->orbit_radius,
-                     azimuth_deg, app->orbit_speed,
-                     app->camera_yaw * 180.0f / (float)M_PI,
-                     app->camera_pitch * 180.0f / (float)M_PI);
+                     " HRTF model: Q14 biquad (library model)\n",
+                     showcase_fx(x, 2, false, 5), showcase_fx(y, 2, false, 5), showcase_fx(z, 2, false, 5),
+                     showcase_fx(app->orbit_radius, 2, false, 5),
+                     showcase_fx(azimuth_deg, 1, false, 5), showcase_fx(app->orbit_speed, 2, false, 5),
+                     showcase_fx(app->camera_yaw * 180.0f / (float)M_PI, 1, false, 5),
+                     showcase_fx(app->camera_pitch * 180.0f / (float)M_PI, 1, false, 5));
 
             snprintf(app->footer_buf, sizeof(app->footer_buf),
                      "[LStick] Orbit Radius & Speed | [RStick] Rotate Camera Head");
@@ -288,7 +332,7 @@ void showcase_app_update(showcase_app_t *app, const showcase_input_t *input) {
 
             float pitch_mult = 1.0f;
             if (app->doppler_flying) {
-                app->doppler_pos_x += app->doppler_speed * 0.02f;
+                app->doppler_pos_x += app->doppler_speed * dt;
                 alSource3f(app->src_doppler, AL_POSITION, app->doppler_pos_x, app->doppler_pos_y, app->doppler_pos_z);
 
                 /* Distance and pitch telemetry calculation */
@@ -305,13 +349,14 @@ void showcase_app_update(showcase_app_t *app, const showcase_input_t *input) {
             snprintf(app->telemetry_buf, sizeof(app->telemetry_buf),
                      " [High-Speed Fly-By & Doppler Pitch Shift]\n"
                      " Projectile State: %s\n"
-                     " Position: (%5.2f, %5.2f, %5.2f) | Speed: %5.1f m/s (151 km/h)\n"
-                     " Doppler Pitch Multiplier: %5.3fx\n"
+                     " Position: (%s, %s, %s) | Speed: %s m/s (151 km/h)\n"
+                     " Doppler Pitch Multiplier: %sx\n"
                      " Pitch step: linear 16.16 (library model, not APU 4.12 log2)\n",
                      app->doppler_flying ? "FLYING (Crossing at z = -1.2m)" : "STANDBY (Pull RT to Launch)",
-                     app->doppler_pos_x, app->doppler_pos_y, app->doppler_pos_z,
-                     app->doppler_flying ? app->doppler_speed : 0.0f,
-                     app->doppler_flying ? pitch_mult : 1.0f);
+                     showcase_fx(app->doppler_pos_x, 2, false, 5), showcase_fx(app->doppler_pos_y, 2, false, 5),
+                     showcase_fx(app->doppler_pos_z, 2, false, 5),
+                     showcase_fx(app->doppler_flying ? app->doppler_speed : 0.0f, 1, false, 5),
+                     showcase_fx(app->doppler_flying ? pitch_mult : 1.0f, 3, false, 5));
 
             snprintf(app->footer_buf, sizeof(app->footer_buf),
                      "[Right Trigger or A] Launch High-Speed Doppler Projectile");
@@ -333,7 +378,7 @@ void showcase_app_update(showcase_app_t *app, const showcase_input_t *input) {
                 "Front Right (MixBin 1)",
                 "Surround Right (MixBin 3)",
                 "Surround Left (MixBin 2)",
-                "Subwoofer LFE (MixBin 5) [Low-Freq Punch]"
+                "Subwoofer LFE (MixBin 5) [Explosion]"
             };
 
             snprintf(app->telemetry_buf, sizeof(app->telemetry_buf),
@@ -399,7 +444,7 @@ void showcase_app_update(showcase_app_t *app, const showcase_input_t *input) {
             }
 
             /* Keep orbit source moving in 3D */
-            app->orbit_angle += 0.8f * 0.02f;
+            app->orbit_angle += 0.8f * dt;
             float x = 5.0f * sinf(app->orbit_angle);
             float z = -5.0f * cosf(app->orbit_angle);
             alSource3f(app->src_orbit, AL_POSITION, x, 0.0f, z);
@@ -421,13 +466,9 @@ void showcase_app_update(showcase_app_t *app, const showcase_input_t *input) {
     }
 }
 
-void showcase_app_render_ui(showcase_app_t *app) {
-    if (!app) {
-        return;
-    }
-
-    const char *mode_titles[] = {
-        "None",
+const char *showcase_app_mode_title(int mode) {
+    static const char *const mode_titles[] = {
+        "",
         "Orbit 3D & ITD/HRTF Model",
         "Doppler Fly-By Pitch Shifter",
         "5.1 Surround & LFE Channels",
@@ -435,10 +476,93 @@ void showcase_app_render_ui(showcase_app_t *app) {
         "2D Stereo Music Concurrent"
     };
 
+    if (mode < 1 || mode > SHOWCASE_NUM_MODES) {
+        return mode_titles[0];
+    }
+    return mode_titles[mode];
+}
+
+static void legend_add(showcase_legend_entry_t *out, int max, int *n,
+                       showcase_button_t b0, showcase_button_t b1,
+                       const char *action, bool hold, bool combo, bool global) {
+    if (*n >= max) {
+        return;
+    }
+    out[*n].buttons[0] = b0;
+    out[*n].buttons[1] = b1;
+    out[*n].action = action;
+    out[*n].hold = hold;
+    out[*n].combo = combo;
+    out[*n].global = global;
+    (*n)++;
+}
+
+int showcase_app_get_legend(const showcase_app_t *app, showcase_legend_entry_t *out, int max) {
+    int n = 0;
+
+    if (!app || !out || max <= 0) {
+        return 0;
+    }
+
+    /* Mode controls (they mirror the input handling in showcase_app_update) */
+    switch (app->current_mode) {
+        case MODE_ORBIT_3D:
+            if (!app->walk_mode) {
+                legend_add(out, max, &n, SHOWCASE_BTN_LSTICK, SHOWCASE_BTN_NONE,
+                           "Orbit radius / speed", false, false, false);
+            }
+            break;
+        case MODE_DOPPLER_FLYBY:
+            legend_add(out, max, &n, SHOWCASE_BTN_RTRIGGER, SHOWCASE_BTN_A,
+                       "Launch the projectile", false, false, false);
+            break;
+        case MODE_SURROUND_51:
+            legend_add(out, max, &n, SHOWCASE_BTN_DPAD_UP_DOWN, SHOWCASE_BTN_A,
+                       "Step through the speakers", false, false, false);
+            break;
+        case MODE_POLYPHONY_STRESS:
+            legend_add(out, max, &n, SHOWCASE_BTN_A, SHOWCASE_BTN_NONE,
+                       "Spawn shots and glass", true, false, false);
+            break;
+        case MODE_BGM_2D_CONCURRENT:
+            legend_add(out, max, &n, SHOWCASE_BTN_Y, SHOWCASE_BTN_A,
+                       "Play / pause 2D music", false, false, false);
+            break;
+        default:
+            break;
+    }
+
+    /* Listener controls, every mode */
+    if (app->walk_mode) {
+        legend_add(out, max, &n, SHOWCASE_BTN_LSTICK, SHOWCASE_BTN_NONE,
+                   "Walk / strafe", false, false, false);
+    }
+    legend_add(out, max, &n, SHOWCASE_BTN_RSTICK, SHOWCASE_BTN_NONE,
+               "Turn the listener's head", false, false, false);
+
+    /* Global controls (right column) */
+    legend_add(out, max, &n, SHOWCASE_BTN_X, SHOWCASE_BTN_NONE,
+               app->walk_mode ? "Walk mode: ON (turn off)" : "Walk mode: off (turn on)",
+               false, false, true);
+    legend_add(out, max, &n, SHOWCASE_BTN_B, SHOWCASE_BTN_NONE,
+               "Reset position and head", false, false, true);
+    legend_add(out, max, &n, SHOWCASE_BTN_WHITE, SHOWCASE_BTN_BLACK,
+               "Next / prev mode (or D-pad)", false, false, true);
+    legend_add(out, max, &n, SHOWCASE_BTN_BACK, SHOWCASE_BTN_START,
+               "Exit the demo", false, true, true);
+
+    return n;
+}
+
+void showcase_app_render_ui(showcase_app_t *app) {
+    if (!app) {
+        return;
+    }
+
     uint32_t active_hw = apu_voice_mgr_get_active_hw_count();
     uint32_t standby = apu_voice_mgr_get_virtual_standby_count();
 
-    showcase_ui_draw_header(mode_titles[app->current_mode],
+    showcase_ui_draw_header(showcase_app_mode_title(app->current_mode),
                             app->current_mode, SHOWCASE_NUM_MODES,
                             active_hw, standby,
                             app->dolby_dse_active, app->topology,
@@ -463,11 +587,12 @@ void showcase_app_shutdown(showcase_app_t *app) {
     alDeleteSources(1, &app->src_bgm);
     alDeleteSources(MAX_STRESS_SOURCES, app->src_stress);
 
-    ALuint bufs[6] = {
+    ALuint bufs[8] = {
         app->buf_orbit, app->buf_siren, app->buf_explosion,
-        app->buf_laser, app->buf_voice, app->buf_bgm
+        app->buf_laser, app->buf_voice, app->buf_bgm,
+        app->buf_rifle, app->buf_glass
     };
-    alDeleteBuffers(6, bufs);
+    alDeleteBuffers(8, bufs);
 
     alcMakeContextCurrent(NULL);
     if (app->context) {
