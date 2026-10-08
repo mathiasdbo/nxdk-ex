@@ -15,6 +15,13 @@ extern "C" {
 int showcase_ui_init(void);
 
 /**
+ * Show or hide the pbkit text dashboard (header, telemetry, footer).
+ * The 3D scene turns it off because it draws its own HUD; the text is
+ * still logged to the console on the host.
+ */
+void showcase_ui_set_text_overlay(bool enabled);
+
+/**
  * Prepare next frame for rendering (VBL sync and screen clearing).
  */
 void showcase_ui_begin_frame(void);

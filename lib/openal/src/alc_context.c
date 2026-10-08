@@ -50,6 +50,11 @@ static void *s_null_apu_ram = NULL;       /* null-backend BAR0 stand-in */
 static uintptr_t s_session_apu_base = 0;  /* base of the open hardware session */
 static bool s_hw_dolby_active = false;    /* cached: first device chose 5.1/DSE */
 
+/* Route A on the real APU: the Voice Processor runs on its own (apu_vp.c) and the
+ * legacy EP/GP setup, which targets registers that do not exist and aborts xemu
+ * (XEMU_VERIFICATION.md 2.3), is skipped */
+static bool s_vp_route_a = false;
+
 static void alc_null_ram_release(void) {
     free(s_null_apu_ram);
     s_null_apu_ram = NULL;
@@ -178,6 +183,11 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
         }
 #endif
 
+        s_vp_route_a = false;
+#ifdef OPENAL_APU_REAL_MMIO
+        s_vp_route_a = (apu_base == NV_PAPU_BASE);
+#endif
+
         /* 1. Contiguous physical memory pool */
         if (apu_mem_init(0) != 0) {
             alc_null_ram_release();
@@ -214,7 +224,7 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
         }
 
         /* 3. Output Processor (EP) subsystem initialization */
-        int ep_res = apu_ep_subsystem_init(apu_base, device->topology);
+        int ep_res = s_vp_route_a ? 0 : apu_ep_subsystem_init(apu_base, device->topology);
         if (ep_res != 0) {
             apu_itd_subsystem_deinit();
             apu_mem_free_phys(s_hw_voice_table_virt);
@@ -228,7 +238,7 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
         }
 
         /* 4. Global Processor (GP) DSP microcode & EP FIFO configuration */
-        int ucode_res = apu_gp_load_topology_microcode(apu_base, device->topology);
+        int ucode_res = s_vp_route_a ? 0 : apu_gp_load_topology_microcode(apu_base, device->topology);
         if (ucode_res != 0) {
             apu_ep_subsystem_deinit(apu_base);
             apu_itd_subsystem_deinit();
@@ -241,13 +251,17 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
             alc_set_error(NULL, ALC_INVALID_VALUE);
             return NULL;
         }
-        apu_gp_start(apu_base);
+        if (!s_vp_route_a) {
+            apu_gp_start(apu_base);
+        }
 
         /* 5. Voice Processor (VP) subsystem */
         int vp_res = apu_voice_subsystem_init(apu_base, s_hw_voice_table_virt, s_hw_voice_table_phys);
         if (vp_res != 0) {
-            apu_gp_stop(apu_base);
-            apu_ep_subsystem_deinit(apu_base);
+            if (!s_vp_route_a) {
+                apu_gp_stop(apu_base);
+                apu_ep_subsystem_deinit(apu_base);
+            }
             apu_itd_subsystem_deinit();
             apu_mem_free_phys(s_hw_voice_table_virt);
             s_hw_voice_table_virt = NULL;
@@ -316,8 +330,11 @@ ALC_API ALCboolean ALC_APIENTRY alcCloseDevice(ALCdevice *device) {
             /* Deinitialize hardware subsystems */
             apu_voice_mgr_deinit();
             apu_voice_subsystem_deinit(device->apu_base);
-            apu_gp_stop(device->apu_base);
-            apu_ep_subsystem_deinit(device->apu_base);
+            if (!s_vp_route_a) {
+                apu_gp_stop(device->apu_base);
+                apu_ep_subsystem_deinit(device->apu_base);
+            }
+            s_vp_route_a = false;
 
             if (s_hw_voice_table_virt != NULL) {
                 apu_mem_free_phys(s_hw_voice_table_virt);

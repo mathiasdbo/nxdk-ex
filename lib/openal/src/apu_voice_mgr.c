@@ -254,8 +254,16 @@ void apu_voice_mgr_release(ALsource *src) {
 void apu_voice_mgr_update(uintptr_t apu_base) {
     uintptr_t base = (apu_base != 0) ? apu_base : al_source_get_apu_base();
 
-    uint32_t active0 = apu_read32(base, NV_PAPU_VP_ACTIVE_0);
-    uint32_t active1 = apu_read32(base, NV_PAPU_VP_ACTIVE_1);
+    bool hw = apu_voice_hw_backend();
+    uint32_t active0 = 0, active1 = 0;
+
+    if (hw) {
+        /* Hardware VP: per-voice ACTIVE_VOICE bits in voice RAM; keep the front end running */
+        apu_voice_service(base);
+    } else {
+        active0 = apu_read32(base, NV_PAPU_VP_ACTIVE_0);
+        active1 = apu_read32(base, NV_PAPU_VP_ACTIVE_1);
+    }
 
     /* 1. Reap phase: detect completed one-shot hardware voices */
     for (uint32_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
@@ -270,7 +278,8 @@ void apu_voice_mgr_update(uintptr_t apu_base) {
             continue;
         }
 
-        uint32_t is_active = (v < 32u) ? (active0 & (1u << v)) : (active1 & (1u << (v - 32u)));
+        uint32_t is_active = hw ? (uint32_t)apu_voice_is_active(base, v) :
+                             (v < 32u) ? (active0 & (1u << v)) : (active1 & (1u << (v - 32u)));
         if (is_active == 0 && !owner->looping) {
             owner->state = AL_STOPPED;
             owner->hw_voice_idx = AL_HW_VOICE_INVALID;

@@ -272,6 +272,41 @@ int apu_voice_is_active(uintptr_t apu_base, uint32_t index);
  */
 uint32_t apu_voice_debug_stop_count(void);
 
+/**
+ * Record the sample buffer a voice slot will play (needed by the hardware
+ * Voice Processor backend, which addresses the buffer itself).
+ */
+void apu_voice_bind_buffer(uint32_t index, uint32_t phys, uint32_t bytes, int channels, int bits);
+
+/**
+ * Record a voice slot's source position in the listener frame (+x right,
+ * +y up, +z behind); the hardware backend picks the HRTF entry from it.
+ */
+void apu_voice_set_direction(uint32_t index, const float local_pos[3]);
+
+/**
+ * Push a running voice's pitch and output volumes from its context to the
+ * hardware (no-op on the software model).
+ */
+void apu_voice_commit(uintptr_t apu_base, uint32_t index);
+
+/**
+ * Service the Voice Processor's idle-voice trap (no-op on the software
+ * model). Must run regularly on hardware: an unserviced trap halts the VP.
+ */
+void apu_voice_service(uintptr_t apu_base);
+
+/**
+ * Voice Processor handle a slot last started (hardware backend): the slot
+ * number for mono (HRTF) voices, APU_VP_HANDLE_BASE + slot otherwise.
+ */
+uint32_t apu_voice_hw_handle(uint32_t index);
+
+/**
+ * True when the voice calls drive the hardware Voice Processor.
+ */
+bool apu_voice_hw_backend(void);
+
 #ifdef __cplusplus
 }
 #endif

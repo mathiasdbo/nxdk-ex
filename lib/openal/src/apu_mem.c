@@ -320,6 +320,21 @@ void *apu_mem_alloc_phys(size_t size, size_t alignment, uint32_t *out_phys) {
 #endif
 }
 
+void *apu_mem_alloc_table(size_t size, uint32_t *out_phys) {
+#ifdef OPENAL_TARGET_XBOX
+    void *p = MmAllocateContiguousMemoryEx(size, 0, NVAPU_MAXRAM, 0x4000, PAGE_READWRITE | PAGE_NOCACHE);
+    if (p) {
+        memset(p, 0, size);
+    }
+    if (out_phys) {
+        *out_phys = p ? (uint32_t)MmGetPhysicalAddress(p) : 0;
+    }
+    return p;
+#else
+    return apu_mem_alloc_phys(size, 0x4000, out_phys);
+#endif
+}
+
 void apu_mem_free(void *ptr) {
     if (!ptr) {
         return;

@@ -345,6 +345,9 @@ static void source_update_hw(const ALsource *src, unsigned fields) {
             ctx->mixbin_gain[i] = calc.mixbin_gain[i];
         }
     }
+    apu_voice_set_direction((uint32_t)src->hw_voice_idx, calc.local_pos);
+    /* Hardware backend: apply the new pitch and volumes to the running voice */
+    apu_voice_commit(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx);
 }
 
 void al_source_update_all_spatial(void) {
@@ -430,6 +433,9 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
         ctx.mixbin_gain[1] = 0xFF;
     }
 
+    apu_voice_set_direction(hw_voice_idx, calc.local_pos);
+    apu_voice_bind_buffer(hw_voice_idx, src->buffer->data_phys, (uint32_t)src->buffer->size,
+                          src->buffer->channels, src->buffer->bits);
     apu_voice_setup(hw_voice_idx, &ctx);
     apu_voice_pause(al_source_get_apu_base(), hw_voice_idx, 0);
     apu_voice_trigger(al_source_get_apu_base(), hw_voice_idx);

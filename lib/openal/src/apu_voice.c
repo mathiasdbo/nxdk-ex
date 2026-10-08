@@ -1,4 +1,7 @@
 #include "apu_voice.h"
+#include "apu_vp.h"
+#include "apu_hrtf.h"
+#include <math.h>
 #include <string.h>
 
 /*
@@ -11,6 +14,74 @@ static NVAPU_VOICE_CONTEXT_3D *s_voice_contexts = NULL;
 static uint32_t s_voice_contexts_phys = 0;
 static bool s_subsystem_initialized = false;
 static uint32_t s_stop_calls = 0;
+
+/*
+ * Voice Processor backend. When the session runs on the real BAR0 (only
+ * possible with -DOPENAL_APU_REAL_MMIO), the calls below drive the MCPX VP
+ * through apu_vp.c; slot n is VP handle APU_VP_HANDLE_BASE + n. Otherwise
+ * (null backend, host mocks) they keep updating the software model.
+ */
+static bool s_vp_hw = false;
+
+typedef struct {
+    uint32_t phys;
+    uint32_t bytes;
+    int channels;
+    int bits;
+} voice_buffer_t;
+
+static voice_buffer_t s_voice_buffer[NV_PAPU_NUM_3D_VOICES];
+
+/* VP handle each slot last started (mono 3D sources: slot n -> HRTF handle n;
+ * everything else: APU_VP_HANDLE_BASE + n), and each slot's source direction */
+static uint32_t s_voice_handle[NV_PAPU_NUM_3D_VOICES];
+static float s_voice_local[NV_PAPU_NUM_3D_VOICES][3];
+
+static uint32_t vp_handle(uint32_t index) {
+    return s_voice_handle[index];
+}
+
+static void vp_params_from_context(const NVAPU_VOICE_CONTEXT_3D *ctx, bool hrtf, int16_t *pitch,
+                                   uint8_t bins[APU_VP_OUTPUTS], uint16_t vols[APU_VP_OUTPUTS]) {
+    float master = (float)ctx->master_vol_left / 65535.0f;
+    int i;
+    *pitch = apu_vp_pitch_from_ratio((float)ctx->pitch_step / 65536.0f);
+    for (i = 0; i < APU_VP_OUTPUTS; i++) {
+        bins[i] = (uint8_t)((i < 6) ? i : 0);
+    }
+    if (!apu_vp_hrtf_available()) {
+        /* Real console: the GP forwards only bins 0/1 (stereo), so fold the
+         * 5.1 pan into them. Output b plays channel b % 2 of a stereo voice,
+         * so even outputs go left and odd ones right:
+         * FL, FR, SL, SR, C x2 (-3 dB), LFE x2 (-6 dB). */
+        static const float k[APU_VP_OUTPUTS] = { 1.0f, 1.0f, 1.0f, 1.0f, 0.7071f, 0.7071f, 0.5f, 0.5f };
+        static const uint8_t src[APU_VP_OUTPUTS] = { 0, 1, 2, 3, 4, 4, 5, 5 };
+        for (i = 0; i < APU_VP_OUTPUTS; i++) {
+            bins[i] = (uint8_t)(i & 1);
+            vols[i] = apu_vp_atten_from_gain(master * k[i] * (float)ctx->mixbin_gain[src[i]] / 255.0f);
+        }
+        return;
+    }
+    if (hrtf) {
+        /* HRTF voice: outputs 0-3 go to the HRTF submixes (front pair 0/1,
+         * surround pair 2/3) and the HRTF filter makes left/right; the pan's
+         * equal-power front and rear shares set the two pairs. Output 5 keeps LFE. */
+        float fl = ctx->mixbin_gain[0] / 255.0f, fr = ctx->mixbin_gain[1] / 255.0f;
+        float sl = ctx->mixbin_gain[2] / 255.0f, sr = ctx->mixbin_gain[3] / 255.0f;
+        float c = ctx->mixbin_gain[4] / 255.0f, lfe = ctx->mixbin_gain[5] / 255.0f;
+        float front = sqrtf(fl * fl + fr * fr + c * c), rear = sqrtf(sl * sl + sr * sr);
+        vols[0] = vols[1] = apu_vp_atten_from_gain(master * front);
+        vols[2] = vols[3] = apu_vp_atten_from_gain(master * rear);
+        vols[4] = 0xFFFu;
+        vols[5] = apu_vp_atten_from_gain(master * lfe);
+        vols[6] = vols[7] = 0xFFFu;
+        return;
+    }
+    /* Output i feeds mixbin i (FL, FR, SL, SR, C, LFE in this library's order) */
+    for (i = 0; i < APU_VP_OUTPUTS; i++) {
+        vols[i] = (i < 6) ? apu_vp_atten_from_gain(master * (float)ctx->mixbin_gain[i] / 255.0f) : 0xFFFu;
+    }
+}
 
 /*
  * ----------------------------------------------------------------------------
@@ -35,6 +106,24 @@ int apu_voice_subsystem_init(uintptr_t apu_base, void *context_array_virt, uint3
     for (i = 0; i < NV_PAPU_NUM_3D_VOICES; ++i) {
         apu_voice_context_reset(&s_voice_contexts[i]);
     }
+    memset(s_voice_buffer, 0, sizeof(s_voice_buffer));
+    memset(s_voice_local, 0, sizeof(s_voice_local));
+    for (i = 0; i < NV_PAPU_NUM_3D_VOICES; ++i) {
+        s_voice_handle[i] = APU_VP_HANDLE_BASE + i;
+    }
+
+#ifdef OPENAL_APU_REAL_MMIO
+    if (s_apu_base == NV_PAPU_BASE) {
+        /* Real hardware: the corrected VP bring-up replaces the register writes below,
+         * which target a register map that does not exist (XEMU_VERIFICATION.md C8.1) */
+        if (apu_vp_init(s_apu_base) != 0) {
+            return -2;
+        }
+        s_vp_hw = true;
+        s_subsystem_initialized = true;
+        return 0;
+    }
+#endif
 
     /* Program hardware Voice Processor base physical address */
     apu_write32(s_apu_base, NV_PAPU_VP_BASE_ADDR, s_voice_contexts_phys);
@@ -61,6 +150,15 @@ int apu_voice_subsystem_init(uintptr_t apu_base, void *context_array_virt, uint3
 void apu_voice_subsystem_deinit(uintptr_t apu_base)
 {
     uintptr_t base = (apu_base != 0) ? apu_base : s_apu_base;
+
+    if (s_vp_hw) {
+        apu_vp_deinit(base);
+        s_vp_hw = false;
+        s_voice_contexts = NULL;
+        s_voice_contexts_phys = 0u;
+        s_subsystem_initialized = false;
+        return;
+    }
 
     /* Stop all running voices immediately */
     apu_write32(base, NV_PAPU_VP_ACTIVE_0, 0u);
@@ -128,6 +226,36 @@ int apu_voice_trigger(uintptr_t apu_base, uint32_t index)
         s_voice_contexts[index].active = 1u;
     }
 
+    if (s_vp_hw) {
+        const NVAPU_VOICE_CONTEXT_3D *ctx = &s_voice_contexts[index];
+        const voice_buffer_t *vb = &s_voice_buffer[index];
+        apu_vp_voice_params_t p;
+
+        memset(&p, 0, sizeof(p));
+        p.phys = vb->phys;
+        p.bytes = vb->bytes;
+        p.channels = vb->channels;
+        p.bits = vb->bits;
+        p.loop = ctx->loop_mode != 0u;
+        p.tail_bytes = APU_VP_SILENT_TAIL_BYTES;   /* al_buffer.c pads every buffer with silence */
+        /* Mono buffers are 3D sources: HRTF voice (handle = slot, below 64)
+         * with the table entry for the source direction, where the HRTF stage
+         * is usable. Stereo, or no HRTF: plain voice panned by volumes. */
+        if (vb->channels == 1 && apu_vp_hrtf_available()) {
+            s_voice_handle[index] = index;
+            p.hrtf_entry = apu_hrtf_entry_for_local(s_voice_local[index]);
+        } else {
+            s_voice_handle[index] = APU_VP_HANDLE_BASE + index;
+            p.hrtf_entry = -1;
+        }
+        vp_params_from_context(ctx, p.hrtf_entry >= 0, &p.pitch, p.bins, p.vols);
+        if (apu_vp_voice_start(base, vp_handle(index), &p) != 0) {
+            s_voice_contexts[index].active = 0u;
+            return -2;
+        }
+        return 0;
+    }
+
     /* Set active bitmask in hardware register */
     if (index < 32u) {
         uint32_t current = apu_read32(base, NV_PAPU_VP_ACTIVE_0);
@@ -157,6 +285,11 @@ int apu_voice_stop(uintptr_t apu_base, uint32_t index)
         s_voice_contexts[index].active = 0u;
     }
 
+    if (s_vp_hw) {
+        apu_vp_voice_off(base, vp_handle(index));
+        return 0;
+    }
+
     /* Clear active bitmask in hardware register */
     if (index < 32u) {
         uint32_t current = apu_read32(base, NV_PAPU_VP_ACTIVE_0);
@@ -178,6 +311,11 @@ int apu_voice_pause(uintptr_t apu_base, uint32_t index, int pause)
     }
 
     base = (apu_base != 0) ? apu_base : s_apu_base;
+
+    if (s_vp_hw) {
+        apu_vp_voice_pause(base, vp_handle(index), pause != 0);
+        return 0;
+    }
 
     if (index < 32u) {
         uint32_t current = apu_read32(base, NV_PAPU_VP_PAUSE_0);
@@ -202,11 +340,71 @@ int apu_voice_is_active(uintptr_t apu_base, uint32_t index)
 
     base = (apu_base != 0) ? apu_base : s_apu_base;
 
+    if (s_vp_hw) {
+        apu_vp_service(base);
+        return apu_vp_voice_active(vp_handle(index)) ? 1 : 0;
+    }
+
     if (index < 32u) {
         return (apu_read32(base, NV_PAPU_VP_ACTIVE_0) & (1u << index)) ? 1 : 0;
     } else {
         return (apu_read32(base, NV_PAPU_VP_ACTIVE_1) & (1u << (index - 32u))) ? 1 : 0;
     }
+}
+
+void apu_voice_bind_buffer(uint32_t index, uint32_t phys, uint32_t bytes, int channels, int bits)
+{
+    if (index >= NV_PAPU_NUM_3D_VOICES) {
+        return;
+    }
+    s_voice_buffer[index].phys = phys;
+    s_voice_buffer[index].bytes = bytes;
+    s_voice_buffer[index].channels = channels;
+    s_voice_buffer[index].bits = bits;
+}
+
+void apu_voice_set_direction(uint32_t index, const float local_pos[3])
+{
+    if (index >= NV_PAPU_NUM_3D_VOICES || local_pos == NULL) {
+        return;
+    }
+    memcpy(s_voice_local[index], local_pos, sizeof(s_voice_local[index]));
+}
+
+void apu_voice_commit(uintptr_t apu_base, uint32_t index)
+{
+    int16_t pitch;
+    uint8_t bins[APU_VP_OUTPUTS];
+    uint16_t vols[APU_VP_OUTPUTS];
+
+    if (!s_vp_hw || index >= NV_PAPU_NUM_3D_VOICES || s_voice_contexts == NULL ||
+        !s_voice_contexts[index].active) {
+        return;
+    }
+    {
+        uint32_t h = vp_handle(index);
+        int entry = (h < APU_VP_HANDLE_BASE) ? apu_hrtf_entry_for_local(s_voice_local[index]) : -1;
+        /* the bins were set at start and do not change with the pan */
+        vp_params_from_context(&s_voice_contexts[index], entry >= 0, &pitch, bins, vols);
+        apu_vp_voice_update((apu_base != 0) ? apu_base : s_apu_base, h, pitch, vols, entry);
+    }
+}
+
+void apu_voice_service(uintptr_t apu_base)
+{
+    if (s_vp_hw) {
+        apu_vp_service((apu_base != 0) ? apu_base : s_apu_base);
+    }
+}
+
+uint32_t apu_voice_hw_handle(uint32_t index)
+{
+    return (index < NV_PAPU_NUM_3D_VOICES) ? vp_handle(index) : 0xFFFFu;
+}
+
+bool apu_voice_hw_backend(void)
+{
+    return s_vp_hw;
 }
 
 uint32_t apu_voice_debug_stop_count(void)
