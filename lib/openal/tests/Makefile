@@ -50,6 +50,8 @@ EXTRA_test_scene_engine := $(SHOWCASE_DIR)/showcase_input.c $(SHOWCASE_DIR)/show
 EXTRA_test_interactive_modes := $(SHOWCASE_DIR)/wav_loader.c $(SHOWCASE_DIR)/showcase_input.c \
                                 $(SHOWCASE_DIR)/showcase_ui.c $(SHOWCASE_DIR)/showcase_modes.c
 EXTRA_test_showcase_qa := $(EXTRA_test_interactive_modes)
+EXTRA_test_showcase_scene := $(EXTRA_test_interactive_modes) $(SHOWCASE_DIR)/showcase_scene.c
+EXTRA_test_showcase_audio := $(SHOWCASE_DIR)/showcase_audio.c
 
 .PHONY: all test clean $(TESTS)
 .DELETE_ON_ERROR:
@@ -82,6 +84,8 @@ $(BUILD_DIR)/test_wav_loader: $(EXTRA_test_wav_loader)
 $(BUILD_DIR)/test_scene_engine: $(EXTRA_test_scene_engine)
 $(BUILD_DIR)/test_interactive_modes: $(EXTRA_test_interactive_modes)
 $(BUILD_DIR)/test_showcase_qa: $(EXTRA_test_showcase_qa)
+$(BUILD_DIR)/test_showcase_scene: $(EXTRA_test_showcase_scene)
+$(BUILD_DIR)/test_showcase_audio: $(EXTRA_test_showcase_audio)
 
 $(BUILD_DIR)/%: $(TESTS_DIR)/%.c $(LIBOPENAL) $(HEADERS)
 	@mkdir -p $(dir $@)

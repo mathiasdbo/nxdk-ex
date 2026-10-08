@@ -11,6 +11,7 @@
 #endif
 
 static bool s_pbkit_active = false;
+static bool s_text_overlay = true;   /* pbkit text dashboard (off when the 3D scene draws the HUD) */
 static uint32_t s_frame_count = 0;
 
 int showcase_ui_init(void) {
@@ -28,6 +29,10 @@ int showcase_ui_init(void) {
 #endif
 
     return 0;
+}
+
+void showcase_ui_set_text_overlay(bool enabled) {
+    s_text_overlay = enabled;
 }
 
 void showcase_ui_begin_frame(void) {
@@ -65,14 +70,16 @@ void showcase_ui_draw_header(const char *mode_title, int mode_idx, int total_mod
              active_hw_voices, standby_voices);
 
 #if defined(HAS_PBKIT)
-    if (s_pbkit_active) {
+    if (s_pbkit_active && s_text_overlay) {
         pb_print("%s", header_buf);
     }
 #endif
 
     if ((s_frame_count % 30) == 0) {
 #if defined(HAS_PBKIT)
-        debugPrint("%s", header_buf);
+        if (!s_pbkit_active) { /* debugPrint would draw over the pbkit frame */
+            debugPrint("%s", header_buf);
+        }
 #else
         printf("%s", header_buf);
 #endif
@@ -85,14 +92,16 @@ void showcase_ui_draw_telemetry(const char *telemetry_text) {
     }
 
 #if defined(HAS_PBKIT)
-    if (s_pbkit_active) {
+    if (s_pbkit_active && s_text_overlay) {
         pb_print("%s\n", telemetry_text);
     }
 #endif
 
     if ((s_frame_count % 30) == 0) {
 #if defined(HAS_PBKIT)
-        debugPrint("%s\n", telemetry_text);
+        if (!s_pbkit_active) { /* debugPrint would draw over the pbkit frame */
+            debugPrint("%s\n", telemetry_text);
+        }
 #else
         printf("%s\n", telemetry_text);
 #endif
@@ -103,20 +112,22 @@ void showcase_ui_draw_footer(const char *footer_help) {
     char footer_buf[512];
     snprintf(footer_buf, sizeof(footer_buf),
              "----------------------------------------------------------------------\n"
-             " Controls: [White/Black or DPad L/R] Change Mode | [Start] Auto-Tour\n"
+             " Controls: [White/Black or DPad L/R] Change Mode | [Back+Start] Exit\n"
              " %s\n"
              "======================================================================\n",
              footer_help ? footer_help : "");
 
 #if defined(HAS_PBKIT)
-    if (s_pbkit_active) {
+    if (s_pbkit_active && s_text_overlay) {
         pb_print("%s", footer_buf);
     }
 #endif
 
     if ((s_frame_count % 30) == 0) {
 #if defined(HAS_PBKIT)
-        debugPrint("%s", footer_buf);
+        if (!s_pbkit_active) { /* debugPrint would draw over the pbkit frame */
+            debugPrint("%s", footer_buf);
+        }
 #else
         printf("%s", footer_buf);
 #endif
