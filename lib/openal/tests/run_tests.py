@@ -122,18 +122,23 @@ def run_all_tests(clang, openal_dir, lib_path, build_dir):
         ]
         if "test_wav_loader.c" in tname:
             compile_cmd.append(os.path.join(showcase_dir, "wav_loader.c"))
+        elif "test_showcase_audio.c" in tname:
+            compile_cmd.append(os.path.join(showcase_dir, "showcase_audio.c"))
         elif "test_scene_engine.c" in tname:
             compile_cmd.extend([
                 os.path.join(showcase_dir, "showcase_input.c"),
                 os.path.join(showcase_dir, "showcase_ui.c")
             ])
-        elif "test_interactive_modes.c" in tname or "test_showcase_qa.c" in tname:
+        elif ("test_interactive_modes.c" in tname or "test_showcase_qa.c" in tname
+              or "test_showcase_scene.c" in tname):
             compile_cmd.extend([
                 os.path.join(showcase_dir, "wav_loader.c"),
                 os.path.join(showcase_dir, "showcase_input.c"),
                 os.path.join(showcase_dir, "showcase_ui.c"),
                 os.path.join(showcase_dir, "showcase_modes.c")
             ])
+            if "test_showcase_scene.c" in tname:
+                compile_cmd.append(os.path.join(showcase_dir, "showcase_scene.c"))
         compile_cmd.extend([lib_path] + math_link_flags() + ["-o", temp_exe])
         compile_res = subprocess.run(compile_cmd, capture_output=True, text=True)
         if compile_res.returncode != 0:

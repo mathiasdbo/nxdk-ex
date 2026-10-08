@@ -1,0 +1,30 @@
+Recorded sound effects and music used by the OpenAL showcase
+=============================================================
+
+Converted by make_sfx_assets.py (Python 3 + ffmpeg) to 16-bit PCM WAV at 48 kHz (mono for 3D
+sources, stereo for the 2D music), peak-normalised to -1 dBFS, and embedded in
+../../sound_assets_sfx.h. Downloaded from freesound.org; every sound is CC0
+(public domain, no attribution required), checked on each sound's page.
+
+File                      Source (Freesound id, author)                        License  Edits
+------------------------  ---------------------------------------------------  -------  -----------------------------------------------
+helicopter_loop_48k.wav   854493 "UH-60 Black Hawk Helicopter Hover Loop 1",      CC0      none (already a 48 kHz mono loop)
+                          qubodup
+siren_loop_48k.wav        537684 "Siren", doomyd                                  CC0      24-bit 44.1 kHz -> 16-bit 48 kHz; 250 ms loop crossfade
+explosion_48k.wav         840508 "Illegal Explosion", qubodup                     CC0      300 ms fade-out
+rifle_shot_48k.wav        404562 "assaultrifle1", superphat                       CC0      44.1 -> 48 kHz; tail below -60 dBFS trimmed
+glass_break_48k.wav       686609 "glass broken", gamer500                         CC0      44.1 -> 48 kHz; quiet tail trimmed
+music_loop_48k.wav        607307 "Space Dance 2 - EDM House Techno ...",          CC0      24-bit -> 16-bit 48 kHz stereo; 4 bars at 120 BPM
+                          szegvari                                                         from the bar at 8.005 s, 20 ms seam crossfade (8 s loop)
+
+Credits (not required by CC0):
+  https://freesound.org/people/qubodup/sounds/854493/
+  https://freesound.org/people/doomyd/sounds/537684/
+  https://freesound.org/people/qubodup/sounds/840508/
+  https://freesound.org/people/superphat/sounds/404562/
+  https://freesound.org/people/gamer500/sounds/686609/
+  https://freesound.org/people/szegvari/sounds/607307/
+
+Regenerate (the original downloads are not stored in the repository):
+
+  python make_sfx_assets.py <dir with the Freesound downloads>
