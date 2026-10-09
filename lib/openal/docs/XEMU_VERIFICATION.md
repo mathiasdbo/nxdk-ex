@@ -1378,6 +1378,23 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
     (102 268 GP frames, about 68 s) with no freeze. It played the loop, distance and pitch sweeps, orbit,
     three-voice chord and one-shot pings, with 0 AC97 underruns and 4 padded buffers (start-up). HRTF is still
     unavailable there (it needs front-end methods).
+* **`samples/openal_showcase` on the APU (branch `feat/showcase-apu-backend`, open issues on hardware):**
+  * **Freeze under load:** the polyphony stress test froze frame processing somewhere between 40 and 64 voices.
+    Fixes not yet run on hardware: each restart gets a fresh handle that has been off its list for more than one
+    frame (`apu_vp_alloc_handle()`), no record writes while a voice may be in flight, and a CPU-side stereo fold
+    into 2 outputs instead of 8. The freeze was still reported at 64 voices.
+  * **Helicopter (a 250 KB buffer):** it sounded like noise, and with the 2-output fold the right channel was
+    silent. Suspects: a hardware limit on the VP SGE index range (the probes only ever used entries 0-24; the
+    showcase's buffers sit much higher) and the output routing.
+  * **Probe round 18: the VP SGE table works only up to entry 2047.** The tone mapped at entries 0 to 1047 came
+    out clean (peak 8000, about 87 zero crossings per 100 ms, 0 sample-to-sample glitches). Mapped from entry
+    2047 upward, the VP stopped all frame processing for good, and the GP counted no more frames until the
+    console restarted. The dashboard leaves `0x2018 = 0x7FF` (next to `0x2010 = 0x800` and `0x2014 = 0x400`).
+    `APU_VP_SGE_ENTRIES` is now 2048, an 8 MiB linear space. The showcase's buffers total only about 4 MB
+    (about 990 pages), so this limit does not explain its freeze. The APU output itself has no noise, so the
+    helicopter's noise is added after the GP, in the AC97 feed or by the routing.
+  * **Round 19 (built, uploaded, not yet run):** reruns the routing, handle-range, long-buffer and voice-count
+    tests inside the safe SGE range. Its last test tries `0x2018 = 0xFFF` with entry 2048.
 * Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
   from a spherical-head model (Brown-Duda head-shadow shelf per ear as a 31-tap int8 FIR, Woodworth ITD in
   s6.9; 32 azimuths x elevations -30/0/30/60; no measured data, no pinna cues). `apu_vp_init()` uploads it with

@@ -50,16 +50,21 @@ static void vp_params_from_context(const NVAPU_VOICE_CONTEXT_3D *ctx, bool hrtf,
         bins[i] = (uint8_t)((i < 6) ? i : 0);
     }
     if (!apu_vp_hrtf_available()) {
-        /* Real console: the GP forwards only bins 0/1 (stereo), so fold the
-         * 5.1 pan into them. Output b plays channel b % 2 of a stereo voice,
-         * so even outputs go left and odd ones right:
-         * FL, FR, SL, SR, C x2 (-3 dB), LFE x2 (-6 dB). */
-        static const float k[APU_VP_OUTPUTS] = { 1.0f, 1.0f, 1.0f, 1.0f, 0.7071f, 0.7071f, 0.5f, 0.5f };
-        static const uint8_t src[APU_VP_OUTPUTS] = { 0, 1, 2, 3, 4, 4, 5, 5 };
+        /* Real console: the GP forwards only bins 0/1 (stereo), so the 5.1 pan
+         * is folded on the CPU into two outputs (power sum of FL+SL+C/-3 dB+
+         * LFE/-6 dB per side); output 0 plays the left channel of a stereo
+         * voice and output 1 the right. The other six are muted, which keeps
+         * the VP's per-voice mixing work down. */
+        float fl = ctx->mixbin_gain[0] / 255.0f, fr = ctx->mixbin_gain[1] / 255.0f;
+        float sl = ctx->mixbin_gain[2] / 255.0f, sr = ctx->mixbin_gain[3] / 255.0f;
+        float c = ctx->mixbin_gain[4] / 255.0f, lfe = ctx->mixbin_gain[5] / 255.0f;
+        float shared = 0.5f * c * c + 0.25f * lfe * lfe;
         for (i = 0; i < APU_VP_OUTPUTS; i++) {
             bins[i] = (uint8_t)(i & 1);
-            vols[i] = apu_vp_atten_from_gain(master * k[i] * (float)ctx->mixbin_gain[src[i]] / 255.0f);
+            vols[i] = 0xFFFu;
         }
+        vols[0] = apu_vp_atten_from_gain(master * sqrtf(fl * fl + sl * sl + shared));
+        vols[1] = apu_vp_atten_from_gain(master * sqrtf(fr * fr + sr * sr + shared));
         return;
     }
     if (hrtf) {
@@ -245,7 +250,15 @@ int apu_voice_trigger(uintptr_t apu_base, uint32_t index)
             s_voice_handle[index] = index;
             p.hrtf_entry = apu_hrtf_entry_for_local(s_voice_local[index]);
         } else {
-            s_voice_handle[index] = APU_VP_HANDLE_BASE + index;
+            /* A fresh handle each start: the slot's previous voice may still be
+             * in the VP's current frame, and its record must not be rewritten */
+            uint32_t h = apu_vp_alloc_handle(base);
+            apu_vp_voice_off(base, vp_handle(index));
+            if (h == 0xFFFFu) {
+                s_voice_contexts[index].active = 0u;
+                return -2;
+            }
+            s_voice_handle[index] = h;
             p.hrtf_entry = -1;
         }
         vp_params_from_context(ctx, p.hrtf_entry >= 0, &p.pitch, p.bins, p.vols);
@@ -341,7 +354,9 @@ int apu_voice_is_active(uintptr_t apu_base, uint32_t index)
     base = (apu_base != 0) ? apu_base : s_apu_base;
 
     if (s_vp_hw) {
-        apu_vp_service(base);
+        /* apu_vp_voice_active() already treats a one-shot past its data as
+         * ended; the service runs once per frame from apu_voice_service() */
+        (void)base;
         return apu_vp_voice_active(vp_handle(index)) ? 1 : 0;
     }
 

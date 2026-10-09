@@ -24,6 +24,16 @@ const uint32_t apu_gp_program[APU_GP_PROGRAM_WORDS] = {
 #define DESC_TO_MEMORY    0x000002u
 #define DESC_BUF_FIFO0    (0u << 5)
 #define DESC_FMT_16BIT    (1u << 10)  /* 24-bit sample >> 8 */
+/* Distance in DSP words between the channels of an interleaved transfer
+ * (control bits 23:14). xemu ignores it and steps by the block count; a real
+ * console needs it: with 0 every channel reads bin 0 (apu_probe rounds 20/21) */
+#define DESC_DSP_STEP(n)  ((uint32_t)(n) << 14)
+
+static uint32_t s_dsp_step = APU_GP_FRAME;   /* apu_gp_debug_set_dsp_step() */
+
+void apu_gp_debug_set_dsp_step(uint32_t words) {
+    s_dsp_step = words;
+}
 #define MIXBIN_X_BASE     0x1400u     /* bin n at X:$1400 + 32 n */
 
 #define SCRATCH_BYTES     (0x800u * 4u)   /* bootstrap image: P:0..$7FF */
@@ -90,7 +100,7 @@ static void free_all(void) {
 int apu_gp_init(uintptr_t bar0) {
     static const uint32_t desc[7] = {
         DESC_EOL,
-        DESC_INTERLEAVE | DESC_TO_MEMORY | DESC_BUF_FIFO0 | DESC_FMT_16BIT,
+        DESC_INTERLEAVE | DESC_TO_MEMORY | DESC_BUF_FIFO0 | DESC_FMT_16BIT | DESC_DSP_STEP(APU_GP_FRAME),
         (APU_GP_FRAME << 4) | (2u - 1u),     /* 32 frames, 2 channels */
         MIXBIN_X_BASE,                       /* bins 0 and 1 */
         0u, 0u, 0u,                          /* scratch offset/base/size: unused for FIFOs */
@@ -154,7 +164,8 @@ int apu_gp_init(uintptr_t bar0) {
      * release; the program waits for the first START_FRAME, and frame
      * generation only starts after this returns. */
     for (i = 0; i < 7u; i++) {
-        reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * i, desc[i]);
+        reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * i,
+               (i == 1u) ? ((desc[1] & ~DESC_DSP_STEP(0x3FFu)) | DESC_DSP_STEP(s_dsp_step)) : desc[i]);
     }
     reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * FRAME_COUNTER_X, 0);
     s_ready = true;

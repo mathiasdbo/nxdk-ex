@@ -76,11 +76,18 @@ typedef struct {
  */
 void showcase_scene_set_perf(const showcase_perf_t *perf);
 
+/* Where the sources are heard (bool true still means the CPU mixer) */
+typedef enum {
+    SHOWCASE_AUDIO_SILENT = 0,  /* model only */
+    SHOWCASE_AUDIO_CPU = 1,     /* showcase_audio.c mixes to the AC97 */
+    SHOWCASE_AUDIO_APU = 2      /* the MCPX APU plays them (VP + GP, forwarded to the AC97) */
+} showcase_audio_out_t;
+
 /**
- * Tell the HUD whether the software audio mixer is playing the sources
- * (otherwise it notes that the default backend is silent).
+ * Tell the HUD how the sources are heard (SHOWCASE_AUDIO_*; false/true are
+ * silent/CPU mixer).
  */
-void showcase_scene_set_audio_output(bool playing);
+void showcase_scene_set_audio_output(int out);
 
 /**
  * Release the vertex buffer.

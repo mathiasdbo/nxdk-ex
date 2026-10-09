@@ -22,7 +22,10 @@
 #include <hal/debug.h>
 #include <hal/video.h>
 #include <math.h>
+#include <nxdk/mount.h>
+#include <stdarg.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 #include <windows.h>
@@ -41,6 +44,54 @@
 static int16_t s_tone[RATE];          /* 1 s, loops seamlessly at 440 Hz */
 static int16_t s_ping[RATE / 4];      /* 250 ms decaying one-shot */
 
+#define STRESS_SOURCES 96             /* more than the 64 voice slots: forces stealing */
+
+/*
+ * Log: one status line per second, written to E:\openal_vp.txt every 5 s and
+ * as soon as the GP frame counter stops (so a freeze leaves a record).
+ */
+#define LOG_BYTES (96u * 1024u)
+static char s_log[LOG_BYTES];
+static size_t s_log_len;
+
+static void log_line(const char *fmt, ...) {
+    va_list ap;
+    int n;
+    if (s_log_len >= LOG_BYTES - 256u) {
+        return;   /* full: keep the start, which has the first freeze */
+    }
+    va_start(ap, fmt);
+    n = vsnprintf(s_log + s_log_len, LOG_BYTES - s_log_len, fmt, ap);
+    va_end(ap);
+    if (n > 0) s_log_len += (size_t)n;
+}
+
+static void log_save(void) {
+    FILE *f;
+    if (!nxIsDriveMounted('E')) {
+        nxMountDrive('E', "\\Device\\Harddisk0\\Partition1\\");
+    }
+    f = fopen("E:\\openal_vp.txt", "wb");
+    if (f) {
+        fwrite(s_log, 1, s_log_len, f);
+        fclose(f);
+    }
+}
+
+static uint32_t lcg(uint32_t *s) {
+    *s = *s * 1664525u + 1013904223u;
+    return *s >> 8;
+}
+
+/* Library slots whose VP voice is playing */
+static uint32_t active_hw_voices(void) {
+    uint32_t i, n = 0;
+    for (i = 0; i < 64u; i++) {
+        if (apu_vp_voice_active(apu_voice_hw_handle(i))) n++;
+    }
+    return n;
+}
+
 typedef struct {
     const char *name;
     DWORD ms;
@@ -53,6 +104,7 @@ static const phase_t s_phases[] = {
     { "Orbit around the listener",              5000 },
     { "Chord: three voices at once",            4000 },
     { "One-shot ping x3 (must end AL_STOPPED)", 4000 },
+    { "Stress: 96 one-shot sources (voice stealing)", 10000 },
 };
 #define NUM_PHASES ((int)(sizeof(s_phases) / sizeof(s_phases[0])))
 
@@ -93,10 +145,13 @@ int main(void) {
     ALCdevice *dev;
     ALCcontext *ctx;
     ALuint buf_tone, buf_ping, src[3];
+    static ALuint stress[STRESS_SOURCES];
     ALint backend = -1;
     int i, phase = 0, pings = 0, pings_stopped = 0;
-    DWORD phase_start, last_show = 0;
+    DWORD phase_start, last_show = 0, last_frames_check = 0;
     ALint last_ping_state = AL_INITIAL;
+    uint32_t stress_next = 0, stress_starts = 0, rng = 12345u, gp_last = 0, frozen_at = 0;
+    DWORD start_tick, last_log = 0, last_save = 0;
 
     XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
 
@@ -128,11 +183,23 @@ int main(void) {
         alSourcef(src[i], AL_REFERENCE_DISTANCE, 1.0f);
         alSourcef(src[i], AL_MAX_DISTANCE, 30.0f);
     }
+    alGenSources(STRESS_SOURCES, stress);
+    for (i = 0; i < STRESS_SOURCES; i++) {
+        float a = 2.0f * PI_F * (float)i / STRESS_SOURCES;
+        alSourcei(stress[i], AL_BUFFER, (ALint)buf_ping);
+        alSourcei(stress[i], AL_LOOPING, AL_FALSE);
+        alSourcef(stress[i], AL_GAIN, 0.25f);
+        alSource3f(stress[i], AL_POSITION, 4.0f * sinf(a), 0.0f, -4.0f * cosf(a));
+    }
     alListener3f(AL_POSITION, 0.0f, 0.0f, 0.0f);
 
     alSource3f(src[0], AL_POSITION, 0.0f, 0.0f, -2.0f);
     alSourcePlay(src[0]);
     phase_start = GetTickCount();
+    start_tick = phase_start;
+    log_line("openal_vp log: HRTF %s, GP program %s, GPSADDR %08lx\n", apu_vp_hrtf_available() ? "on" : "off",
+             apu_gp_program_loaded() ? "loaded" : "NOT LOADED",
+             (unsigned long)((volatile uint32_t *)NV_PAPU_BASE)[0x2040 / 4]);
 
     for (;;) {
         DWORD now = GetTickCount();
@@ -145,6 +212,9 @@ int main(void) {
             phase_start = now;
             alSourceStop(src[1]);
             alSourceStop(src[2]);
+            for (i = 0; i < STRESS_SOURCES; i++) {
+                alSourceStop(stress[i]);
+            }
             alSourcef(src[0], AL_PITCH, 1.0f);
             alSource3f(src[0], AL_POSITION, 0.0f, 0.0f, -2.0f);
             alSourcei(src[0], AL_LOOPING, AL_TRUE);
@@ -163,6 +233,9 @@ int main(void) {
                 alSourcei(src[0], AL_BUFFER, (ALint)buf_ping);
                 pings = pings_stopped = 0;
                 last_ping_state = AL_INITIAL;
+            } else if (phase == 6) {
+                alSourceStop(src[0]);
+                stress_starts = 0;
             } else {
                 alSourcePlay(src[0]);
             }
@@ -195,12 +268,85 @@ int main(void) {
                 }
                 break;
             }
+            case 6: {   /* start up to 3 idle stress sources per frame, random pitch 0.5x .. 2x */
+                int started = 0, tries;
+                for (tries = 0; tries < STRESS_SOURCES && started < 3; tries++) {
+                    ALint st = AL_INITIAL;
+                    ALuint s = stress[stress_next];
+                    stress_next = (stress_next + 1u) % STRESS_SOURCES;
+                    alGetSourcei(s, AL_SOURCE_STATE, &st);
+                    if (st != AL_PLAYING) {
+                        alSourcef(s, AL_PITCH, 0.5f + 1.5f * (float)(lcg(&rng) & 0xFFFFu) / 65535.0f);
+                        alSourcePlay(s);
+                        stress_starts++;
+                        started++;
+                    }
+                }
+                break;
+            }
             default:
                 break;
         }
 
         /* Frame tick: reaps finished voices and services the VP idle trap */
         alXboxUpdateVoices();
+
+        /* Freeze detector: the GP frame counter must move (1500 per second) */
+        if (now - last_frames_check >= 500) {
+            uint32_t g = apu_gp_frames(NV_PAPU_BASE);
+            bool just_froze = false;
+            if (last_frames_check && g == gp_last && !frozen_at) {
+                frozen_at = now ? now : 1;
+                just_froze = true;
+            }
+            gp_last = g;
+            last_frames_check = now;
+            /* status line every second (and at the freeze) */
+            if (just_froze || (now / 1000u) != (last_log / 1000u)) {
+                apu_ac97_stats_t as;
+                apu_vp_fe_stats_t fs;
+                volatile uint32_t *r = (volatile uint32_t *)NV_PAPU_BASE;
+                apu_ac97_get_stats(&as);
+                apu_vp_get_fe_stats(&fs);
+                log_line("t %6lu ms phase %d: GP %7lu XGSCNT %08lx TVL2D %04lx voices %2lu starts %5lu "
+                         "AC97 %6lu pad %4lu und %3lu FE %lu (%08lx=%08lx) FECTL %08lx ISTS %08lx%s\n",
+                         (unsigned long)(now - start_tick), phase + 1, (unsigned long)g, (unsigned long)r[0x200C / 4],
+                         (unsigned long)(r[0x2054 / 4] & 0xFFFFu), (unsigned long)active_hw_voices(),
+                         (unsigned long)stress_starts, (unsigned long)as.chunks, (unsigned long)as.padded,
+                         (unsigned long)as.underruns, (unsigned long)fs.events, (unsigned long)fs.last_meth,
+                         (unsigned long)fs.last_param, (unsigned long)r[0x1100 / 4], (unsigned long)r[0x1000 / 4],
+                         just_froze ? "   <== GP FRAMES STOPPED" : "");
+                last_log = now;
+            }
+            if (just_froze) {
+                /* The 2D list as the hardware sees it, each voice's record, then the driver's last operations */
+                static apu_vp_trace_t tr[256];
+                uint32_t n, j, h = ((volatile uint32_t *)NV_PAPU_BASE)[0x2054 / 4] & 0xFFFFu, guard = 0;
+                log_line("  2D list from TVL2D:\n");
+                while (h != 0xFFFFu && h < 256u && guard++ < 256u) {
+                    const volatile uint32_t *rec = (const volatile uint32_t *)apu_vp_debug_voice_record(h);
+                    if (!rec) break;
+                    log_line("    h %3lu FMT %08lx BA %06lx LBO %06lx CBO %06lx EBO %06lx STATE %08lx VOLA %08lx "
+                             "PITCH_LINK %08lx CUR %08lx %08lx\n",
+                             (unsigned long)h, (unsigned long)rec[0x04 / 4], (unsigned long)rec[0x20 / 4],
+                             (unsigned long)rec[0x24 / 4], (unsigned long)(rec[0x58 / 4] & 0xFFFFFFu),
+                             (unsigned long)(rec[0x5C / 4] & 0xFFFFFFu), (unsigned long)rec[0x54 / 4],
+                             (unsigned long)rec[0x60 / 4], (unsigned long)rec[0x7C / 4], (unsigned long)rec[0x38 / 4],
+                             (unsigned long)rec[0x3C / 4]);
+                    h = rec[0x7C / 4] & 0xFFFFu;
+                }
+                n = apu_vp_debug_trace(tr, 256u);
+                log_line("  last %lu driver operations (op handle a XGSCNT):\n", (unsigned long)n);
+                for (j = 0; j < n; j++) {
+                    log_line("    %c %3u %08lx %08lx\n", tr[j].op, (unsigned)tr[j].h, (unsigned long)tr[j].a,
+                             (unsigned long)tr[j].t);
+                }
+            }
+            if (just_froze || now - last_save >= 5000u) {
+                log_save();
+                last_save = now;
+            }
+        }
 
         if (now - last_show >= 150) {
             last_show = now;
@@ -238,6 +384,20 @@ int main(void) {
             show_source("src 3", src[2]);
             if (phase == 5) {
                 debugPrint("\npings started %d, ended on their own %d\n", pings, pings_stopped);
+            }
+            if (phase == 6) {
+                ALint playing = 0, st, j;
+                for (j = 0; j < STRESS_SOURCES; j++) {
+                    alGetSourcei(stress[j], AL_SOURCE_STATE, &st);
+                    if (st == AL_PLAYING) playing++;
+                }
+                debugPrint("\nstress: %lu starts, %ld of %d sources playing, %lu VP voices active\n",
+                           (unsigned long)stress_starts, (long)playing, STRESS_SOURCES,
+                           (unsigned long)active_hw_voices());
+            }
+            if (frozen_at) {
+                debugPrint("\n*** GP FRAMES STOPPED (phase %d, %lu starts) ***\n", phase + 1,
+                           (unsigned long)stress_starts);
             }
             debugPrint("\nReal console: VP -> GP FIFO -> AC97, panning in stereo.\n"
                        "xemu (real-time DSP off): VP tap, panning not heard.\n");

@@ -74,7 +74,7 @@ typedef struct {
 static scene_camera_t s_cam;
 static float s_cam_back = 9.0f;
 static float s_cam_height = 5.5f;
-static bool s_audio_output = false;   /* the software mixer is playing the sources */
+static int s_audio_output = SHOWCASE_AUDIO_SILENT;   /* how the sources are heard (showcase_audio_out_t) */
 static showcase_perf_t s_perf;
 static bool s_perf_valid = false;
 
@@ -1157,10 +1157,13 @@ static void hud_status(const showcase_app_t *app, const scene_focus_t *f) {
     text_px(32.0f, 340.0f, 1, COL_TEXT, line);
     {
         /* Where the sound comes from, then frame timing and audio health */
-        float x = 32.0f + text_px(32.0f, 352.0f, 1, COL_DIM, s_audio_output
-                                  ? "CPU (MMX) mix to AC97 |" : "Model only, silent |");
+        static const char *const out_label[] = { "Model only, silent |", "CPU (MMX) mix to AC97 |",
+                                                 "APU (VP+GP) |" };
+        float x = 32.0f + text_px(32.0f, 352.0f, 1, COL_DIM,
+                                  out_label[(s_audio_output >= 0 && s_audio_output <= 2) ? s_audio_output : 0]);
         if (s_perf_valid) {
             char perf[80];
+            /* "mix" is the CPU mixer's time, or with the APU the library tick that feeds the AC97 */
             snprintf(perf, sizeof(perf), " %s fps  scene %s ms  mix %s ms  %u src  %u xrun",
                      showcase_fx(s_perf.fps, 0, false, 0), showcase_fx(s_perf.scene_ms, 1, false, 0),
                      showcase_fx(s_perf.audio_ms, 1, false, 0), (unsigned)s_perf.voices,
@@ -1516,8 +1519,8 @@ void showcase_scene_set_perf(const showcase_perf_t *perf) {
     }
 }
 
-void showcase_scene_set_audio_output(bool playing) {
-    s_audio_output = playing;
+void showcase_scene_set_audio_output(int out) {
+    s_audio_output = out;
 }
 
 void showcase_scene_shutdown(void) {

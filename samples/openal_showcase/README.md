@@ -3,7 +3,9 @@
 
 This interactive application exercises the nxdk OpenAL library (an OpenAL 1.1 subset over a software model of an **Nvidia MCPX Audio Processing Unit (APU)** voice layer, see `lib/openal/README.md`) under the bare-metal **nxdk** SDK for the original Xbox.
 
-**Status:** the library's hardware register layer is not yet conformant to xemu or the real MCPX APU (see `lib/openal/docs/XEMU_VERIFICATION.md`). By default the library runs on its software model and does not drive the APU, so this demo does not exercise real APU voice processing, and none of the hardware behaviour described below is verified against xemu or silicon.
+**Status:** the default build plays the sources on the real MCPX APU Voice Processor (section 4). This path is verified with `samples/openal_vp` on a retail console and on xemu (see `lib/openal/docs/XEMU_VERIFICATION.md`). The per-mode descriptions below come from the library's spatial model:
+- **Applied on a console:** the 5.1 pan, distance, cone and Doppler-scaled pitch (the 5.1 pan folded to stereo).
+- **Not applied on a console:** the ITD and elevation biquad. HRTF is xemu-only for now.
 
 All audio is **16-bit 48 kHz PCM**, pre-converted and embedded into the executable so the demo runs standalone with no filesystem dependencies. The sound effects and music are CC0 recordings from Freesound (helicopter, siren, explosion, rifle shot, breaking glass, music; sources, licenses and edits in `assets/sfx/sounds.txt`, converted by `assets/sfx/make_sfx_assets.py` (Python 3 + ffmpeg) into `sound_assets_sfx.h`); the laser chirp and the center-channel voice are synthesized (CC0, `generate_assets.py`).
 
@@ -89,9 +91,17 @@ The scene is built on the CPU into one vertex buffer of screen-space positions a
 
 ---
 
-## 4. Sound: Software Mix to AC97
+## 4. Sound: the MCPX APU, or a Software Mix to AC97
 
-The library's default backend computes the spatial model but drives no audio hardware, and its real-APU register layer is not usable yet (see the status note). So the showcase renders the sources itself, on the CPU, and plays them through nxdk's `XAudio` AC97 output (`showcase_audio.c`). It uses the library's own values, so what you hear is what the screen shows:
+The status panel says which output is in use.
+
+**APU (default build, `SHOWCASE_BACKEND=apu`).** The OpenAL library is compiled into the sample with `-DOPENAL_APU_REAL_MMIO` (one wrapper per library source in `apu/`, as in `samples/openal_vp`). `alcOpenDevice()` then brings up the MCPX APU, and every source that holds a voice slot plays on a hardware Voice Processor voice. The library writes the voice records itself; see `lib/openal/src/apu_vp.h`.
+
+- **On a console:** the GP DSP copies the mix to a FIFO, and `alXboxUpdateVoices()` forwards it to the AC97. HRTF needs front-end methods, which do not run on hardware, so 3D sources are panned by volume and the 5.1 pan is folded to stereo.
+- **On xemu:** sources use the HRTF stage. With "Real-time DSP processing" off, xemu plays the VP output itself.
+- **Status panel:** the "mix" time is the library's frame tick, and "src" counts active VP voices.
+
+**CPU mixer (`make SHOWCASE_BACKEND=cpu`, or if the APU does not come up).** The library runs its null backend, which computes the spatial model but drives no audio hardware. The showcase renders the sources itself on the CPU and plays them through nxdk's `XAudio` AC97 output (`showcase_audio.c`). It uses the library's own values, so what you hear is what the screen shows:
 
 - **Which sources:** every playing source that holds one of the 64 voice slots, loudest 32 first. A source waiting virtualized in the voice manager is silent, as it would be on the hardware, so voice stealing in Mode 4 is audible.
 - **Per source:** resampling by the source pitch and the library's Doppler factor; the library's Q14 elevation/pinna biquad; each ear delayed by the library's Woodworth ITD taps; the library's 5.1 pan gains folded to stereo (FL+SL, FR+SR, centre and LFE to both) with 35 % crossfeed so the far ear still hears a hard-panned source; the effective gain (distance, cone, listener). Gains ramp across each chunk, so movement does not click.
@@ -100,7 +110,7 @@ The library's default backend computes the spatial model but drives no audio har
 - **CPU instructions:** resampling, the biquad and the ITD delay line are scalar (each sample depends on the previous one). Summing the sources into the 32-bit stereo bus and the saturating conversion to 16-bit run as MMX (`pmullw`/`pmulhw`/`paddd`/`packssdw`) on the Pentium III, written as inline assembly because clang's MMX intrinsics now require SSE2. A scalar version gives bit-identical output (`-DSHOWCASE_AUDIO_SCALAR`), which `lib/openal/tests/test_showcase_audio.c` checks.
 - **Timing:** every main-loop frame reads the codec's current and last-valid descriptor indices and mixes 512-frame chunks straight into the free DMA buffers until 8 chunks (about 85 ms) are queued, restarting the DMA if it ever halted (counted as an underrun). No XAudio callback is used: nxdk's driver stops scheduling it after the output drains once, which silenced the sound after about a second.
 
-Output is stereo, 16-bit, 48 kHz. 5.1 and Dolby Digital need the APU and are not produced.
+Output is stereo, 16-bit, 48 kHz with either backend. 5.1 and Dolby Digital are not produced.
 
 ---
 
@@ -121,4 +131,4 @@ xemu -dvd_path "nxdk sample - openal_showcase.iso"
 ```
 Or FTP `openal_showcase.xbe` to your Xbox console dashboard (`E:\Games\OpenAL Showcase\default.xbe`).
 
-**Note:** the library's default (null) backend does not drive the APU; the sound comes from the showcase's software mixer (section 4) through the AC97 codec, under xemu and on a console. Do not build the library with `-DOPENAL_APU_REAL_MMIO` for xemu: its register layer is not xemu-conformant and device bring-up is expected to abort the emulator (static analysis, not run; see `lib/openal/docs/XEMU_VERIFICATION.md`).
+**Note:** the default build plays through the APU on both xemu and a console (section 4). Build with `make SHOWCASE_BACKEND=cpu` for the software mixer only.
