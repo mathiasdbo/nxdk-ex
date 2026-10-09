@@ -17,6 +17,123 @@
 #include "showcase_modes.h"
 #include "showcase_scene.h"
 #include "showcase_audio.h"
+#include "apu_ac97.h"
+#include "apu_gp.h"
+#include "apu_hardware.h"
+#include "apu_voice.h"
+#include "apu_vp.h"
+
+#if defined(NXDK) || defined(__NXDK__) || defined(_XBOX)
+#  include <stdarg.h>
+#  include <string.h>
+#  include <nxdk/mount.h>
+#  define SHOWCASE_LOG 1
+#endif
+
+#ifdef SHOWCASE_LOG
+/*
+ * E:\openal_showcase.txt: one status line a second, written out every 5 s
+ * (and at the first APU stall), so a run on a real console can be read back
+ * over FTP. The newest lines are kept when the buffer fills.
+ */
+static char s_log[48 * 1024];
+static size_t s_log_len;
+
+static void log_line(const char *fmt, ...) {
+    char line[256];
+    va_list ap;
+    int n;
+    va_start(ap, fmt);
+    n = vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    if (n <= 0) {
+        return;
+    }
+    if ((size_t)n >= sizeof(line)) {
+        n = (int)sizeof(line) - 1;
+    }
+    if (s_log_len + (size_t)n > sizeof(s_log)) {
+        /* drop the older half */
+        memmove(s_log, s_log + sizeof(s_log) / 2u, s_log_len - sizeof(s_log) / 2u);
+        s_log_len -= sizeof(s_log) / 2u;
+    }
+    memcpy(s_log + s_log_len, line, (size_t)n);
+    s_log_len += (size_t)n;
+}
+
+static void log_save(void) {
+    FILE *f;
+    if (!nxIsDriveMounted('E')) {
+        nxMountDrive('E', "\\Device\\Harddisk0\\Partition1\\");
+    }
+    f = fopen("E:\\openal_showcase.txt", "wb");
+    if (f) {
+        fwrite(s_log, 1, s_log_len, f);
+        fclose(f);
+    }
+}
+
+/* Called once a frame; logs every second */
+static void log_tick(const showcase_app_t *app, const showcase_perf_t *perf, bool apu_ok) {
+    static DWORD t0, t_last, t_saved;
+    static uint32_t gp_last;
+    static bool stalled;
+    DWORD now = GetTickCount();
+
+    if (t0 == 0) {
+        t0 = t_last = t_saved = now;
+        gp_last = apu_ok ? apu_gp_frames((uintptr_t)NV_PAPU_BASE) : 0;
+        log_line("openal_showcase: audio %s\n", apu_ok ? "APU (VP+GP)" : "CPU mixer / silent");
+        return;
+    }
+    if (now - t_last < 1000u) {
+        return;
+    }
+    t_last = now;
+    if (apu_ok) {
+        apu_ac97_stats_t as;
+        uint32_t gp = apu_gp_frames((uintptr_t)NV_PAPU_BASE);
+        apu_ac97_get_stats(&as);
+        log_line("t %6lu ms mode %d fps %5.1f audio %5.2f ms scene %5.2f ms voices %2u GP %7lu AC97 %6lu und %lu pad %lu\n",
+                 (unsigned long)(now - t0), app->current_mode, perf->fps, perf->audio_ms, perf->scene_ms,
+                 (unsigned)perf->voices, (unsigned long)gp, (unsigned long)as.chunks, (unsigned long)as.underruns,
+                 (unsigned long)as.padded);
+        if (gp == gp_last && !stalled) {
+            /* Frames stopped: keep the driver's last list operations */
+            static apu_vp_trace_t tr[64];
+            uint32_t n = apu_vp_debug_trace(tr, 64u), i;
+            stalled = true;
+            log_line("APU STALLED: GP frame counter stopped; last voice operations:\n");
+            for (i = 0; i < n; i++) {
+                log_line("  %c %3u %08lx %08lx\n", tr[i].op, (unsigned)tr[i].h, (unsigned long)tr[i].a,
+                         (unsigned long)tr[i].t);
+            }
+            log_save();
+            t_saved = now;
+        }
+        gp_last = gp;
+    } else {
+        log_line("t %6lu ms mode %d fps %5.1f audio %5.2f ms scene %5.2f ms voices %2u und %u\n",
+                 (unsigned long)(now - t0), app->current_mode, perf->fps, perf->audio_ms, perf->scene_ms,
+                 (unsigned)perf->voices, (unsigned)perf->underruns);
+    }
+    if (now - t_saved >= 5000u) {
+        log_save();
+        t_saved = now;
+    }
+}
+#endif
+
+/* Sources the APU is playing (VP voices of the 64 library slots) */
+static uint32_t apu_active_voices(void) {
+    uint32_t i, n = 0;
+    for (i = 0; i < 64u; i++) {
+        if (apu_vp_voice_active(apu_voice_hw_handle(i))) {
+            n++;
+        }
+    }
+    return n;
+}
 
 int main(void) {
     /* 1. Initialize UI Framebuffer & Video Mode */
@@ -44,10 +161,15 @@ int main(void) {
         return 3;
     }
 
-    /* 5. Software mix of the OpenAL sources to the AC97 output (the null
-     *    backend drives no audio hardware) */
-    bool audio_ok = (showcase_audio_init() == 0);
-    showcase_scene_set_audio_output(audio_ok && showcase_audio_active());
+    /* 5. Sound output. Built with SHOWCASE_BACKEND=apu (the default) on a real
+     *    console, alcOpenDevice() brought up the MCPX APU: the VP plays the
+     *    sources and the library forwards the GP output to the AC97. Otherwise
+     *    (null backend) the software mixer plays them. */
+    bool apu_ok = apu_voice_hw_backend();
+    bool audio_ok = !apu_ok && (showcase_audio_init() == 0);
+    showcase_scene_set_audio_output(apu_ok ? SHOWCASE_AUDIO_APU
+                                           : ((audio_ok && showcase_audio_active()) ? SHOWCASE_AUDIO_CPU
+                                                                                    : SHOWCASE_AUDIO_SILENT));
 
     showcase_input_t input;
     bool running = true;
@@ -71,10 +193,9 @@ int main(void) {
         showcase_app_update(&app, &input);
 
         /* Library frame tick: reaps finished voices, promotes waiting sources
-         * (and services the APU idle trap on the hardware backend) */
-        alXboxUpdateVoices();
-
+         * and, on the APU, feeds the AC97 from the GP output */
         QueryPerformanceCounter(&t_a);
+        alXboxUpdateVoices();
         if (audio_ok) {
             showcase_audio_update();
         }
@@ -83,7 +204,15 @@ int main(void) {
         perf.audio_ms += (1000.0f * (float)(t_b.QuadPart - t_a.QuadPart) / (float)freq.QuadPart - perf.audio_ms) * 0.1f;
         if (audio_ok) {
             showcase_audio_get_stats(&perf.voices, &perf.underruns);
+        } else if (apu_ok) {
+            apu_ac97_stats_t as;
+            apu_ac97_get_stats(&as);
+            perf.voices = apu_active_voices();
+            perf.underruns = as.underruns + as.padded;   /* both are audible gaps */
         }
+#ifdef SHOWCASE_LOG
+        log_tick(&app, &perf, apu_ok);
+#endif
 
         if (scene_ok) {
             QueryPerformanceCounter(&t_a);
@@ -112,6 +241,11 @@ int main(void) {
         }
         t_prev = t_frame;
     }
+
+#ifdef SHOWCASE_LOG
+    log_line("exit\n");
+    log_save();
+#endif
 
     /* 7. Clean Teardown */
     showcase_audio_shutdown();

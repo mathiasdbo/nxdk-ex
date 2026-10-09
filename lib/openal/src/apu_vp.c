@@ -34,6 +34,13 @@ static uint8_t s_list[APU_VP_MAX_HANDLES];      /* list each handle is linked on
 static uint8_t s_paused[APU_VP_MAX_HANDLES];    /* taken off its list by apu_vp_voice_pause() */
 static apu_vp_fe_stats_t s_fe_stats;
 static uint32_t s_soft_end[APU_VP_MAX_HANDLES];  /* data frames of a one-shot looping on its silent tail, 0 = none */
+static uint32_t s_retired_at[APU_VP_MAX_HANDLES]; /* XGSCNT when the handle left its list */
+static uint8_t s_retired[APU_VP_MAX_HANDLES];     /* has left a list since init */
+static uint32_t s_alloc_next;                      /* round-robin start for apu_vp_alloc_handle() */
+
+/* XGSCNT samples a handle stays unused after leaving its list: more than one
+ * 32-sample frame, so the VP has finished any frame that was processing it */
+#define APU_VP_QUARANTINE_SAMPLES 64u
 
 static inline void reg_wr(uintptr_t bar0, uint32_t off, uint32_t v) {
     *(volatile uint32_t *)(bar0 + off) = v;
@@ -131,9 +138,20 @@ static bool sge_used(uint32_t e) {
     return (s_sge_used[e >> 5] >> (e & 31u)) & 1u;
 }
 
+static uint32_t s_map_guard;   /* extra pages mapped behind every buffer (apu_vp_debug_set_map_guard) */
+static uint32_t s_dbg;         /* APU_VP_DBG_* switches (apu_vp_debug_set_flags) */
+
+void apu_vp_debug_set_flags(uint32_t flags) {
+    s_dbg = flags;
+}
+
+void apu_vp_debug_set_map_guard(uint32_t pages) {
+    s_map_guard = pages;
+}
+
 static int map_buffer(uint32_t phys, uint32_t bytes, uint32_t *ba) {
     uint32_t page0 = phys & ~0xFFFu;
-    uint32_t pages = ((phys + bytes - 1u) >> 12) - (phys >> 12) + 1u;
+    uint32_t pages = ((phys + bytes - 1u) >> 12) - (phys >> 12) + 1u + s_map_guard;
     uint32_t i, start, run;
 
     for (i = 0; i < s_map_count; i++) {
@@ -222,6 +240,34 @@ static bool fe_probe(uintptr_t bar0) {
 
 static const uint32_t s_list_heads[3] = { MCPX_APU_TVL2D, MCPX_APU_TVL3D, MCPX_APU_TVLMP };
 
+/* Ring of the last list operations, for freeze diagnostics (apu_vp_debug_trace()) */
+#define TRACE_LEN 256u
+static apu_vp_trace_t s_trace[TRACE_LEN];
+static uint32_t s_trace_n;
+static bool s_trace_stopped;               /* frozen at the first frame stall */
+static uint32_t s_stall_gp, s_stall_xgs;   /* last GP frame count and the XGSCNT it was seen at */
+
+static void trace(uintptr_t bar0, char op, uint32_t h, uint32_t a) {
+    apu_vp_trace_t *e;
+    if (s_trace_stopped) {
+        return;
+    }
+    e = &s_trace[s_trace_n++ % TRACE_LEN];
+    e->op = op;
+    e->h = (uint16_t)h;
+    e->a = a;
+    e->t = reg_rd(bar0, MCPX_APU_XGSCNT);
+}
+
+uint32_t apu_vp_debug_trace(apu_vp_trace_t *out, uint32_t max) {
+    uint32_t n = (s_trace_n < TRACE_LEN) ? s_trace_n : TRACE_LEN, i;
+    if (n > max) n = max;
+    for (i = 0; i < n; i++) {
+        out[i] = s_trace[(s_trace_n - n + i) % TRACE_LEN];
+    }
+    return n;
+}
+
 static void link_voice(uintptr_t bar0, uint32_t h, uint8_t list) {
     volatile uint32_t *pl = voice_dw(h, MCPX_VOICE_TAR_PITCH_LINK);
     uint32_t head = reg_rd(bar0, s_list_heads[list]) & 0xFFFFu;
@@ -229,6 +275,7 @@ static void link_voice(uintptr_t bar0, uint32_t h, uint8_t list) {
     wc_flush();
     reg_wr(bar0, s_list_heads[list], h);
     s_list[h] = list;
+    trace(bar0, 'L', h, head);   /* a = the old head, now our next */
 }
 
 /* Unlink by editing the predecessor's next field (bits 15:0) or the list head */
@@ -241,9 +288,14 @@ static void unlink_voice(uintptr_t bar0, uint32_t h) {
         return;
     }
     s_list[h] = LIST_NONE;
+    /* The VP may still be processing this record in the current frame: keep
+     * the handle out of apu_vp_alloc_handle() for a while */
+    s_retired_at[h] = reg_rd(bar0, MCPX_APU_XGSCNT);
+    s_retired[h] = 1;
     cur = reg_rd(bar0, s_list_heads[l]) & 0xFFFFu;
     if (cur == h) {
         reg_wr(bar0, s_list_heads[l], next);
+        trace(bar0, 'H', h, next);   /* unlinked at the head; a = new head */
         return;
     }
     while (cur != MCPX_APU_LIST_END && cur < APU_VP_MAX_HANDLES && guard++ < APU_VP_MAX_HANDLES) {
@@ -252,10 +304,12 @@ static void unlink_voice(uintptr_t bar0, uint32_t h) {
         if (n == h) {
             *link = (*link & 0xFFFF0000u) | next;
             wc_flush();
+            trace(bar0, 'U', h, (cur << 16) | next);   /* a = predecessor << 16 | next */
             return;
         }
         cur = n;
     }
+    trace(bar0, 'X', h, (uint32_t)l << 16 | guard);   /* not found in its list */
 }
 
 static bool record_active(uint32_t h) {
@@ -286,13 +340,15 @@ uint32_t apu_vp_service(uintptr_t bar0) {
     }
     /* One-shots that ended: the VP cleared ACTIVE_VOICE, or (real console) CBO
      * passed the data into the silent tail; take them off their list */
-    for (h = 0; h < APU_VP_MAX_HANDLES; h++) {
+    for (h = 0; h < APU_VP_MAX_HANDLES && !(s_dbg & APU_VP_DBG_NO_END_SCAN); h++) {
         if (s_list[h] == LIST_NONE) {
             continue;
         }
         if (soft_ended(h)) {
+            /* Only unlink: a state write could land while the VP processes the
+             * record in this frame (apu_vp_voice_active() ignores unlisted voices) */
+            trace(bar0, 'E', h, *voice_dw(h, MCPX_VOICE_PAR_OFFSET) & 0xFFFFFFu);   /* a = CBO */
             unlink_voice(bar0, h);
-            *voice_dw(h, MCPX_VOICE_PAR_STATE) = 0;
         } else if (!record_active(h)) {
             unlink_voice(bar0, h);
         }
@@ -300,7 +356,7 @@ uint32_t apu_vp_service(uintptr_t bar0) {
     /* Real console: a front-end message (FECTL bit 15, seen with FEDECMETH
      * 0x8008 in apu_probe round 2/12) halts frames; record it and try to
      * clear it by writing the bit back */
-    if (!s_fe_ok) {
+    if (!s_fe_ok && !(s_dbg & APU_VP_DBG_NO_FE_CHECK)) {
         uint32_t fectl = reg_rd(bar0, MCPX_APU_FECTL);
         if (fectl & 0x8000u) {
             s_fe_stats.events++;
@@ -308,6 +364,18 @@ uint32_t apu_vp_service(uintptr_t bar0) {
             s_fe_stats.last_param = reg_rd(bar0, MCPX_APU_FEDECPARAM);
             reg_wr(bar0, MCPX_APU_FECTL, fectl & ~MCPX_APU_FECTL_FEMETHMODE);
             reg_wr(bar0, MCPX_APU_ISTS, 0xFFFFFFFFu);
+        }
+    }
+    /* Stall detector: the GP counts 1500 frames a second; if it has not moved
+     * while XGSCNT advanced by several frames, keep the trace as it is */
+    if (!s_fe_ok && !s_trace_stopped && !(s_dbg & APU_VP_DBG_NO_STALL_DETECT)) {
+        uint32_t gp = apu_gp_frames(bar0), xgs = reg_rd(bar0, MCPX_APU_XGSCNT);
+        if (gp != s_stall_gp) {
+            s_stall_gp = gp;
+            s_stall_xgs = xgs;
+        } else if (xgs - s_stall_xgs > 512u) {
+            trace(bar0, 'Z', 0, s_stall_xgs);   /* a = XGSCNT of the last GP frame */
+            s_trace_stopped = true;
         }
     }
     apu_ac97_pump(bar0);
@@ -366,6 +434,8 @@ int apu_vp_init(uintptr_t bar0) {
     memset(s_voices, 0, APU_VP_MAX_HANDLES * MCPX_VOICE_SIZE);
     memset(s_sge, 0, APU_VP_SGE_ENTRIES * 8u);
     memset(s_soft_end, 0, sizeof(s_soft_end));
+    memset(s_retired, 0, sizeof(s_retired));
+    s_alloc_next = 0;
     memset(s_notify, 0, APU_VP_NOTIFY_BYTES);
     memset(s_sge_used, 0, sizeof(s_sge_used));
     memset(s_list, LIST_NONE, sizeof(s_list));
@@ -387,10 +457,14 @@ int apu_vp_init(uintptr_t bar0) {
     reg_wr(bar0, MCPX_APU_TVL2D, MCPX_APU_LIST_END);
     reg_wr(bar0, MCPX_APU_TVL3D, MCPX_APU_LIST_END);
     reg_wr(bar0, MCPX_APU_TVLMP, MCPX_APU_LIST_END);
-    reg_wr(bar0, MCPX_APU_FETFORCE1, MCPX_APU_FETFORCE1_SE2FE_IDLE_VOICE);
+    reg_wr(bar0, MCPX_APU_FETFORCE1,
+           (s_dbg & APU_VP_DBG_NO_FE_PROBE) ? 0u : MCPX_APU_FETFORCE1_SE2FE_IDLE_VOICE);
     reg_wr(bar0, MCPX_APU_FENADDR, s_notify_phys);
 
-    s_fe_ok = fe_probe(bar0);
+    s_fe_ok = (s_dbg & APU_VP_DBG_NO_FE_PROBE) ? false : fe_probe(bar0);
+    s_trace_n = 0;
+    s_trace_stopped = false;
+    s_stall_gp = 0;
     if (!s_fe_ok) {
         /* Real console: with bit 15 set, an ended voice still in a list stops
          * frame processing until software services the front end, which the
@@ -422,7 +496,7 @@ int apu_vp_init(uintptr_t bar0) {
     s_ready = true;
 
     /* Real console: nothing else turns the GP output into sound */
-    if (!s_fe_ok && apu_ac97_start(bar0) != 0) {
+    if (!s_fe_ok && !(s_dbg & APU_VP_DBG_NO_AC97) && apu_ac97_start(bar0) != 0) {
         apu_vp_deinit(bar0);
         return -1;
     }
@@ -484,7 +558,7 @@ int apu_vp_voice_start(uintptr_t bar0, uint32_t h, const apu_vp_voice_params_t *
     uint32_t frame_bytes, frames, tail_frames, ba, vbin, fmt_bins, vola, volb, volc, hrtf, i;
     bool soft_end;
 
-    if (!s_ready || !p || h >= APU_VP_MAX_HANDLES || p->bytes == 0 ||
+    if (!s_ready || !p || h >= (s_fe_ok ? APU_VP_MAX_HANDLES : APU_VP_HW_HANDLES) || p->bytes == 0 ||
         (p->channels != 1 && p->channels != 2) || (p->bits != 8 && p->bits != 16)) {
         return -1;
     }
@@ -533,6 +607,7 @@ int apu_vp_voice_start(uintptr_t bar0, uint32_t h, const apu_vp_voice_params_t *
         latch_hrtf(bar0, h, hrtf);
     }
     *voice_dw(h, MCPX_VOICE_PAR_STATE) = MCPX_PAR_STATE_ACTIVE_VOICE;
+    trace(bar0, 'S', h, (frames & 0xFFFFFFu) | (soft_end ? 0x80000000u : 0u));   /* a = data frames, bit 31 = silent-tail loop */
     link_voice(bar0, h, 0);   /* top of the 2D list */
     return 0;
 }
@@ -558,7 +633,9 @@ void apu_vp_voice_update(uintptr_t bar0, uint32_t h, int16_t pitch, const uint16
         *voice_dw(h, MCPX_VOICE_CFG_HRTF_TARGET) = (uint32_t)hrtf_entry;
         latch_hrtf(bar0, h, (uint32_t)hrtf_entry);
     }
-    apu_vp_service(bar0);
+    if (s_fe_ok) {
+        apu_vp_service(bar0);   /* xemu: release an idle-voice trap promptly */
+    }
 }
 
 /* Pause = out of the list (the VP leaves the record, and CBO, alone); resume = back on top */
@@ -585,8 +662,35 @@ void apu_vp_voice_off(uintptr_t bar0, uint32_t h) {
     }
     unlink_voice(bar0, h);
     s_paused[h] = 0;
-    *voice_dw(h, MCPX_VOICE_PAR_STATE) = 0;
+    if (s_fe_ok) {
+        /* xemu: VOICE_OFF semantics. On hardware the record is left alone: the
+         * VP may be processing it in this frame (unlisted voices are inactive) */
+        *voice_dw(h, MCPX_VOICE_PAR_STATE) = 0;
+    }
     apu_vp_service(bar0);
+}
+
+uint32_t apu_vp_alloc_handle(uintptr_t bar0) {
+    uint32_t now, k, h;
+    uint32_t span;
+
+    if (!s_ready) {
+        return MCPX_APU_LIST_END;
+    }
+    span = (s_fe_ok ? APU_VP_MAX_HANDLES : APU_VP_HW_HANDLES) - APU_VP_HANDLE_BASE;
+    now = reg_rd(bar0, MCPX_APU_XGSCNT);
+    for (k = 0; k < span; k++) {
+        h = APU_VP_HANDLE_BASE + (s_alloc_next + k) % span;
+        if (s_list[h] != LIST_NONE || s_paused[h]) {
+            continue;
+        }
+        if (s_retired[h] && now - s_retired_at[h] < APU_VP_QUARANTINE_SAMPLES) {
+            continue;
+        }
+        s_alloc_next = (h - APU_VP_HANDLE_BASE + 1u) % span;
+        return h;
+    }
+    return MCPX_APU_LIST_END;
 }
 
 bool apu_vp_voice_active(uint32_t h) {

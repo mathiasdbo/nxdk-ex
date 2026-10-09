@@ -23,7 +23,9 @@
  * parallel move, 01dd0ddd W0aaaaaa.)
  *
  *   X:0  descriptor: next = end of list, control = interleave | DSP->memory |
- *        FIFO 0 | 16-bit, count = 32 frames x 2 channels, source X:$1400
+ *        FIFO 0 | 16-bit | channel stride 32 words (dsp_step, bits 23:14),
+ *        count = 32 frames x 2 channels, source X:$1400. Without the stride a
+ *        real console puts bin 0 on both channels (apu_probe rounds 20/21).
  *
  * Verified on a retail console (samples/apu_probe round 17): the frame order
  * (complete, then wait) is the one measured on silicon in xemu PR 3047; a loop
@@ -80,6 +82,9 @@ void apu_gp_get_stats(uintptr_t bar0, apu_gp_stats_t *out);
 
 /** Frames the GP program has run (its counter at X:$10, 24 bits). */
 uint32_t apu_gp_frames(uintptr_t bar0);
+
+/** Channel stride of the output DMA from the next apu_gp_init() on (diagnostics; default 32). */
+void apu_gp_debug_set_dsp_step(uint32_t words);
 
 /** Output ring and bootstrap scratch image (host tests). */
 uint8_t *apu_gp_debug_fifo(void);
