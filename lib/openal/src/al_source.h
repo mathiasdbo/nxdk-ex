@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "al_buffer.h"
+#include "al_stream.h"
 #include "apu_voice.h"
 #include "apu_hardware.h"
 #include "apu_spatial.h"
@@ -52,6 +53,8 @@ typedef struct ALsource {
     uint32_t saved_prd_index;        /* Preserved PRD index upon hardware preemption */
     uint32_t saved_sample_pos_frac;   /* Preserved sample position fractional phase upon preemption */
     uint32_t play_seq;               /* Start order (monotonic, set by alSourcePlay); oldest loses priority ties */
+    ALint source_type;               /* AL_UNDETERMINED, AL_STATIC (AL_BUFFER) or AL_STREAMING (queued buffers) */
+    al_stream_t *stream;             /* queue and ring of a streaming source, NULL otherwise */
 } ALsource;
 
 
@@ -132,9 +135,30 @@ void al_source_calc_spatial(const ALsource *src, AL_SPATIAL_CALC *calc);
 void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc);
 
 /**
- * Update APU voice manager frame tick (detect completed voices, promote virtual sources).
+ * Update APU voice manager frame tick (refill streaming sources, detect
+ * completed voices, promote virtual sources).
  */
 void al_source_update_frame(void);
+
+/**
+ * The buffer a source's voice plays: its static buffer, or the ring of a
+ * streaming source (NULL if there is nothing to play).
+ */
+const ALbuffer *al_source_play_buffer(const ALsource *src);
+
+/**
+ * True if the source's voice loops in hardware: AL_LOOPING, or a streaming
+ * source (its ring always loops; the library ends it). Such a voice never
+ * finishes on its own.
+ */
+bool al_source_voice_loops(const ALsource *src);
+
+/**
+ * The source is about to lose its hardware voice (stop, release, preemption):
+ * a streaming source's ring stops being scrubbed by the output thread.
+ * Call before the voice is stopped or given to another source.
+ */
+void al_source_voice_lost(ALsource *src);
 
 /**
  * Configure hardware voice context and trigger playback for a source.
