@@ -100,6 +100,7 @@ The status panel says which output is in use.
 - **On a console:** the GP DSP copies the mix to a FIFO, and `alXboxUpdateVoices()` forwards it to the AC97. HRTF needs front-end methods, which do not run on hardware, so 3D sources are panned by volume and the 5.1 pan is folded to stereo.
 - **On xemu:** sources use the HRTF stage. With "Real-time DSP processing" off, xemu plays the VP output itself.
 - **Status panel:** the "mix" time is the library's frame tick, and "src" counts active VP voices.
+- **Voices:** a console plays at most 64 sources at once (VP handles 64..127; the VP stops all audio for good on a handle above 127). Mode 4 goes past that: the voice manager steals the lowest-priority voice.
 
 **CPU mixer (`make SHOWCASE_BACKEND=cpu`, or if the APU does not come up).** The library runs its null backend, which computes the spatial model but drives no audio hardware. The showcase renders the sources itself on the CPU and plays them through nxdk's `XAudio` AC97 output (`showcase_audio.c`). It uses the library's own values, so what you hear is what the screen shows:
 
@@ -132,3 +133,6 @@ xemu -dvd_path "nxdk sample - openal_showcase.iso"
 Or FTP `openal_showcase.xbe` to your Xbox console dashboard (`E:\Games\OpenAL Showcase\default.xbe`).
 
 **Note:** the default build plays through the APU on both xemu and a console (section 4). Build with `make SHOWCASE_BACKEND=cpu` for the software mixer only.
+
+### Log file
+On the console the showcase writes `E:\openal_showcase.txt` (every 5 s and on exit; fetch it over FTP as `HDD0-E/openal_showcase.txt`): one line a second with the mode, frame rate, audio and scene CPU time, active voices and, with the APU, the GP frame count and AC97 chunks, underruns and padded chunks. If the GP frame counter stops, it adds `APU STALLED` and the driver's last voice operations.

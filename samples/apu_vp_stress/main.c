@@ -1,11 +1,14 @@
 /*
  * Driver-level stress test of the MCPX VP backend (lib/openal/src/apu_vp.c),
  * without OpenAL on top: one-shot pings started and stopped through the
- * apu_vp_* API in the pattern samples/apu_probe rounds 22-25 used with raw
- * register writes (which never froze a console), while samples/openal_vp's
- * stress phase froze frame processing within a second. Each variant runs for
- * a few seconds; the log (E:\apu_vp_stress.txt) records whether GP frames kept
- * running and, on a stall, the driver's operation trace.
+ * apu_vp_* API (3 starts every 16 ms, the oldest stopped beyond a target).
+ * This is the test that found the hardware voice limit: the VP reports any
+ * handle above 127 as idle and stops all frames for good (APU_VP_HW_HANDLES,
+ * lib/openal/docs/XEMU_VERIFICATION.md 8.1b). It now runs the full driver path
+ * as a regression test. The log (E:\apu_vp_stress.txt) records whether GP
+ * frames kept running and, on a stall, the driver's operation trace, the
+ * records involved, the registers and the front end's response to the ways of
+ * releasing an idle-voice trap.
  */
 #include <hal/debug.h>
 #include <hal/video.h>
@@ -92,19 +95,6 @@ static void fill_params(apu_vp_voice_params_t *p) {
 
 #define REG(off)    (*(volatile uint32_t *)(BAR0 + (off)))
 #define XGSCNT_REG  0x200Cu
-#define TVL2D_REG   0x2054u
-
-/* Operations of the raw replay (variant B), in the driver trace's format */
-static apu_vp_trace_t s_rtr[256];
-static uint32_t s_rtr_n;
-
-static void rtrace(char op, uint32_t h, uint32_t a) {
-    apu_vp_trace_t *e = &s_rtr[s_rtr_n++ % 256u];
-    e->op = op;
-    e->h = (uint16_t)h;
-    e->a = a;
-    e->t = REG(XGSCNT_REG);
-}
 
 /* Stall report: last operations, the records they touched, SGE, registers, GP X memory */
 static void dump_stall(const apu_vp_trace_t *tr, uint32_t n) {
@@ -300,166 +290,6 @@ static bool run(const char *tag, uint32_t target, uint32_t tick_ms, uint32_t ms)
     return true;
 }
 
-/*
- * Variant B: apu_probe round 27's register-level replay (which never froze a
- * console), on the tables and state apu_vp_init() left: records written and
- * linked by the CPU here, the driver is not called during the run.
- */
-static uint8_t r_listed[256], r_retired[256];
-static uint32_t r_retired_at[256], r_alloc_next, r_ba;
-static uint32_t r_end_head, r_end_mid, r_end_tail;
-
-static volatile uint32_t *vrec(uint32_t h) {
-    return (volatile uint32_t *)apu_vp_debug_voice_record(h);
-}
-
-static uint32_t r_alloc(void) {
-    uint32_t now = REG(XGSCNT_REG), k, h;
-    for (k = 0; k < 192u; k++) {
-        h = 64u + (r_alloc_next + k) % 192u;
-        if (r_listed[h]) continue;
-        if (r_retired[h] && now - r_retired_at[h] < 64u) continue;
-        r_alloc_next = (h - 64u + 1u) % 192u;
-        return h;
-    }
-    return 0xFFFFu;
-}
-
-/* returns 0 head, 1 middle, 2 tail, 3 not found */
-static uint32_t r_unlink(uint32_t h) {
-    uint32_t next = vrec(h)[0x7C / 4] & 0xFFFFu, cur, guard = 0;
-    if (!r_listed[h]) return 3;
-    r_listed[h] = 0;
-    r_retired_at[h] = REG(XGSCNT_REG);
-    r_retired[h] = 1;
-    cur = REG(TVL2D_REG) & 0xFFFFu;
-    if (cur == h) {
-        REG(TVL2D_REG) = next;
-        rtrace('H', h, next);
-        return 0;
-    }
-    while (cur != 0xFFFFu && cur < 256u && guard++ < 256u) {
-        volatile uint32_t *link = &vrec(cur)[0x7C / 4];
-        if ((*link & 0xFFFFu) == h) {
-            *link = (*link & 0xFFFF0000u) | next;
-            rtrace('U', h, (cur << 16) | next);
-            return (next == 0xFFFFu) ? 2u : 1u;
-        }
-        cur = *link & 0xFFFFu;
-    }
-    rtrace('X', h, 0);
-    return 3;
-}
-
-static void r_service(void) {
-    uint32_t h;
-    for (h = 0; h < 256u; h++) {
-        if (r_listed[h] && (vrec(h)[0x58 / 4] & 0xFFFFFFu) >= PING_FRAMES) {
-            uint32_t w;
-            rtrace('E', h, vrec(h)[0x58 / 4] & 0xFFFFFFu);
-            w = r_unlink(h);
-            if (w == 0) r_end_head++;
-            else if (w == 1) r_end_mid++;
-            else if (w == 2) r_end_tail++;
-        }
-    }
-}
-
-static void r_start(uint32_t h, int16_t pitch, uint16_t v0, uint16_t v1) {
-    volatile uint32_t *r = vrec(h);
-    uint32_t i, head;
-    r[0x54 / 4] = 0;
-    for (i = 0; i < 32u; i++) r[i] = 0;
-    r[0x00 / 4] = 0u | (1u << 5) | (0u << 10) | (1u << 16) | (0u << 21) | (1u << 26);
-    r[0x04 / 4] = (1u << 28) | (1u << 30) | (1u << 25) | (0u | (1u << 5));
-    r[0x1C / 4] = 0xFFFFu;
-    r[0x20 / 4] = r_ba;
-    r[0x24 / 4] = PING_FRAMES;
-    r[0x58 / 4] = 0;
-    r[0x5C / 4] = PING_FRAMES - 1u + APU_VP_SILENT_TAIL_BYTES / 2u;
-    r[0x60 / 4] = ((uint32_t)v0 << 4) | ((uint32_t)v1 << 20) | 0xFu | (0xFu << 16);
-    r[0x64 / 4] = 0xFFFFFFFFu;
-    r[0x68 / 4] = 0xFFFFFFFFu;
-    r[0x7C / 4] = ((uint32_t)(uint16_t)pitch << 16) | 0xFFFFu;
-    r[0x54 / 4] = 1u << 21;
-    rtrace('S', h, 0);
-    head = REG(TVL2D_REG) & 0xFFFFu;
-    r[0x7C / 4] = (r[0x7C / 4] & 0xFFFF0000u) | head;
-    REG(TVL2D_REG) = h;
-    rtrace('L', h, head);
-    r_listed[h] = 1;
-}
-
-static bool replay(const char *tag, uint32_t ms) {
-    uint32_t t0 = GetTickCount(), ticks = 0, starts = 0;
-    uint32_t g_last = apu_gp_frames(BAR0), x_last = REG(XGSCNT_REG), h;
-    apu_vp_voice_params_t p;
-
-    /* Map the ping through the driver once and take its BA */
-    fill_params(&p);
-    if (apu_vp_voice_start(BAR0, 64u, &p) != 0) {
-        logf_("%s mapping failed\n", tag);
-        return false;
-    }
-    r_ba = vrec(64u)[0x20 / 4] & 0xFFFFFFu;
-    apu_vp_voice_off(BAR0, 64u);
-    Sleep(20);
-    memset(r_listed, 0, sizeof(r_listed));
-    memset(r_retired, 0, sizeof(r_retired));
-    r_alloc_next = 0;
-    r_end_head = r_end_mid = r_end_tail = 0;
-    s_rtr_n = 0;
-    s_rng = 0x1234567u;
-    s_qh = s_qn = 0;
-
-    while (GetTickCount() - t0 < ms) {
-        uint32_t k;
-        for (k = 0; k < 3u; k++) {
-            int16_t pitch;
-            uint16_t v0, v1;
-            h = r_alloc();
-            if (h == 0xFFFFu) break;
-            pitch = (int16_t)((int32_t)(rnd() % 8192u) - 4096);
-            v0 = (uint16_t)(0x600u + rnd() % 0x300u);
-            v1 = (uint16_t)(0x600u + rnd() % 0x300u);
-            r_start(h, pitch, v0, v1);
-            s_q[(s_qh + s_qn) % 256u] = h;
-            s_qn++;
-            starts++;
-        }
-        while (s_qn > 40u) {
-            h = s_q[s_qh];
-            s_qh = (s_qh + 1u) % 256u;
-            s_qn--;
-            r_unlink(h);
-            r_service();
-        }
-        Sleep(16);
-        ticks++;
-        if (apu_gp_frames(BAR0) != g_last) {
-            g_last = apu_gp_frames(BAR0);
-            x_last = REG(XGSCNT_REG);
-        } else if (REG(XGSCNT_REG) - x_last > 512u) {
-            static apu_vp_trace_t tr[256];
-            uint32_t n = (s_rtr_n < 256u) ? s_rtr_n : 256u, j;
-            for (j = 0; j < n; j++) tr[j] = s_rtr[(s_rtr_n - n + j) % 256u];
-            logf_("%-46s STALLED after %lu ticks, %lu starts; ended voices unlinked at head/middle/tail %lu/%lu/%lu\n",
-                  tag, ticks, starts, r_end_head, r_end_mid, r_end_tail);
-            dump_stall(tr, n);
-            try_recover();
-            save_log();
-            return false;
-        }
-    }
-    logf_("%-46s ok: %lu ticks, %lu starts; ended voices unlinked at head/middle/tail %lu/%lu/%lu\n", tag, ticks,
-          starts, r_end_head, r_end_mid, r_end_tail);
-    REG(TVL2D_REG) = 0xFFFFu;
-    s_qh = s_qn = 0;
-    Sleep(20);
-    save_log();
-    return true;
-}
-
 /* The ping, with the silent tail al_buffer.c appends, 0x20 into a page as in the frozen runs */
 static bool make_ping(void) {
     uint32_t page_phys = 0, i;
@@ -490,7 +320,8 @@ int main(void) {
      * safest first; a frozen APU needs a reboot, so the run ends at a stall:
      *   F1  D1, 40 playing, 8 s
      *   F2  60 playing: 64 handles minus the quarantine, so starts may fail
-     *   F3  handles 0..63 as plain voices (do they work without HRTF?)
+     * (Handles 0..63 as plain voices neither froze nor played: they need the
+     * HRTF stage. range_alloc() stays for trying other handle ranges.)
      */
     static const struct {
         const char *tag;
@@ -498,7 +329,6 @@ int main(void) {
     } v[] = {
         { "F1: driver, 40 playing:", 0, 0, 40, 8000 },
         { "F2: driver, 60 playing:", 0, 0, 60, 8000 },
-        { "F3: handles 0..63, 40 playing:", 0, 63, 40, 4000 },
     };
     uint32_t k;
 
