@@ -496,6 +496,7 @@ int apu_vp_init(uintptr_t bar0) {
     s_ready = true;
 
     /* Real console: nothing else turns the GP output into sound */
+    apu_ac97_set_thread(!(s_dbg & APU_VP_DBG_NO_AC97_THREAD));
     if (!s_fe_ok && !(s_dbg & APU_VP_DBG_NO_AC97) && apu_ac97_start(bar0) != 0) {
         apu_vp_deinit(bar0);
         return -1;

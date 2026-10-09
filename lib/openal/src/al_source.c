@@ -1,6 +1,7 @@
 #include "al_source.h"
 #include "al_listener.h"
 #include "apu_voice_mgr.h"
+#include "apu_ac97.h"
 #include <string.h>
 #include <math.h>
 #include <float.h>
@@ -85,6 +86,8 @@ static void source_reset_defaults(ALsource *src, ALuint id) {
     src->saved_prd_index = 0;
     src->saved_sample_pos_frac = 0;
     src->play_seq = 0;
+    src->source_type = AL_UNDETERMINED;
+    src->stream = NULL;
 }
 
 void al_source_reset(ALsource *src) {
@@ -99,6 +102,7 @@ void al_source_init_subsystem(void) {
         source_reset_defaults(&g_sources[i], (ALuint)(i + 1));
     }
     apu_voice_mgr_init();
+    apu_ac97_set_thread_hook(al_stream_scrub_tick);   /* streams are silenced behind their voices */
     apu_spatial_reset();
     s_play_seq = 0;
     s_subsystem_initialized = true;
@@ -115,9 +119,11 @@ void al_source_cleanup_subsystem(void) {
                 al_buffer_release(src->buffer);
                 src->buffer = NULL;
             }
+            al_stream_destroy(src->stream);
             source_reset_defaults(src, (ALuint)(i + 1));
         }
     }
+    al_stream_shutdown();
     apu_voice_mgr_deinit();
     apu_spatial_reset();
     s_subsystem_initialized = false;
@@ -139,6 +145,28 @@ ALsource *al_source_get(ALuint id) {
         return NULL;
     }
     return src->in_use ? src : NULL;
+}
+
+const ALbuffer *al_source_play_buffer(const ALsource *src) {
+    if (!src) {
+        return NULL;
+    }
+    if (src->stream) {
+        return al_stream_ring_buffer(src->stream);
+    }
+    return src->buffer;
+}
+
+bool al_source_voice_loops(const ALsource *src) {
+    return src && (src->looping || src->stream != NULL);
+}
+
+/* Back to no buffer and no queue (releases every queued buffer) */
+static void source_drop_stream(ALsource *src) {
+    if (src->stream) {
+        al_stream_destroy(src->stream);
+        src->stream = NULL;
+    }
 }
 
 /*
@@ -318,6 +346,7 @@ static void source_update_hw(const ALsource *src, unsigned fields) {
     }
 
     AL_SPATIAL_CALC calc;
+    const ALbuffer *pb = al_source_play_buffer(src);
     al_source_calc_spatial(src, &calc);
 
     if (fields & SRC_HW_GAIN) {
@@ -325,9 +354,9 @@ static void source_update_hw(const ALsource *src, unsigned fields) {
         ctx->master_vol_left = master_vol;
         ctx->master_vol_right = master_vol;
     }
-    if ((fields & SRC_HW_PITCH) && src->buffer != NULL) {
+    if ((fields & SRC_HW_PITCH) && pb != NULL) {
         float eff_pitch = src->pitch * calc.doppler_pitch;
-        ctx->pitch_step = source_calc_pitch_step(src->buffer->frequency, eff_pitch);
+        ctx->pitch_step = source_calc_pitch_step(pb->frequency, eff_pitch);
     }
     if ((fields & SRC_HW_ITD) && ctx->mode_3d) {
         ctx->itd_delay_left = calc.itd_delay_left;
@@ -340,7 +369,7 @@ static void source_update_hw(const ALsource *src, unsigned fields) {
         ctx->hrtf_a1 = calc.hrtf_coeffs.a1;
         ctx->hrtf_a2 = calc.hrtf_coeffs.a2;
     }
-    if ((fields & SRC_HW_MIXBINS) && src->buffer != NULL && src->buffer->channels == 1) {
+    if ((fields & SRC_HW_MIXBINS) && pb != NULL && pb->channels == 1) {
         for (size_t i = 0; i < 6; i++) {
             ctx->mixbin_gain[i] = calc.mixbin_gain[i];
         }
@@ -372,7 +401,8 @@ void al_source_update_all_gains(void) {
  */
 
 void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
-    if (!src || src->buffer == NULL || hw_voice_idx >= NV_PAPU_NUM_3D_VOICES) {
+    const ALbuffer *pb = al_source_play_buffer(src);
+    if (!src || pb == NULL || hw_voice_idx >= NV_PAPU_NUM_3D_VOICES) {
         return;
     }
 
@@ -381,11 +411,11 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
     NVAPU_VOICE_CONTEXT_3D ctx;
     apu_voice_context_reset(&ctx);
 
-    ctx.format = (src->buffer->bits == 8) ? NVAPU_VOICE_FORMAT_PCM8 : NVAPU_VOICE_FORMAT_PCM16;
-    ctx.channels = (src->buffer->channels == 2) ? NVAPU_VOICE_CHANNELS_STEREO : NVAPU_VOICE_CHANNELS_MONO;
-    ctx.loop_mode = src->looping ? NVAPU_VOICE_LOOP_ON : NVAPU_VOICE_LOOP_OFF;
+    ctx.format = (pb->bits == 8) ? NVAPU_VOICE_FORMAT_PCM8 : NVAPU_VOICE_FORMAT_PCM16;
+    ctx.channels = (pb->channels == 2) ? NVAPU_VOICE_CHANNELS_STEREO : NVAPU_VOICE_CHANNELS_MONO;
+    ctx.loop_mode = al_source_voice_loops(src) ? NVAPU_VOICE_LOOP_ON : NVAPU_VOICE_LOOP_OFF;
 
-    ctx.prd_table_phys = src->buffer->prd_table_phys;
+    ctx.prd_table_phys = pb->prd_table_phys;
     if (src->saved_prd_index != 0 || src->saved_sample_pos_frac != 0) {
         ctx.current_prd_index = src->saved_prd_index;
         ctx.sample_pos_frac = src->saved_sample_pos_frac;
@@ -397,13 +427,13 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
     }
     AL_SPATIAL_CALC calc;
     al_source_calc_spatial(src, &calc);
-    ctx.pitch_step = source_calc_pitch_step(src->buffer->frequency, src->pitch * calc.doppler_pitch);
+    ctx.pitch_step = source_calc_pitch_step(pb->frequency, src->pitch * calc.doppler_pitch);
 
     uint16_t master_vol = (uint16_t)(calc.effective_gain * 65535.0f + 0.5f);
     ctx.master_vol_left = master_vol;
     ctx.master_vol_right = master_vol;
 
-    if (src->buffer->channels == 1) {
+    if (pb->channels == 1) {
         ctx.mode_3d = 1;
         ctx.itd_delay_left = calc.itd_delay_left;
         ctx.itd_delay_right = calc.itd_delay_right;
@@ -434,14 +464,46 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
     }
 
     apu_voice_set_direction(hw_voice_idx, calc.local_pos);
-    apu_voice_bind_buffer(hw_voice_idx, src->buffer->data_phys, (uint32_t)src->buffer->size,
-                          src->buffer->channels, src->buffer->bits);
+    apu_voice_bind_buffer(hw_voice_idx, pb->data_phys, (uint32_t)pb->size, pb->channels, pb->bits);
     apu_voice_setup(hw_voice_idx, &ctx);
+    if (src->stream) {
+        /* The voice starts at ring index 0 from the stream's read position */
+        al_stream_disarm(src->stream);
+        al_stream_voice_start(src->stream, src->looping);
+    }
     apu_voice_pause(al_source_get_apu_base(), hw_voice_idx, 0);
     apu_voice_trigger(al_source_get_apu_base(), hw_voice_idx);
+    if (src->stream) {
+        al_stream_arm(src->stream, hw_voice_idx);
+    }
+}
+
+void al_source_voice_lost(ALsource *src) {
+    if (src && src->stream) {
+        al_stream_disarm(src->stream);
+    }
+}
+
+/* Advance a playing streaming source by its voice's position, refill its
+ * ring, and stop it at the end of its data */
+static void source_update_stream(ALsource *src) {
+    if (!src->stream || src->state != AL_PLAYING || src->hw_voice_idx < 0) {
+        return;
+    }
+    if (al_stream_update(src->stream, apu_voice_get_position((uint32_t)src->hw_voice_idx), src->looping)) {
+        apu_voice_mgr_release(src);
+        al_stream_finish(src->stream);
+        src->state = AL_STOPPED;
+    }
 }
 
 void al_source_update_frame(void) {
+    ensure_subsystem_initialized();
+    for (size_t i = 0; i < AL_MAX_SOURCES; i++) {
+        if (g_sources[i].in_use) {
+            source_update_stream(&g_sources[i]);
+        }
+    }
     apu_voice_mgr_update(al_source_get_apu_base());
 }
 
@@ -533,7 +595,8 @@ AL_API void AL_APIENTRY alDeleteSources(ALsizei n, const ALuint *sources) {
                 al_buffer_release(src->buffer);
                 src->buffer = NULL;
             }
-            source_reset_defaults(src, (ALuint)(i + 1));
+            source_drop_stream(src);
+            source_reset_defaults(src, id);
         }
     }
 }
@@ -757,11 +820,14 @@ AL_API void AL_APIENTRY alSourcei(ALuint source, ALenum param, ALint value) {
                 alSetError(AL_INVALID_OPERATION);
                 return;
             }
+            /* Replaces the queue of a streaming source (releasing its buffers) */
             if (value == 0) {
                 if (src->buffer != NULL) {
                     al_buffer_release(src->buffer);
                     src->buffer = NULL;
                 }
+                source_drop_stream(src);
+                src->source_type = AL_UNDETERMINED;
             } else {
                 ALbuffer *buf = al_buffer_get((ALuint)value);
                 if (!buf) {
@@ -771,8 +837,10 @@ AL_API void AL_APIENTRY alSourcei(ALuint source, ALenum param, ALint value) {
                 if (src->buffer != NULL) {
                     al_buffer_release(src->buffer);
                 }
+                source_drop_stream(src);
                 src->buffer = buf;
                 al_buffer_retain(buf);
+                src->source_type = AL_STATIC;
             }
             break;
 
@@ -785,7 +853,7 @@ AL_API void AL_APIENTRY alSourcei(ALuint source, ALenum param, ALint value) {
             {
                 NVAPU_VOICE_CONTEXT_3D *ctx = source_live_context(src);
                 if (ctx) {
-                    ctx->loop_mode = src->looping ? NVAPU_VOICE_LOOP_ON : NVAPU_VOICE_LOOP_OFF;
+                    ctx->loop_mode = al_source_voice_loops(src) ? NVAPU_VOICE_LOOP_ON : NVAPU_VOICE_LOOP_OFF;
                 }
             }
             break;
@@ -979,7 +1047,9 @@ AL_API void AL_APIENTRY alGetSourcei(ALuint source, ALenum param, ALint *value) 
     switch (param) {
         case AL_SOURCE_STATE:
             if (src->state == AL_PLAYING) {
-                if (src->hw_voice_idx >= 0) {
+                if (src->stream) {
+                    source_update_stream(src);   /* a stream ends with its data, not with its voice */
+                } else if (src->hw_voice_idx >= 0) {
                     int active = apu_voice_is_active(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx);
                     if (!active && !src->looping) {
                         apu_voice_mgr_release(src);
@@ -991,7 +1061,11 @@ AL_API void AL_APIENTRY alGetSourcei(ALuint source, ALenum param, ALint *value) 
             break;
 
         case AL_BUFFER:
-            *value = (src->buffer != NULL) ? (ALint)src->buffer->id : 0;
+            if (src->stream) {
+                *value = (ALint)al_stream_current_buffer(src->stream);
+            } else {
+                *value = (src->buffer != NULL) ? (ALint)src->buffer->id : 0;
+            }
             break;
 
         case AL_LOOPING:
@@ -1003,11 +1077,18 @@ AL_API void AL_APIENTRY alGetSourcei(ALuint source, ALenum param, ALint *value) 
             break;
 
         case AL_BUFFERS_QUEUED:
-            *value = (src->buffer != NULL) ? 1 : 0;
+            if (src->stream) {
+                *value = (ALint)al_stream_queued(src->stream);
+            } else {
+                *value = (src->buffer != NULL) ? 1 : 0;
+            }
             break;
 
         case AL_BUFFERS_PROCESSED:
-            if (src->buffer != NULL && !src->looping && src->state == AL_STOPPED) {
+            if (src->stream) {
+                source_update_stream(src);   /* current to the voice's position */
+                *value = (ALint)al_stream_processed(src->stream);
+            } else if (src->buffer != NULL && !src->looping && src->state == AL_STOPPED) {
                 *value = 1;
             } else {
                 *value = 0;
@@ -1015,11 +1096,7 @@ AL_API void AL_APIENTRY alGetSourcei(ALuint source, ALenum param, ALint *value) 
             break;
 
         case AL_SOURCE_TYPE:
-            if (src->buffer == NULL) {
-                *value = AL_UNDETERMINED;
-            } else {
-                *value = AL_STATIC;
-            }
+            *value = src->source_type;
             break;
 
         default:
@@ -1099,8 +1176,16 @@ AL_API void AL_APIENTRY alSourcePlay(ALuint source) {
         return;
     }
 
-    /* If no buffer is attached, transition to AL_STOPPED without error */
-    if (src->buffer == NULL) {
+    /* If no buffer is attached (or the queue holds no data), transition to
+     * AL_STOPPED without error */
+    if (al_source_play_buffer(src) == NULL ||
+        (src->stream && src->state != AL_PAUSED && al_stream_total_frames(src->stream) == 0)) {
+        if (src->state == AL_PLAYING || src->state == AL_PAUSED) {
+            apu_voice_mgr_release(src);
+        }
+        if (src->stream) {
+            al_stream_finish(src->stream);
+        }
         src->state = AL_STOPPED;
         return;
     }
@@ -1111,6 +1196,12 @@ AL_API void AL_APIENTRY alSourcePlay(ALuint source) {
         apu_voice_pause(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx, 0);
         src->state = AL_PLAYING;
         return;
+    }
+
+    /* A streaming source plays its queue from the start, unless it resumes
+     * from a pause (it has no voice then: preempted while paused) */
+    if (src->stream && src->state != AL_PAUSED) {
+        al_stream_rewind(src->stream);
     }
 
     /* OpenAL 1.1: Play on a playing source restarts it from the beginning.
@@ -1166,6 +1257,9 @@ AL_API void AL_APIENTRY alSourceStop(ALuint source) {
         apu_voice_mgr_release(src);
         src->state = AL_STOPPED;
     }
+    if (src->stream) {
+        al_stream_finish(src->stream);   /* OpenAL 1.1: a stopped source has processed its whole queue */
+    }
     src->saved_prd_index = 0;
     src->saved_sample_pos_frac = 0;
 }
@@ -1182,6 +1276,9 @@ AL_API void AL_APIENTRY alSourceRewind(ALuint source) {
     if (src->state == AL_PLAYING || src->state == AL_PAUSED || src->state == AL_STOPPED) {
         apu_voice_mgr_release(src);
         src->state = AL_INITIAL;
+    }
+    if (src->stream) {
+        al_stream_rewind(src->stream);   /* nothing processed */
     }
     src->saved_prd_index = 0;
     src->saved_sample_pos_frac = 0;
@@ -1234,7 +1331,7 @@ AL_API void AL_APIENTRY alSourceRewindv(ALsizei n, const ALuint *sources) {
 
 /*
  * ============================================================================
- * OpenAL 1.1 Source Queueing APIs (Stubs for Static 2D Phase)
+ * OpenAL 1.1 Source Queueing APIs (streaming sources, al_stream.c)
  * ============================================================================
  */
 
@@ -1256,7 +1353,27 @@ AL_API void AL_APIENTRY alSourceQueueBuffers(ALuint source, ALsizei nb, const AL
         return;
     }
 
-    alSetError(AL_INVALID_OPERATION);
+    /* A source with a static buffer cannot take a queue (AL_BUFFER 0 first) */
+    if (src->source_type == AL_STATIC) {
+        alSetError(AL_INVALID_OPERATION);
+        return;
+    }
+    if (!src->stream) {
+        src->stream = al_stream_create();
+        if (!src->stream) {
+            alSetError(AL_OUT_OF_MEMORY);
+            return;
+        }
+    }
+    ALenum err = al_stream_queue(src->stream, nb, buffers);
+    if (err != AL_NO_ERROR) {
+        if (al_stream_queued(src->stream) == 0) {
+            source_drop_stream(src);
+        }
+        alSetError(err);
+        return;
+    }
+    src->source_type = AL_STREAMING;
 }
 
 AL_API void AL_APIENTRY alSourceUnqueueBuffers(ALuint source, ALsizei nb, ALuint *buffers) {
@@ -1277,7 +1394,15 @@ AL_API void AL_APIENTRY alSourceUnqueueBuffers(ALuint source, ALsizei nb, ALuint
         return;
     }
 
-    alSetError(AL_INVALID_OPERATION);
+    if (!src->stream) {
+        alSetError(AL_INVALID_VALUE);   /* nothing queued, so nothing processed */
+        return;
+    }
+    source_update_stream(src);
+    ALenum err = al_stream_unqueue(src->stream, nb, buffers);
+    if (err != AL_NO_ERROR) {
+        alSetError(err);
+    }
 }
 
 /*
