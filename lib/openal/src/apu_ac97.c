@@ -55,8 +55,10 @@ int apu_ac97_start(uintptr_t bar0) {
     }
     memset(&s_stats, 0, sizeof(s_stats));
     XAudioInit(16, 2, NULL, NULL);
-    /* A little silence first so the first pump does not find the DMA halted */
-    for (s_next = 0; s_next < 2u; s_next++) {
+    /* Silence first: this is the lead the GP output keeps over the codec, and
+     * it must outlast the longest gap between two pumps (a 60 Hz frame is
+     * 16.7 ms); with too little, every pump found the queue nearly empty */
+    for (s_next = 0; s_next < APU_AC97_PRIME; s_next++) {
         XAudioProvideSamples((unsigned char *)s_slot[s_next], (unsigned short)CHUNK_BYTES, 0);
     }
     s_fill = 0;
@@ -90,10 +92,10 @@ void apu_ac97_pump(uintptr_t bar0) {
         s_fill = 0;
         s_stats.chunks++;
     }
-    /* The GP is not delivering (stalled, or the app called too rarely): top
-     * the queue up with the partial buffer padded with silence, rather than
-     * let the codec run dry and replay old buffers */
-    if (((pb[AC97_PO_LVI] - pb[AC97_PO_CIV]) & 31u) < 2u) {
+    /* The GP is not delivering (stalled, or the app called too rarely) and the
+     * codec is on its last buffer: top the queue up with the partial buffer
+     * padded with silence, rather than let it run dry and replay old buffers */
+    if (((pb[AC97_PO_LVI] - pb[AC97_PO_CIV]) & 31u) == 0u) {
         int16_t *dst = s_slot[s_next % SLOTS];
         memset(dst + 2u * s_fill, 0, (APU_AC97_CHUNK_FRAMES - s_fill) * 4u);
         XAudioProvideSamples((unsigned char *)dst, (unsigned short)CHUNK_BYTES, 0);

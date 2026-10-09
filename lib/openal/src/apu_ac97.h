@@ -21,7 +21,8 @@ extern "C" {
 #endif
 
 #define APU_AC97_CHUNK_FRAMES 512u   /* 10.7 ms per AC97 buffer */
-#define APU_AC97_AHEAD        4u     /* buffers queued ahead of the one playing (~43 ms) */
+#define APU_AC97_PRIME        4u     /* silent buffers queued at start: the GP-to-codec lead (~43 ms) */
+#define APU_AC97_AHEAD        8u     /* most buffers queued ahead of the one playing (~85 ms) */
 
 typedef struct {
     uint32_t chunks;        /* buffers handed to the AC97 */

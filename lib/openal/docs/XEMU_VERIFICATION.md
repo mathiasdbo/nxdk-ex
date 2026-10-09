@@ -1378,6 +1378,35 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
     (102 268 GP frames, about 68 s) with no freeze. It played the loop, distance and pitch sweeps, orbit,
     three-voice chord and one-shot pings, with 0 AC97 underruns and 4 padded buffers (start-up). HRTF is still
     unavailable there (it needs front-end methods).
+* **`samples/openal_showcase` on the APU (branch `feat/showcase-apu-backend`, resolved on hardware):**
+  * **Probe round 18: the VP SGE table works only up to entry 2047.** The tone mapped at entries 0 to 1047 came
+    out clean (peak 8000, about 87 zero crossings per 100 ms, 0 sample-to-sample glitches). Mapped from entry
+    2047 upward, the VP stopped all frame processing for good, and the GP counted no more frames until the
+    console restarted. The dashboard leaves `0x2018 = 0x7FF` (next to `0x2010 = 0x800` and `0x2014 = 0x400`);
+    writing `0xFFF` does not lift the limit. `APU_VP_SGE_ENTRIES` is now 2048, an 8 MiB linear space.
+  * **Rounds 19-21: routing and the right channel.** Each VP output reaches its own mixbin. The GP output DMA
+    needs a channel stride: with descriptor control bits 23:14 (`dsp_step`) at 0, a console reads mixbin 0 for
+    every channel of an interleaved transfer, so the right speaker was silent. `dsp_step = 32` (one bin) fixes
+    it (`apu_gp.c`); xemu ignores the field. Interleaving in a DSP program instead did not work on hardware.
+    The helicopter's noise came from the AC97 feed (now primed deeper, padded with silence only when empty).
+  * **Rounds 22-27 and `samples/apu_vp_stress`: the polyphony freeze.** Under churn (3 one-shot starts per
+    16 ms, the oldest stopped beyond 40) frame processing stopped for good, always at the same point of a given
+    start sequence, and nothing short of a reboot (not `apu_vp_deinit`/`apu_vp_init`, not any `FECTL`, `ISTS`,
+    `FETFORCE1` or `SECTL` write) brought it back. Ruled out one by one: `FETFORCE1`, buffer length, page offset
+    and cache type, live target updates, the AC97 feed, VP write-back of driver fields, middle-of-list unlinks
+    (the freeze happened identically with the end scan off), a guard page behind each buffer, `fe_probe()`,
+    and `FEMEMADDR`.
+  * **Cause: handles above 127.** With `fe_probe()` skipped, the front end showed the message the probe's stuck
+    method had hidden: `FECTL` bit 15, `FEDECMETH = 0x8000` (`SE2FE_IDLE_VOICE`), `FEDECPARAM = 129`, the
+    newest list head, whose record said ACTIVE. The VP calls every handle above 127 idle the first time it walks
+    it and halts. Driver churn on handles 64-127 ran clean (708 starts in 4 s), while round 27's register-level
+    replay, run in the same binary, froze on handle 129 just like the driver (its earlier standalone "never
+    froze" result was misleading). The driver now caps hardware voices at `APU_VP_HW_HANDLES` (128):
+    `apu_vp_alloc_handle()` hands out 64-127 and `apu_vp_voice_start()` refuses higher handles. Verified on the
+    console: 40 and 60 concurrent one-shots for 8 s each (1413 starts, no refusals), `samples/openal_vp` for
+    90 s+ (4413 starts, 0 underruns) and the showcase's polyphony mode.
+  * **Handles 0-63 as plain voices** (no HRTF target) neither froze nor played: their `CBO` never advanced.
+    They need the HRTF stage, so a console has 64 voices.
 * Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
   from a spherical-head model (Brown-Duda head-shadow shelf per ear as a 31-tap int8 FIR, Woodworth ITD in
   s6.9; 32 azimuths x elevations -30/0/30/60; no measured data, no pinna cues). `apu_vp_init()` uploads it with
@@ -1394,7 +1423,7 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
 2. **Encodings:** signed log2 pitch, 12-bit attenuation (0 = unity, 0xFFF = mute), eight-output routing, the
    `SAMPLES_PER_BLOCK` rule, a global SGE page allocator, unsigned 8-bit handling.
 3. **Voice manager:** lists, idle-trap service, notifier-based completion, `CBO` save/restore after VOICE_ON,
-   handles 64-255 for non-HRTF voices.
+   handles 64-255 for non-HRTF voices on xemu, 64-127 on a console (8.1b).
 4. **HRTF:** generate 31-tap int8 FIRs and s6.9 ITD, load the 128-entry table, latch with `SET_VOICE_TAR_HRTF`.
 5. **GP/EP firmware (routes B and C):** assemble and validate against xemu's opcode table, including that
    every instruction's template has an emulation function (4.9); frame contract of 4.9.

@@ -291,7 +291,32 @@ int main(void) {
     set_voice_dw(77, MCPX_VOICE_PAR_OFFSET, 10003);                 /* into the silence */
     assert(!apu_vp_voice_active(77));
     apu_vp_service(base);
-    assert(reg(MCPX_APU_TVL2D) == 5 && voice_dw(77, MCPX_VOICE_PAR_STATE) == 0);
+    assert(reg(MCPX_APU_TVL2D) == 5 && !apu_vp_voice_active(77));
+    assert(voice_dw(77, MCPX_VOICE_PAR_STATE) == MCPX_PAR_STATE_ACTIVE_VOICE);   /* record not touched mid-frame */
+    /* Handle allocation: 77 just left its list, so it is quarantined until XGSCNT passes a frame */
+    {
+        uint32_t h, seen77 = 0, k;
+        set_reg(MCPX_APU_XGSCNT, 1000);
+        for (k = 0; k < 400u; k++) {
+            h = apu_vp_alloc_handle(base);
+            assert(h >= 64u && h < APU_VP_HW_HANDLES && h != 5u);   /* real console: no handle above 127 */
+            if (h == 77u) seen77++;
+        }
+        /* 77 left its list at XGSCNT 0, so 1000 is past the quarantine */
+        assert(seen77 > 0);
+        apu_vp_voice_off(base, 5);                                   /* retired at XGSCNT 1000 */
+        set_reg(MCPX_APU_XGSCNT, 1010);
+        for (k = 0; k < 400u; k++) assert(apu_vp_alloc_handle(base) != 5u);   /* 5 is not a plain handle anyway */
+        assert(apu_vp_voice_start(base, 90, &p) == 0);
+        assert(apu_vp_voice_start(base, 129, &p) != 0);              /* the VP would call it idle and stop */
+        apu_vp_voice_off(base, 90);                                  /* retired at 1010 */
+        for (k = 0; k < 400u; k++) assert(apu_vp_alloc_handle(base) != 90u);
+        set_reg(MCPX_APU_XGSCNT, 1010 + 64);
+        for (k = 0, seen77 = 0; k < 400u; k++) if (apu_vp_alloc_handle(base) == 90u) seen77++;
+        assert(seen77 > 0);
+        set_reg(MCPX_APU_XGSCNT, 0);
+        set_reg(MCPX_APU_TVL2D, 0xFFFF);
+    }
     p.loop = true;                                                   /* loops keep their real end */
     assert(apu_vp_voice_start(base, 78, &p) == 0);
     assert(voice_dw(78, MCPX_VOICE_CUR_PSH_SAMPLE) == 0 && voice_dw(78, MCPX_VOICE_PAR_NEXT) == 9999u);

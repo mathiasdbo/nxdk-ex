@@ -78,7 +78,7 @@ int main(void) {
     set_reg(MCPX_APU_GP_XMEM + 0x40u, 0);
     /* Descriptor at X:0: EOL, interleave|to-memory|FIFO0|16-bit, 32x2, X:$1400 */
     assert(reg(MCPX_APU_GP_XMEM + 0) == 0x4000u);
-    assert(reg(MCPX_APU_GP_XMEM + 4) == (1u | 2u | (1u << 10)));
+    assert(reg(MCPX_APU_GP_XMEM + 4) == (1u | 2u | (1u << 10) | (32u << 14)));   /* channel stride: one bin */
     assert(reg(MCPX_APU_GP_XMEM + 8) == ((32u << 4) | 1u));
     assert(reg(MCPX_APU_GP_XMEM + 12) == 0x1400u);
     assert(reg(MCPX_APU_SECTL) == MCPX_APU_SECTL_RUN);                          /* frames started after the GP */
