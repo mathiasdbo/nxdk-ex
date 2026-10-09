@@ -1,5 +1,5 @@
 /*
- * MCPX APU register probe for real hardware (round 17, batched; rounds 1-2 notes below).
+ * MCPX APU register probe for real hardware (round 27, batched; rounds 1-2 notes below).
  *
  * Round 1 (E:\apu_probe.txt from a console) showed:
  *   - method writes land in the front end's PIO queue (BAR0 0x1400-0x14FF,
@@ -14,7 +14,7 @@
  * Round 2 keeps those bits. For each SECTL/FECTL variant it checks whether
  * the queued methods drain and a new method is decoded; the first variant that
  * works is used for a full voice start (CBO, ACTIVE, list link). The log goes
- * to E:\apu_probe17.txt and the screen.
+ * to E:\apu_probe27.txt and the screen.
  */
 #include <hal/debug.h>
 #include <hal/video.h>
@@ -65,13 +65,13 @@ static void save_log(void) {
     if (!nxIsDriveMounted('E')) {
         nxMountDrive('E', "\\Device\\Harddisk0\\Partition1\\");
     }
-    f = fopen("E:\\apu_probe17.txt", "wb");
+    f = fopen("E:\\apu_probe27.txt", "wb");
     if (f) {
         fwrite(s_log, 1, s_log_len, f);
         fclose(f);
-        debugPrint("[log saved to E:\\apu_probe17.txt]\n");
+        debugPrint("[log saved to E:\\apu_probe27.txt]\n");
     } else {
-        debugPrint("[could not write E:\\apu_probe17.txt]\n");
+        debugPrint("[could not write E:\\apu_probe27.txt]\n");
     }
 }
 
@@ -658,7 +658,7 @@ static const uint32_t s_gp_out[14] = {
     0x08F494u, 0x000000u,   /* P:6  movep #0,x:$FFFFD4      DMA NEXT_BLOCK = X:0 */
     0x08F496u, 0x000001u,   /* P:8  movep #1,x:$FFFFD6      DMA CONTROL = start */
     0x000008u,              /* P:A  inc a */
-    0x0A7088u, 0x000010u,   /* P:B  move a0,x:(r0+$10)  (r0 = 0 after reset) */
+    0x501000u,              /* P:B  move a0,x:$10 */
     0x0C0000u,              /* P:D  jmp $0 */
 };
 
@@ -771,13 +771,154 @@ static void analyse_capture(void) {
     logf_("\n");
 }
 
+
+/* ---- round 27: exact replay of the apu_vp_stress D1 sequence that froze the driver ---- */
+
+#define PING_FRAMES  12000u
+#define TAIL_FRAMES  128u
+#define PING_OFF     0x20u            /* the ping starts 0x20 into its first page, as in the driver run */
+
+static uint32_t r_rng = 0x1234567u;
+static uint32_t r_rnd(void) { r_rng = r_rng * 1664525u + 1013904223u; return r_rng >> 8; }
+
+/* the driver's bookkeeping, reimplemented */
+static uint8_t r_listed[256];
+static uint32_t r_retired_at[256];
+static uint8_t r_retired[256];
+static uint32_t r_alloc_next;
+static uint32_t r_q[256], r_qh, r_qn;
+static uint32_t r_ops;
+static bool r_check_end = true;      /* scan for ended one-shots after every stop, as apu_vp_service() does */
+static bool r_ended_by_age;          /* variant: only unlink ended voices from the tail */
+
+static uint32_t r_alloc(void) {
+    uint32_t now = rd(MCPX_APU_XGSCNT), k, h;
+    for (k = 0; k < 192u; k++) {
+        h = 64u + (r_alloc_next + k) % 192u;
+        if (r_listed[h]) continue;
+        if (r_retired[h] && now - r_retired_at[h] < 64u) continue;
+        r_alloc_next = (h - 64u + 1u) % 192u;
+        return h;
+    }
+    return 0xFFFFu;
+}
+
+static void r_unlink(uint32_t h) {
+    uint32_t next = vrec(h)[0x7C / 4] & 0xFFFFu, cur, guard = 0;
+    if (!r_listed[h]) return;
+    r_listed[h] = 0;
+    r_retired_at[h] = rd(MCPX_APU_XGSCNT);
+    r_retired[h] = 1;
+    cur = rd(MCPX_APU_TVL2D) & 0xFFFFu;
+    if (cur == h) {
+        wr(MCPX_APU_TVL2D, next);
+        return;
+    }
+    while (cur != 0xFFFFu && cur < 256u && guard++ < 256u) {
+        volatile uint32_t *link = &vrec(cur)[0x7C / 4];
+        if ((*link & 0xFFFFu) == h) {
+            *link = (*link & 0xFFFF0000u) | next;
+            return;
+        }
+        cur = *link & 0xFFFFu;
+    }
+}
+
+/* apu_vp_service(): unlink listed voices whose CBO passed the data, in handle order */
+static void r_service(void) {
+    uint32_t h;
+    for (h = 0; h < 256u; h++) {
+        if (r_listed[h] && (vrec(h)[0x58 / 4] & 0xFFFFFFu) >= PING_FRAMES) {
+            r_unlink(h);
+        }
+    }
+}
+
+/* apu_vp_voice_start() for the ping, with the driver's packing */
+static void r_start(uint32_t h, int16_t pitch, uint16_t v0, uint16_t v1) {
+    volatile uint32_t *r = vrec(h);
+    uint32_t i;
+    r[0x54 / 4] = 0;
+    for (i = 0; i < 32u; i++) r[i] = 0;
+    r[0x00 / 4] = 0u | (1u << 5) | (0u << 10) | (1u << 16) | (0u << 21) | (1u << 26);   /* bins i & 1 */
+    r[0x04 / 4] = (1u << 28) | (1u << 30) | (1u << 25) | (0u | (1u << 5));               /* S16 B16 loop, out6/7 bins */
+    r[0x1C / 4] = 0xFFFFu;
+    r[0x20 / 4] = PING_OFF;                                                              /* SGE entry 0 */
+    r[0x24 / 4] = PING_FRAMES;
+    r[0x58 / 4] = 0;
+    r[0x5C / 4] = PING_FRAMES - 1u + TAIL_FRAMES;
+    r[0x60 / 4] = ((uint32_t)v0 << 4) | ((uint32_t)v1 << 20) | 0xFu | (0xFu << 16);
+    r[0x64 / 4] = 0xFFFFFFFFu;
+    r[0x68 / 4] = 0xFFFFFFFFu;
+    r[0x7C / 4] = ((uint32_t)(uint16_t)pitch << 16) | 0xFFFFu;
+    r[0x54 / 4] = 1u << 21;
+    {   /* link at the 2D head */
+        uint32_t head = rd(MCPX_APU_TVL2D) & 0xFFFFu;
+        r[0x7C / 4] = (r[0x7C / 4] & 0xFFFF0000u) | head;
+        wr(MCPX_APU_TVL2D, h);
+    }
+    r_listed[h] = 1;
+}
+
+static void r_reset(void) {
+    uint32_t h;
+    wr(MCPX_APU_TVL2D, 0xFFFFu);
+    for (h = 0; h < 256u; h++) r_listed[h] = 0;
+    r_qh = r_qn = 0;
+    Sleep(5);
+}
+
+/* D1: 3 starts per 16 ms tick, stop the oldest beyond 40 (each stop runs the service) */
+static bool replay(const char *tag, uint32_t seed, uint32_t ms) {
+    uint32_t t0 = GetTickCount(), ticks = 0, starts = 0, g_last = gp_frames(), x_last = rd(MCPX_APU_XGSCNT);
+    r_rng = seed;
+    r_reset();
+    while (GetTickCount() - t0 < ms) {
+        uint32_t k;
+        for (k = 0; k < 3u; k++) {
+            uint32_t h = r_alloc();
+            int16_t pitch;
+            uint16_t v0, v1;
+            if (h == 0xFFFFu) break;
+            pitch = (int16_t)((int32_t)(r_rnd() % 8192u) - 4096);
+            v0 = (uint16_t)(0x600u + r_rnd() % 0x300u);
+            v1 = (uint16_t)(0x600u + r_rnd() % 0x300u);
+            r_start(h, pitch, v0, v1);
+            r_q[(r_qh + r_qn) % 256u] = h;
+            r_qn++;
+            starts++;
+        }
+        while (r_qn > 40u) {
+            uint32_t h = r_q[r_qh];
+            r_qh = (r_qh + 1u) % 256u;
+            r_qn--;
+            r_unlink(h);
+            if (r_check_end) r_service();
+        }
+        Sleep(16);
+        ticks++;
+        if (gp_frames() != g_last) {
+            g_last = gp_frames();
+            x_last = rd(MCPX_APU_XGSCNT);
+        } else if (rd(MCPX_APU_XGSCNT) - x_last > 512u) {
+            logf_("  %-46s STALLED after %lu ticks, %lu starts\n", tag, ticks, starts);
+            save_log();
+            return false;
+        }
+    }
+    logf_("  %-46s ok: %lu ticks, %lu starts\n", tag, ticks, starts);
+    r_reset();
+    save_log();
+    return true;
+}
+
 int main(void) {
-    uint32_t pci_id = 0, bar0 = 0, i, t0, c0, f0;
-    uint32_t sectl0, fectl0, base;
+    uint32_t pci_id = 0, bar0 = 0, i;
+    uint32_t sectl0;
     bool gp_ok;
 
     XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
-    logf_("MCPX APU probe, round 17 (VP voice -> GP DMA -> FIFO -> AC97, WAV capture)\n");
+    logf_("MCPX APU probe, round 27 (exact replay of the driver sequence that froze)\n");
 
     HalReadWritePCISpace(MCPX_APU_PCI_BUS, MCPX_APU_PCI_SLOT, 0x00, &pci_id, 4, FALSE);
     HalReadWritePCISpace(MCPX_APU_PCI_BUS, MCPX_APU_PCI_SLOT, 0x10, &bar0, 4, FALSE);
@@ -787,126 +928,73 @@ int main(void) {
     }
     s_bar0 = (volatile uint8_t *)s_bar0_phys;
     sectl0 = rd(MCPX_APU_SECTL);
-    fectl0 = rd(MCPX_APU_FECTL);
-    base = fectl0 & ~0x1FE0u;
 
     s_magic = (uint32_t *)alloc_phys(0x4000u, &s_magic_phys);
     s_voices = alloc_phys(256u * 0x80u, &s_voices_phys);
-    s_sge = alloc_phys(0x4000u, &s_sge_phys);
+    s_sge = alloc_phys(2048u * 8u, &s_sge_phys);
     s_ssl = alloc_phys(0x4000u, &s_ssl_phys);
     s_notify = alloc_phys(16u * (2u + 4u * 256u), &s_notify_phys);
-    s_pcm = alloc_phys(48000u * 2u + 4096u, &s_pcm_phys);
+    s_pcm = alloc_phys(8u * 4096u, &s_pcm_phys);
     s_ring = alloc_phys(RING_BYTES, &s_ring_phys);
     s_ring_sge = (uint32_t *)alloc_phys(0x4000u, &s_ring_sge_phys);
-    for (i = 0; i < OUT_SLOTS; i++) {
-        s_out[i] = (int16_t *)MmAllocateContiguousMemoryEx(CHUNK_FR * 4u, 0, 0x03FFAFFF, 0,
-                                                           PAGE_READWRITE | PAGE_WRITECOMBINE);
-    }
-    if (!s_magic || !s_voices || !s_sge || !s_ssl || !s_notify || !s_pcm || !s_ring || !s_ring_sge ||
-        !s_out[OUT_SLOTS - 1u]) {
+    if (!s_magic || !s_voices || !s_sge || !s_ssl || !s_notify || !s_pcm || !s_ring || !s_ring_sge) {
         logf_("allocation failed\n");
         save_log();
         for (;;) Sleep(1000);
     }
     wr(0x1324u, s_magic_phys);
-    for (i = 0; i < 48000u; i++) {
-        s_pcm[i] = (int16_t)(8000.0f * sinf(2.0f * 3.14159265f * 440.0f * (float)i / 48000.0f));
+    {
+        int16_t *ping = (int16_t *)((uint8_t *)s_pcm + PING_OFF);
+        for (i = 0; i < PING_FRAMES; i++) {
+            float t = (float)i / 48000.0f;
+            ping[i] = (int16_t)(12000.0f * expf(-t * 18.0f) * sinf(2.0f * 3.14159265f * 880.0f * t));
+        }
     }
-    for (i = 0; i < 25u; i++) {
-        s_sge[2u * i] = s_pcm_phys + i * 4096u;
-    }
-    for (i = 0; i < RING_BYTES / 4096u; i++) {
-        s_ring_sge[2u * i] = s_ring_phys + i * 4096u;
-    }
-    wr(MCPX_APU_SECTL, sectl0 & ~0x18u);
-    wr(MCPX_APU_FECTL, base | 0x80u);
+    for (i = 0; i < 7u; i++) s_sge[2u * i] = s_pcm_phys + i * 4096u;   /* only the pages the driver maps */
+    for (i = 0; i < RING_BYTES / 4096u; i++) s_ring_sge[2u * i] = s_ring_phys + i * 4096u;
+
+    /* the library's bring-up */
+    wr(MCPX_APU_SECTL, 0);
+    wr(MCPX_APU_FECTL, 0);
+    wr(MCPX_APU_IEN, 0);
+    wr(MCPX_APU_ISTS, 0xFFFFFFFFu);
     wr(MCPX_APU_VPVADDR, s_voices_phys);
     wr(MCPX_APU_VPSGEADDR, s_sge_phys);
     wr(MCPX_APU_VPSSLADDR, s_ssl_phys);
-    wr(MCPX_APU_FENADDR, s_notify_phys);
     wr(MCPX_APU_TVL2D, 0xFFFFu);
     wr(MCPX_APU_TVL3D, 0xFFFFu);
     wr(MCPX_APU_TVLMP, 0xFFFFu);
-
-    logf_("-- 1. GP output program, FIFO 0 ring of %lu KiB, EP held in reset\n", RING_BYTES / 1024u);
+    wr(MCPX_APU_FETFORCE1, 0);
+    wr(MCPX_APU_FENADDR, s_notify_phys);
     wr(MCPX_APU_EPRST, 0u);
     wr(MCPX_APU_GPFADDR, s_ring_sge_phys);
     wr(MCPX_APU_GPFMAXSGE, RING_BYTES / 4096u - 1u);
     wr(MCPX_APU_GPOFBASE0, 0u);
     wr(MCPX_APU_GPOFEND0, RING_BYTES);
     wr(MCPX_APU_GPOFCUR0, 0u);
-    logf_("  GPFADDR %08lx GPFMAXSGE %lu GPOF0 base/end/cur %06lx/%06lx/%06lx\n", rd(MCPX_APU_GPFADDR),
-          rd(MCPX_APU_GPFMAXSGE), rd(MCPX_APU_GPOFBASE0), rd(MCPX_APU_GPOFEND0), rd(MCPX_APU_GPOFCUR0));
     gp_ok = load_prog(0, s_gp_out, 14u);
     if (!gp_ok) {
         logf_("-- GP not running our code; stopping here\n");
         goto out;
     }
-    for (i = 0; i < 7u; i++) wr(MCPX_APU_GP_XMEM + 4u * i, s_gp_desc[i]);   /* GP waits for a frame */
-    logf_("  descriptor X:0..3 reads %06lx %06lx %06lx %06lx\n", rd(MCPX_APU_GP_XMEM) & 0xFFFFFFu,
-          rd(MCPX_APU_GP_XMEM + 4u) & 0xFFFFFFu, rd(MCPX_APU_GP_XMEM + 8u) & 0xFFFFFFu,
-          rd(MCPX_APU_GP_XMEM + 12u) & 0xFFFFFFu);
-
-    logf_("-- 2. frames on, no voice: does the FIFO pointer move?\n");
-    wr(MCPX_APU_SECTL, (sectl0 & ~0x18u) | 0x08u);
-    c0 = ring_cur();
-    f0 = gp_frames();
-    Sleep(100);
-    logf_("  100 ms: GP frames %lu, GPOFCUR0 %06lx -> %06lx (expect +%lu bytes)\n", (gp_frames() - f0) & 0xFFFFFFu,
-          c0, ring_cur(), 4800u * 4u);
-
-    logf_("-- 3. voice %u on the 2D list (record written directly)\n", VOICE);
-    build_record(VOICE, 1u << 21);
-    wr(MCPX_APU_TVL2D, VOICE);
+    for (i = 0; i < 7u; i++) wr(MCPX_APU_GP_XMEM + 4u * i, s_gp_desc[i]);
+    wr(MCPX_APU_SECTL, 0x0Fu);
     Sleep(20);
-    logf_("  mixbin 0 X:$1400.. %06lx %06lx %06lx %06lx  bin 1 X:$1420.. %06lx %06lx\n",
-          rd(MCPX_APU_GP_XMEM + 0x5000u) & 0xFFFFFFu, rd(MCPX_APU_GP_XMEM + 0x5004u) & 0xFFFFFFu,
-          rd(MCPX_APU_GP_XMEM + 0x5008u) & 0xFFFFFFu, rd(MCPX_APU_GP_XMEM + 0x500Cu) & 0xFFFFFFu,
-          rd(MCPX_APU_GP_XMEM + 0x5080u) & 0xFFFFFFu, rd(MCPX_APU_GP_XMEM + 0x5084u) & 0xFFFFFFu);
-    {
-        const int16_t *r = (const int16_t *)s_ring;
-        uint32_t cur = ring_cur() & ~3u;
-        logf_("  ring before cur %06lx:", cur);
-        for (i = 8u; i > 0u; i--) {
-            uint32_t o = (cur + RING_BYTES - 4u * i) % RING_BYTES;
-            logf_(" %d/%d", r[o / 2u], r[o / 2u + 1u]);
-        }
-        logf_("\n");
-    }
 
-    logf_("-- 4. 4 s live forwarding to the AC97 (you should hear 440 Hz), first 2 s captured\n");
-    XAudioInit(16, 2, NULL, NULL);
-    s_out_next = 0;
-    s_fill = 0;
-    for (i = 0; i < 3u; i++) {
-        memset(s_out[i], 0, CHUNK_FR * 4u);
-        XAudioProvideSamples((unsigned char *)s_out[i], (unsigned short)(CHUNK_FR * 4u), 0);
-        s_out_next++;
-    }
-    XAudioPlay();
-    s_rd = ring_cur() & ~3u;
-    t0 = GetTickCount();
-    {
-        uint32_t total = 0;
-        while (GetTickCount() - t0 < 4000u) {
-            total += forward();
-            Sleep(2);
-        }
-        logf_("  forwarded %lu frames in 4 s (expect ~192000), resyncs %lu, AC97 underruns %lu, CBO %06lx\n",
-              total, s_resync, s_underruns, vrec(VOICE)[0x58 / 4] & 0xFFFFFFu);
-    }
-    XAudioPause();
-    analyse_capture();
-    save_wav();
+    logf_("-- replay of apu_vp_stress D1 (seed 0x1234567: the driver froze at tick 23)\n");
+    /* safest first: each variant that survives tells which ingredient is needed */
+    r_check_end = false;
+    replay("R1: same seed, never unlink ended voices:", 0x1234567u, 4000);
+    r_check_end = true;
+    replay("R2: same seed, exactly as the driver:", 0x1234567u, 4000);
+    replay("R3: other seed, as the driver:", 0x7654321u, 4000);
 
 out:
     wr(MCPX_APU_TVL2D, 0xFFFFu);
-    vrec(VOICE)[0x54 / 4] = 0u;
     wr(MCPX_APU_SECTL, sectl0 & ~0x18u);
     wr(MCPX_APU_GPRST, 0u);
     wr(MCPX_APU_EPRST, 0u);
-    wr(MCPX_APU_FECTL, fectl0);
-    logf_("done (list empty, DSPs in reset, frames off, FECTL restored)\n");
+    logf_("done (lists empty, DSPs in reset, frames off)\n");
     save_log();
     for (;;) Sleep(1000);
     return 0;

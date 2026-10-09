@@ -17,6 +17,20 @@
 #include "showcase_modes.h"
 #include "showcase_scene.h"
 #include "showcase_audio.h"
+#include "apu_ac97.h"
+#include "apu_voice.h"
+#include "apu_vp.h"
+
+/* Sources the APU is playing (VP voices of the 64 library slots) */
+static uint32_t apu_active_voices(void) {
+    uint32_t i, n = 0;
+    for (i = 0; i < 64u; i++) {
+        if (apu_vp_voice_active(apu_voice_hw_handle(i))) {
+            n++;
+        }
+    }
+    return n;
+}
 
 int main(void) {
     /* 1. Initialize UI Framebuffer & Video Mode */
@@ -44,10 +58,15 @@ int main(void) {
         return 3;
     }
 
-    /* 5. Software mix of the OpenAL sources to the AC97 output (the null
-     *    backend drives no audio hardware) */
-    bool audio_ok = (showcase_audio_init() == 0);
-    showcase_scene_set_audio_output(audio_ok && showcase_audio_active());
+    /* 5. Sound output. Built with SHOWCASE_BACKEND=apu (the default) on a real
+     *    console, alcOpenDevice() brought up the MCPX APU: the VP plays the
+     *    sources and the library forwards the GP output to the AC97. Otherwise
+     *    (null backend) the software mixer plays them. */
+    bool apu_ok = apu_voice_hw_backend();
+    bool audio_ok = !apu_ok && (showcase_audio_init() == 0);
+    showcase_scene_set_audio_output(apu_ok ? SHOWCASE_AUDIO_APU
+                                           : ((audio_ok && showcase_audio_active()) ? SHOWCASE_AUDIO_CPU
+                                                                                    : SHOWCASE_AUDIO_SILENT));
 
     showcase_input_t input;
     bool running = true;
@@ -71,10 +90,9 @@ int main(void) {
         showcase_app_update(&app, &input);
 
         /* Library frame tick: reaps finished voices, promotes waiting sources
-         * (and services the APU idle trap on the hardware backend) */
-        alXboxUpdateVoices();
-
+         * and, on the APU, feeds the AC97 from the GP output */
         QueryPerformanceCounter(&t_a);
+        alXboxUpdateVoices();
         if (audio_ok) {
             showcase_audio_update();
         }
@@ -83,6 +101,11 @@ int main(void) {
         perf.audio_ms += (1000.0f * (float)(t_b.QuadPart - t_a.QuadPart) / (float)freq.QuadPart - perf.audio_ms) * 0.1f;
         if (audio_ok) {
             showcase_audio_get_stats(&perf.voices, &perf.underruns);
+        } else if (apu_ok) {
+            apu_ac97_stats_t as;
+            apu_ac97_get_stats(&as);
+            perf.voices = apu_active_voices();
+            perf.underruns = as.underruns + as.padded;   /* both are audible gaps */
         }
 
         if (scene_ok) {

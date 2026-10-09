@@ -33,7 +33,17 @@ extern "C" {
 
 #define APU_VP_HANDLE_BASE   64u
 #define APU_VP_MAX_HANDLES   256u
-#define APU_VP_SGE_ENTRIES   4096u      /* BA is 24-bit: a 16 MiB linear space of 4 KiB pages */
+/* On a real console the VP reports every handle above 127 as idle
+ * (SE2FE_IDLE_VOICE, FEDECPARAM = handle) the first time it walks it, and
+ * frame processing stops for good: samples/apu_vp_stress froze on handle 129
+ * every run, with the driver and with raw record writes alike, and ran clean
+ * on handles 64..127. Hardware voices are handles below this limit. */
+#define APU_VP_HW_HANDLES    128u
+/* BA is 24-bit (16 MiB), but on a real console the VP stops all frame
+ * processing for good when it fetches through an SGE entry above 2047
+ * (apu_probe round 18; the dashboard leaves 0x2018 = 0x7FF): 2048 entries,
+ * an 8 MiB linear space of 4 KiB pages */
+#define APU_VP_SGE_ENTRIES   2048u
 #define APU_VP_OUTPUTS       8
 
 /* Zeroed bytes every OpenAL buffer carries after its data (al_buffer.c). On a
@@ -92,6 +102,32 @@ typedef struct {
 
 void apu_vp_get_fe_stats(apu_vp_fe_stats_t *out);
 
+/* Last list operations of the driver (freeze diagnostics). op: S start, L link
+ * (a = old head), H unlink at the head (a = new head), U unlink (a = predecessor
+ * << 16 | next), X unlink did not find the voice, E one-shot ended (a = CBO),
+ * Z the GP frame counter stopped (a = XGSCNT of its last frame; nothing is
+ * recorded after it, so the entries before Z led up to the stall). */
+typedef struct {
+    char op;
+    uint16_t h;
+    uint32_t a;
+    uint32_t t;   /* XGSCNT */
+} apu_vp_trace_t;
+
+/** Map this many extra pages behind every buffer mapped from now on (diagnostics). */
+void apu_vp_debug_set_map_guard(uint32_t pages);
+
+/* Diagnostic switches (apu_vp_debug_set_flags); NO_AC97 takes effect at the next apu_vp_init() */
+#define APU_VP_DBG_NO_AC97          1u   /* do not forward the GP FIFO to the AC97 */
+#define APU_VP_DBG_NO_FE_CHECK      2u   /* apu_vp_service() does not read FECTL */
+#define APU_VP_DBG_NO_STALL_DETECT  4u   /* apu_vp_service() does not read the GP frame counter */
+#define APU_VP_DBG_NO_END_SCAN      8u   /* apu_vp_service() leaves one-shots in their silent tail listed */
+#define APU_VP_DBG_NO_FE_PROBE     16u   /* apu_vp_init() sends no methods and assumes a real console */
+void apu_vp_debug_set_flags(uint32_t flags);
+
+/** Copy up to `max` of the most recent operations, oldest first. @return count. */
+uint32_t apu_vp_debug_trace(apu_vp_trace_t *out, uint32_t max);
+
 /**
  * Write the voice record and link the voice at the top of the 2D list. A
  * handle that is still playing is taken off its list and restarted.
@@ -110,8 +146,19 @@ void apu_vp_voice_update(uintptr_t bar0, uint32_t handle, int16_t pitch, const u
 /** Pause (true: off its list, position kept) or resume (false: back on top of the 2D list). */
 void apu_vp_voice_pause(uintptr_t bar0, uint32_t handle, bool pause);
 
-/** Stop a voice: off its list, record inactive. */
+/** Stop a voice: off its list (record inactive on xemu; left alone on hardware). */
 void apu_vp_voice_off(uintptr_t bar0, uint32_t handle);
+
+/**
+ * A plain-voice handle (64..255 on xemu, 64..127 on a real console:
+ * APU_VP_HW_HANDLES) that is not playing and has been off its
+ * list for more than one APU frame. On a real console the VP must never meet
+ * a record being rewritten (a half-written one ends the voice, which stops all
+ * frames), so a restarted source gets a fresh handle instead of reusing the
+ * one it may still be playing on.
+ * @return the handle, or 0xFFFF if none is free.
+ */
+uint32_t apu_vp_alloc_handle(uintptr_t bar0);
 
 /** Playing or paused: false once a one-shot ended or the voice was switched off. */
 bool apu_vp_voice_active(uint32_t handle);
