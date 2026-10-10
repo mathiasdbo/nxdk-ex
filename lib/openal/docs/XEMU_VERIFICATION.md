@@ -1417,6 +1417,21 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
       starvation with restarts, two 1.5 s main-thread stalls with a static looping tone, and a soak.
     * 0 AC97 underruns, 0 padded buffers. The longest gap between pump passes was 5 ms, during the stalls too.
     * The tone played through the stalls; the stream went quiet without repeating its ring.
+* **Engine features** (branch `feat/openal-engine-features`, phase B; `samples/openal_engine`, three runs in
+  one boot, one of them after `openal_stream`, all identical):
+  * **Loop points:** after the intro, the play position always stayed inside the loop section (`LBO`/`EBO`).
+  * **Offsets:** a start at 2.0 s reported 2.25 s 250 ms later and advanced in real time; each seek to 1.0 s
+    landed at once.
+  * **Pitch:** measured/expected playback rate was 0.999 at 11.025 kHz x 0.5, 1, 2, 2.55 and 4. At x0.25 it
+    was 1.088, the library's lower clamp (1/16 of 48 kHz).
+  * **Voice budget:** 80 sources by engine priority gave 64 voiced, 8 waiting, 8 stopped (no virtualization),
+    and 64 voiced after 100 random restarts.
+  * **Buffer churn:** 600 buffers of 2-90 KB created, played and deleted: all played, at most 221 of 2048
+    sample pages in use, back to 0 afterwards (mappings are reclaimed).
+  * **Output:** 0 AC97 underruns.
+  * **One unexplained run:** a run after `openal_stream` and the showcase never started frames (GP counter
+    stuck at 1 from the start). It did not reproduce. `openal_engine` now logs the APU state at start-up
+    (`E:\openal_engine_N.txt`) in case it returns.
 * Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
   from a spherical-head model (Brown-Duda head-shadow shelf per ear as a 31-tap int8 FIR, Woodworth ITD in
   s6.9; 32 azimuths x elevations -30/0/30/60; no measured data, no pinna cues). `apu_vp_init()` uploads it with
