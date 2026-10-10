@@ -1407,6 +1407,16 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
     90 s+ (4413 starts, 0 underruns) and the showcase's polyphony mode.
   * **Handles 0-63 as plain voices** (no HRTF target) neither froze nor played: their `CBO` never advanced.
     They need the HRTF stage, so a console has 64 voices.
+* **Streaming and the AC97 pump thread** (branch `feat/openal-streaming`, phase A of
+  `XASH3D_INTEGRATION_PLAN.md`):
+  * **Design:** a streaming source plays one voice looping over a 16384-frame ring. Queued buffers are copied
+    in ahead of the voice's `CBO`, so the voice never ends and its record is never rewritten while it plays.
+    The GP FIFO goes to the AC97 from a thread every 4 ms, which also silences ring data each stream has played.
+  * **`samples/openal_stream` on the console (145 s):**
+    * Six phases: 48 kHz mono16, 22.05 kHz stereo16 (distinct tones per ear), 11.025 kHz unsigned 8-bit,
+      starvation with restarts, two 1.5 s main-thread stalls with a static looping tone, and a soak.
+    * 0 AC97 underruns, 0 padded buffers. The longest gap between pump passes was 5 ms, during the stalls too.
+    * The tone played through the stalls; the stream went quiet without repeating its ring.
 * Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
   from a spherical-head model (Brown-Duda head-shadow shelf per ear as a 31-tap int8 FIR, Woodworth ITD in
   s6.9; 32 azimuths x elevations -30/0/30/60; no measured data, no pinna cues). `apu_vp_init()` uploads it with
