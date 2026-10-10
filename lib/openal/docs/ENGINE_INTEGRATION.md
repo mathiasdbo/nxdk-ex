@@ -122,5 +122,5 @@ Decode MP3/OGG on the CPU into a streaming source (3.1), or into the engine's so
 ## 5. Checking it on a console
 
 `samples/openal_engine` exercises loop points, direct gains, offsets, the pitch range, the voice budget and
-buffer churn, and logs to `E:\openal_engine.txt`. `samples/openal_stream` covers streaming and the output
+buffer churn, and logs to `E:\openal_engine_N.txt` (a new file each run). `samples/openal_stream` covers streaming and the output
 thread.
