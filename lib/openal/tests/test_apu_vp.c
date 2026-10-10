@@ -321,6 +321,47 @@ int main(void) {
     assert(apu_vp_voice_start(base, 78, &p) == 0);
     assert(voice_dw(78, MCPX_VOICE_CUR_PSH_SAMPLE) == 0 && voice_dw(78, MCPX_VOICE_PAR_NEXT) == 9999u);
     apu_vp_voice_off(base, 78);
+    /* Loop points (AL_SOFT_loop_points) and a start frame (AL_*_OFFSET) */
+    p.loop_start = 1000;
+    p.loop_end = 9000;
+    p.start_frame = 500;
+    assert(apu_vp_voice_start(base, 79, &p) == 0);
+    assert(voice_dw(79, MCPX_VOICE_CUR_PSH_SAMPLE) == 1000u && voice_dw(79, MCPX_VOICE_PAR_NEXT) == 8999u);
+    assert((voice_dw(79, MCPX_VOICE_PAR_OFFSET) & 0xFFFFFFu) == 500u);
+    apu_vp_voice_off(base, 79);
+    p.start_frame = 9500;                                            /* past the loop end: from the loop start */
+    assert(apu_vp_voice_start(base, 79, &p) == 0);
+    assert((voice_dw(79, MCPX_VOICE_PAR_OFFSET) & 0xFFFFFFu) == 1000u);
+    apu_vp_voice_off(base, 79);
+    p.loop = false;                                                  /* a one-shot keeps its silent-tail loop */
+    p.start_frame = 2000;
+    assert(apu_vp_voice_start(base, 79, &p) == 0);
+    assert(voice_dw(79, MCPX_VOICE_CUR_PSH_SAMPLE) == 10000u && voice_dw(79, MCPX_VOICE_PAR_NEXT) == 10127u);
+    assert((voice_dw(79, MCPX_VOICE_PAR_OFFSET) & 0xFFFFFFu) == 2000u);
+    apu_vp_voice_off(base, 79);
+    p.loop_start = p.loop_end = p.start_frame = 0;
+    /* The sample space is reclaimed: 300 different buffers (more than the 256
+     * mappings), each played and stopped, then nothing left mapped */
+    {
+        uint32_t i, t = 5000, phys_save = p.phys;
+        for (i = 0; i < 300u; i++) {
+            p.phys = 0x01000000u + i * 0x8000u;                       /* never touched on the host */
+            set_reg(MCPX_APU_XGSCNT, t);
+            assert(apu_vp_voice_start(base, 81, &p) == 0);
+            apu_vp_voice_off(base, 81);
+            t += 100u;                                                /* past the quarantine */
+        }
+        set_reg(MCPX_APU_XGSCNT, t);
+        assert(apu_vp_sample_pages_used(base) == 0u);
+        assert(apu_vp_voice_start(base, 82, &p) == 0);               /* a live voice keeps its pages */
+        assert(apu_vp_sample_pages_used(base) == 5u);                /* 20000 + 256 bytes from a page start */
+        apu_vp_voice_off(base, 82);
+        assert(apu_vp_sample_pages_used(base) == 5u);                /* still inside the quarantine */
+        set_reg(MCPX_APU_XGSCNT, t + 100u);
+        assert(apu_vp_sample_pages_used(base) == 0u);
+        p.phys = phys_save;
+        set_reg(MCPX_APU_XGSCNT, 0);
+    }
     p.loop = false;
     p.tail_bytes = 0;
     {

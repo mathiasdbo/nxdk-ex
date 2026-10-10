@@ -1,4 +1,5 @@
 #include "al_buffer.h"
+#include <AL/alext.h>
 #include "apu_vp.h"
 #include <string.h>
 
@@ -72,6 +73,8 @@ void al_buffer_cleanup_subsystem(void) {
             }
             s_buffers[i].in_use = false;
             s_buffers[i].ref_count = 0;
+            s_buffers[i].loop_start = 0;
+            s_buffers[i].loop_end = 0;
         }
     }
     s_subsystem_initialized = false;
@@ -158,6 +161,8 @@ AL_API void AL_APIENTRY alGenBuffers(ALsizei n, ALuint *buffers) {
             s_buffers[i].prd_table_phys = 0;
             s_buffers[i].prd_count = 0;
             s_buffers[i].ref_count = 0;
+            s_buffers[i].loop_start = 0;
+            s_buffers[i].loop_end = 0;
 
             buffers[allocated++] = s_buffers[i].id;
         }
@@ -335,6 +340,8 @@ AL_API void AL_APIENTRY alBufferData(ALuint buffer, ALenum format, const ALvoid 
     buf->size = size;
     buf->channels = channels;
     buf->bits = bits;
+    buf->loop_start = 0;                                   /* AL_SOFT_loop_points: the whole buffer */
+    buf->loop_end = size / frame_size;
 }
 
 AL_API void AL_APIENTRY alGetBufferi(ALuint buffer, ALenum param, ALint *value) {
@@ -400,6 +407,21 @@ AL_API void AL_APIENTRY alGetBufferf(ALuint buffer, ALenum param, ALfloat *value
 }
 
 AL_API void AL_APIENTRY alGetBufferiv(ALuint buffer, ALenum param, ALint *values) {
+    if (param == AL_LOOP_POINTS_SOFT) {
+        ALbuffer *buf;
+        if (!values) {
+            alSetError(AL_INVALID_VALUE);
+            return;
+        }
+        buf = al_buffer_get(buffer);
+        if (!buf) {
+            alSetError(AL_INVALID_NAME);
+            return;
+        }
+        values[0] = buf->loop_start;
+        values[1] = buf->loop_end;
+        return;
+    }
     alGetBufferi(buffer, param, values);
 }
 
@@ -463,13 +485,33 @@ AL_API void AL_APIENTRY alBuffer3i(ALuint buffer, ALenum param, ALint v1, ALint 
 }
 
 AL_API void AL_APIENTRY alBufferiv(ALuint buffer, ALenum param, const ALint *values) {
-    (void)values;
-    if (!alIsBuffer(buffer)) {
+    ALbuffer *buf = al_buffer_get(buffer);
+    if (!buf) {
         alSetError(AL_INVALID_NAME);
         return;
     }
-    (void)param;
-    alSetError(AL_INVALID_ENUM);
+    if (param != AL_LOOP_POINTS_SOFT) {
+        alSetError(AL_INVALID_ENUM);
+        return;
+    }
+    if (!values) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    /* AL_SOFT_loop_points: not while a source uses the buffer */
+    if (buf->ref_count > 0) {
+        alSetError(AL_INVALID_OPERATION);
+        return;
+    }
+    {
+        ALint frames = (buf->channels > 0 && buf->bits > 0) ? buf->size / (buf->channels * (buf->bits / 8)) : 0;
+        if (values[0] < 0 || values[0] >= values[1] || values[1] > frames) {
+            alSetError(AL_INVALID_VALUE);
+            return;
+        }
+    }
+    buf->loop_start = values[0];
+    buf->loop_end = values[1];
 }
 
 AL_API void AL_APIENTRY alGetBuffer3f(ALuint buffer, ALenum param, ALfloat *v1, ALfloat *v2, ALfloat *v3) {

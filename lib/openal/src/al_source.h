@@ -55,6 +55,12 @@ typedef struct ALsource {
     uint32_t play_seq;               /* Start order (monotonic, set by alSourcePlay); oldest loses priority ties */
     ALint source_type;               /* AL_UNDETERMINED, AL_STATIC (AL_BUFFER) or AL_STREAMING (queued buffers) */
     al_stream_t *stream;             /* queue and ring of a streaming source, NULL otherwise */
+    bool has_offset;                 /* offset_frames applies at the next voice start */
+    uint32_t offset_frames;          /* AL_*_OFFSET set while not playing, or a preempted voice's position */
+    bool direct;                     /* AL_XBOX_DIRECT_MODE: engine gains, no 3D model */
+    ALfloat direct_gain[2];          /* AL_XBOX_DIRECT_GAINS: left, right */
+    ALfloat xbox_priority;           /* AL_XBOX_PRIORITY: >= 0 engine priority, < 0 the library's */
+    ALboolean virtualize;            /* AL_XBOX_VIRTUALIZE */
 } ALsource;
 
 

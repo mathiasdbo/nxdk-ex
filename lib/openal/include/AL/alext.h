@@ -33,6 +33,52 @@ extern "C" {
 #define AL_XBOX_VP_BASE_PHYS                     0x7004
 #define AL_XBOX_LFE_GAIN                         0x7005
 #define AL_XBOX_BACKEND                          0x7006
+#define AL_XBOX_FREE_VOICES                      0x7007   /* hardware voices not held by a source */
+#define AL_XBOX_SAMPLE_PAGES_USED                0x7008   /* 4 KiB pages of the APU's sample space in use */
+#define AL_XBOX_SAMPLE_PAGES_TOTAL               0x7009   /* size of that space (2048 pages, 8 MiB) */
+
+/*
+ * ============================================================================
+ * AL_SOFT_loop_points (same token and semantics as OpenAL Soft)
+ * ============================================================================
+ *
+ * alBufferiv(buffer, AL_LOOP_POINTS_SOFT, {start, end}): sample frames, with
+ * 0 <= start < end <= the buffer's frames; AL_INVALID_VALUE otherwise, and
+ * AL_INVALID_OPERATION while a source uses the buffer. A looping source plays
+ * the buffer from its start (or its offset) and then repeats [start, end): a
+ * game's "intro, then loop" sound (Half-Life's cue-point WAVs) is one buffer.
+ * alBufferData resets the points to the whole buffer. On the APU the loop is
+ * the voice's own (LBO/EBO), so it costs nothing per frame.
+ */
+#define AL_LOOP_POINTS_SOFT                      0x2015
+
+/*
+ * ============================================================================
+ * AL_XBOX_source_control (engine control of hardware voices)
+ * ============================================================================
+ *
+ * AL_XBOX_DIRECT_GAINS   alSourcefv(src, ..., {left, right}): linear gains
+ *                        (0..1) of the left and right outputs, set by the
+ *                        engine; turns direct mode on. In direct mode the
+ *                        library's 3D model (pan, distance, cone, Doppler,
+ *                        HRTF) is bypassed: the output gains are left/right
+ *                        times AL_GAIN times the listener gain, the pitch is
+ *                        AL_PITCH. For engines that spatialize themselves.
+ * AL_XBOX_DIRECT_MODE    alSourcei/alGetSourcei: AL_TRUE / AL_FALSE (default).
+ * AL_XBOX_PRIORITY       alSourcef: the engine's priority (>= 0) for voice
+ *                        allocation and stealing, instead of the library's
+ *                        gain/distance score; < 0 (default -1) uses the library's.
+ * AL_XBOX_VIRTUALIZE     alSourcei: AL_TRUE (default) keeps a source that gets
+ *                        no hardware voice (or loses it) playing in virtual
+ *                        standby; AL_FALSE stops it instead (AL_STOPPED), so
+ *                        the engine knows and can mix it itself.
+ * AL_XBOX_HAS_VOICE      alGetSourcei: AL_TRUE while the source holds a hardware voice.
+ */
+#define AL_XBOX_DIRECT_GAINS                     0x7010
+#define AL_XBOX_DIRECT_MODE                      0x7011
+#define AL_XBOX_PRIORITY                         0x7012
+#define AL_XBOX_VIRTUALIZE                       0x7013
+#define AL_XBOX_HAS_VOICE                        0x7014
 
 /*
  * Xbox AV Pack Encodings for AL_XBOX_AV_PACK_TYPE Query

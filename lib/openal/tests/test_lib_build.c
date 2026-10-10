@@ -152,6 +152,41 @@ int main(void) {
                 assert(alGetError() == AL_NO_ERROR);
             } else if (strcmp(name, "AL_EXT_MCFORMATS") == 0) {
                 /* checked below: formats must be accepted if (and only if) advertised */
+            } else if (strcmp(name, "AL_EXT_OFFSET") == 0 || strcmp(name, "AL_SOFT_loop_points") == 0 ||
+                       strcmp(name, "AL_XBOX_source_control") == 0) {
+                /* a stopped source with a 16-frame buffer: the attribute round-trips */
+                static const short pcm[16] = { 0 };
+                ALuint b = 0, s = 0;
+                ALint v[2] = { 0, 0 };
+                ALfloat g[2] = { 0.0f, 0.0f };
+                alGenBuffers(1, &b);
+                alBufferData(b, AL_FORMAT_MONO16, pcm, (ALsizei)sizeof(pcm), 48000);
+                alGenSources(1, &s);
+                if (strcmp(name, "AL_SOFT_loop_points") == 0) {
+                    const ALint lp[2] = { 2, 8 };
+                    alBufferiv(b, AL_LOOP_POINTS_SOFT, lp);
+                    alGetBufferiv(b, AL_LOOP_POINTS_SOFT, v);
+                    assert(v[0] == 2 && v[1] == 8);
+                }
+                alSourcei(s, AL_BUFFER, (ALint)b);
+                if (strcmp(name, "AL_EXT_OFFSET") == 0) {
+                    alSourcei(s, AL_SAMPLE_OFFSET, 10);
+                    alGetSourcei(s, AL_SAMPLE_OFFSET, v);
+                    assert(v[0] == 10);
+                    alGetSourcei(s, AL_BYTE_OFFSET, v);
+                    assert(v[0] == 20);
+                } else if (strcmp(name, "AL_XBOX_source_control") == 0) {
+                    const ALfloat dg[2] = { 0.5f, 0.25f };
+                    alSourcefv(s, AL_XBOX_DIRECT_GAINS, dg);
+                    alGetSourcefv(s, AL_XBOX_DIRECT_GAINS, g);
+                    alGetSourcei(s, AL_XBOX_DIRECT_MODE, v);
+                    assert(g[0] == 0.5f && g[1] == 0.25f && v[0] == AL_TRUE);
+                    alGetSourcei(s, AL_XBOX_HAS_VOICE, v);
+                    assert(v[0] == AL_FALSE);
+                }
+                assert(alGetError() == AL_NO_ERROR);
+                alDeleteSources(1, &s);
+                alDeleteBuffers(1, &b);
             } else {
                 printf("advertised extension without a functional check: %s\n", name);
                 assert(0);

@@ -14,7 +14,7 @@ extern "C" {
 /**
  * Maximum number of concurrent OpenAL buffers supported.
  */
-#define AL_MAX_BUFFERS 256
+#define AL_MAX_BUFFERS 2048   /* an engine precaches hundreds of sounds (Xash3D: up to 2048) */
 
 /**
  * Internal OpenAL 1.1 Buffer Object.
@@ -33,6 +33,8 @@ typedef struct ALbuffer {
     uint32_t prd_table_phys;
     uint32_t prd_count;
     int ref_count;
+    ALint loop_start;   /* AL_LOOP_POINTS_SOFT, in sample frames (whole buffer by default) */
+    ALint loop_end;
 } ALbuffer;
 
 /*
