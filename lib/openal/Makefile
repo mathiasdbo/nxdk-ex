@@ -17,6 +17,7 @@ OPENAL_SRCS := \
 	$(OPENAL_DIR)/src/apu_voice_mgr.c \
 	$(OPENAL_DIR)/src/al_buffer.c \
 	$(OPENAL_DIR)/src/al_source.c \
+	$(OPENAL_DIR)/src/al_stream.c \
 	$(OPENAL_DIR)/src/al_listener.c \
 	$(OPENAL_DIR)/src/alc_context.c
 

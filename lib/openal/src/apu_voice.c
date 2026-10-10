@@ -32,6 +32,9 @@ typedef struct {
 
 static voice_buffer_t s_voice_buffer[NV_PAPU_NUM_3D_VOICES];
 
+/* Software model: play position of each slot (apu_voice_debug_set_position) */
+static uint32_t s_model_pos[NV_PAPU_NUM_3D_VOICES];
+
 /* VP handle each slot last started (mono 3D sources: slot n -> HRTF handle n;
  * everything else: APU_VP_HANDLE_BASE + n), and each slot's source direction */
 static uint32_t s_voice_handle[NV_PAPU_NUM_3D_VOICES];
@@ -230,6 +233,7 @@ int apu_voice_trigger(uintptr_t apu_base, uint32_t index)
     if (s_voice_contexts != NULL) {
         s_voice_contexts[index].active = 1u;
     }
+    s_model_pos[index] = 0;
 
     if (s_vp_hw) {
         const NVAPU_VOICE_CONTEXT_3D *ctx = &s_voice_contexts[index];
@@ -425,4 +429,22 @@ bool apu_voice_hw_backend(void)
 uint32_t apu_voice_debug_stop_count(void)
 {
     return s_stop_calls;
+}
+
+uint32_t apu_voice_get_position(uint32_t index)
+{
+    if (index >= NV_PAPU_NUM_3D_VOICES) {
+        return 0;
+    }
+    if (s_vp_hw) {
+        return apu_vp_voice_position(vp_handle(index));
+    }
+    return s_model_pos[index];
+}
+
+void apu_voice_debug_set_position(uint32_t index, uint32_t frames)
+{
+    if (index < NV_PAPU_NUM_3D_VOICES) {
+        s_model_pos[index] = frames;
+    }
 }

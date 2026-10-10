@@ -112,12 +112,19 @@ screen. There are no committed measurements.
 
 ## Known limitations
 
-* **Not thread-safe.** Use the library from a single thread.
+* **Not thread-safe.** Use the library from a single thread. On a console the library itself runs one
+  internal thread, the AC97 pump (`apu_ac97.c`), which touches only the output path and played stream data.
 * **No audio output by default** (see Backends); there is no software mixer.
-* **No streaming:** `alSourceQueueBuffers`/`alSourceUnqueueBuffers` raise `AL_INVALID_OPERATION` for `n > 0`;
-  `AL_BUFFERS_QUEUED`/`AL_BUFFERS_PROCESSED` are not real queue counts. `AL_SEC_OFFSET`, `AL_SAMPLE_OFFSET`
-  and `AL_BYTE_OFFSET` are defined but not implemented. Capture is stubbed. Only mono and stereo 8/16-bit
-  PCM is accepted; **no ADPCM**, no multichannel buffers.
+* **Streaming** (`alSourceQueueBuffers`/`alSourceUnqueueBuffers`, `al_stream.c`):
+  * Every buffer in a queue needs the same format and frequency, and a queue holds at most 64 buffers. At most
+    32 sources can stream at once.
+  * Queued data is copied into a 16384-frame ring at most 8192 frames ahead of the play position, during
+    `alXboxUpdateVoices()` and the queue queries. Call it at least every ~170 ms at 48 kHz, or the stream plays
+    silence for the gap.
+  * Verified on a retail console with `samples/openal_stream` (48/22.05/11.025 kHz, mono/stereo, 8/16-bit,
+    starvation and 1.5 s main-thread stalls).
+* `AL_SEC_OFFSET`, `AL_SAMPLE_OFFSET` and `AL_BYTE_OFFSET` are defined but not implemented. Capture is stubbed.
+  Only mono and stereo 8/16-bit PCM is accepted; **no ADPCM**, no multichannel buffers.
 * **No clock: nothing completes by itself.** The library never observes real voice progress. A source reaches
   `AL_STOPPED` through `alSourceStop`, or when something clears its voice's model ACTIVE bit (the host tests do);
   a source waiting in virtual standby holds only a saved position and does not advance or finish until it is

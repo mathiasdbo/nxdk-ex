@@ -307,6 +307,16 @@ uint32_t apu_voice_hw_handle(uint32_t index);
  */
 bool apu_voice_hw_backend(void);
 
+/**
+ * Sample frame a voice slot is playing in its buffer: the VP's CBO on the
+ * hardware backend; on the software model, the value last set with
+ * apu_voice_debug_set_position() (0 after a trigger), since nothing plays there.
+ */
+uint32_t apu_voice_get_position(uint32_t index);
+
+/** Software model: set a slot's play position (host tests stand in for the VP). */
+void apu_voice_debug_set_position(uint32_t index, uint32_t frames);
+
 #ifdef __cplusplus
 }
 #endif
