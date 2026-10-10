@@ -4,6 +4,7 @@
  *   1  AL_LOOPING through OpenAL while playing (apu_vp_voice_set_loop):
  *      a looping source released must end; a one-shot set looping must keep playing
  *   2  start-up: 20 deinit/init cycles of the driver; does every start run frames?
+ *      2b: which SECTL values run frames (0x08..0x0F)
  *      (twice a start ran 1-3 frames and stopped: openal_engine, apu_vp_stress F3)
  *   3  128 voices: looping voices on handles 0..127; which ones advance? (apu_probe2
  *      C showed handles 0-3 playing as plain voices)
@@ -187,6 +188,25 @@ static void part_startup(void) {
     save_log();
 }
 
+/* ---- 2b: which SECTL bits frames need (our own measurement; the library's
+ * 0x0F was first seen in the state DirectSound leaves, see the clean-room note) ---- */
+static void part_sectl(void) {
+    uint32_t v;
+    logf_("-- 2b: SECTL 0x08..0x0F: GP frames in 30 ms each\n");
+    for (v = 0x08u; v <= 0x0Fu; v++) {
+        uint32_t d;
+        REG(MCPX_APU_SECTL) = 0;
+        Sleep(5);
+        REG(MCPX_APU_SECTL) = v;
+        d = gp_delta(30);
+        logf_("   SECTL %02lx: %lu frames (read back %08lx)\n", (unsigned long)v, (unsigned long)d,
+              (unsigned long)REG(MCPX_APU_SECTL));
+        save_log();
+    }
+    REG(MCPX_APU_SECTL) = MCPX_APU_SECTL_RUN;
+    Sleep(10);
+}
+
 /* ---- 3: voices on handles 0..127 ---- */
 static void params(apu_vp_voice_params_t *p) {
     int i;
@@ -352,6 +372,7 @@ int main(void) {
     }
     part_looping();
     part_startup();       /* leaves the driver initialised */
+    part_sectl();
     alive = part_voices();
     part_reset(!alive);
     logf_("done\n");
