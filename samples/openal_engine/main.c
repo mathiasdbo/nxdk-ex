@@ -34,6 +34,7 @@
 #include "apu_gp.h"
 #include "apu_hardware.h"
 #include "apu_voice.h"
+#include "mcpx_apu_regs.h"
 
 #define TWO_PI 6.28318531f
 
@@ -65,7 +66,23 @@ static void save_log(void) {
     if (!nxIsDriveMounted('E')) {
         nxMountDrive('E', "\\Device\\Harddisk0\\Partition1\\");
     }
-    f = fopen("E:\\openal_engine.txt", "wb");
+    /* One file per run: E:\openal_engine_1.txt, _2, ... (the first free name at the first save) */
+    {
+        static char name[40];
+        if (!name[0]) {
+            int n;
+            for (n = 1; n < 100; n++) {
+                FILE *t;
+                snprintf(name, sizeof(name), "E:\\openal_engine_%d.txt", n);
+                t = fopen(name, "rb");
+                if (!t) {
+                    break;
+                }
+                fclose(t);
+            }
+        }
+        f = fopen(name, "wb");
+    }
     if (f) {
         fwrite(s_log, 1, s_log_len, f);
         fclose(f);
@@ -203,7 +220,7 @@ static void phase_offsets(void) {
         }
         run_for(250);
         alGetSourcef(s, AL_SEC_OFFSET, &sec);
-        logf_("   %4d ms: AL_SEC_OFFSET %.3f\n", (k + 1) * 250, (double)sec);
+        logf_("   %4d ms: AL_SEC_OFFSET %ld ms\n", (k + 1) * 250, (long)(sec * 1000.0f));   /* nxdk printf has no %f */
     }
     free_source(s, b);
     check_apu("offsets");
@@ -236,8 +253,9 @@ static void phase_pitch(void) {
             int32_t adv = (int32_t)p1 - (int32_t)p0;
             float expect = 11025.0f * pitches[k] * (float)(t1 - t0) / 1000.0f;
             while ((float)adv < expect - 11025.0f / 2.0f) adv += 11025;   /* wrapped around the loop */
-            logf_("   pitch %.2f: %ld frames in %lu ms, expected %.0f (ratio %.3f)\n", (double)pitches[k], (long)adv,
-                  (unsigned long)(t1 - t0), (double)expect, (double)((float)adv / expect));
+            logf_("   pitch x%ld/100: %ld frames in %lu ms, expected %ld (measured/expected %ld/1000)\n",
+                  (long)(pitches[k] * 100.0f), (long)adv, (unsigned long)(t1 - t0), (long)expect,
+                  (long)(1000.0f * (float)adv / expect));
         }
     }
     free_source(s, b);
@@ -353,6 +371,19 @@ int main(void) {
           (const char *)alGetString(AL_EXTENSIONS));
     srand(1234);
     s_gp_last = 0;
+    {   /* did the APU start? (state left by a previous program shows here) */
+        volatile uint32_t *r = (volatile uint32_t *)NV_PAPU_BASE;
+        uint32_t g0 = apu_gp_frames((uintptr_t)NV_PAPU_BASE);
+        Sleep(100);
+        logf_("   init: GP program %s, GP frames +%lu in 100 ms, SECTL %08lx FECTL %08lx FEDECMETH %08lx FEDECPARAM %08lx "
+              "FETFORCE1 %08lx TVL2D %04lx XGSCNT %08lx\n",
+              apu_gp_program_loaded() ? "loaded" : "NOT LOADED",
+              (unsigned long)((apu_gp_frames((uintptr_t)NV_PAPU_BASE) - g0) & 0xFFFFFFu),
+              (unsigned long)r[MCPX_APU_SECTL / 4u], (unsigned long)r[MCPX_APU_FECTL / 4u],
+              (unsigned long)r[MCPX_APU_FEDECMETH / 4u], (unsigned long)r[MCPX_APU_FEDECPARAM / 4u],
+              (unsigned long)r[MCPX_APU_FETFORCE1 / 4u], (unsigned long)(r[MCPX_APU_TVL2D / 4u] & 0xFFFFu),
+              (unsigned long)r[MCPX_APU_XGSCNT / 4u]);
+    }
     check_apu("start");
 
     phase_loop_points();
