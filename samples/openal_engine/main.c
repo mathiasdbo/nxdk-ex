@@ -262,16 +262,19 @@ static void phase_pitch(void) {
     check_apu("pitch");
 }
 
-/* 5: 80 sources with engine priorities */
+/* 5: more sources than hardware voices, with engine priorities */
 static void phase_budget(void) {
-    enum { N = 80 };
+    enum { N = 140 };   /* more than the hardware voices (64 on xemu, 120 on a console) */
     static ALuint src[N];
     uint32_t i;
     ALuint b;
+    ALint hw = 64;
     int k, voiced = 0, waiting = 0, stopped = 0;
     for (i = 0; i < 24000u; i++) s_pcm[i] = (int16_t)(1500.0f * sinf(TWO_PI * (200.0f + 3.0f * (float)(i % 7)) * (float)i / 48000.0f));
     b = make_buffer(s_pcm, 24000u, 48000);
-    logf_("-- 5 voice budget: 80 looping sources, priority = index; odd ones may not wait\n");
+    alXboxGetHardwareStatus(AL_XBOX_HW_VOICE_COUNT, &hw);
+    logf_("-- 5 voice budget: %d looping sources on %ld hardware voices, priority = index; odd ones may not wait\n", N,
+          (long)hw);
     alGenSources(N, src);
     for (i = 0; i < N; i++) {
         alSourcei(src[i], AL_BUFFER, (ALint)b);
@@ -292,7 +295,8 @@ static void phase_budget(void) {
         else if (st == AL_PLAYING) waiting++;
         else stopped++;
     }
-    logf_("   %d with a voice, %d waiting, %d stopped (expect 64 / 8 / 8)\n", voiced, waiting, stopped);
+    logf_("   %d with a voice, %d waiting, %d stopped (expect %ld / %ld / %ld)\n", voiced, waiting, stopped, (long)hw,
+          (long)((N - hw) / 2), (long)((N - hw) / 2));
     check_apu("budget");
     for (k = 0; k < 100; k++) {   /* 10 s of restarts at random priorities */
         uint32_t j = (uint32_t)rand() % N;

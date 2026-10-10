@@ -427,7 +427,7 @@ void al_source_update_all_gains(void) {
 
 void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
     const ALbuffer *pb = al_source_play_buffer(src);
-    if (!src || pb == NULL || hw_voice_idx >= NV_PAPU_NUM_3D_VOICES) {
+    if (!src || pb == NULL || hw_voice_idx >= APU_VOICE_MAX_SLOTS) {
         return;
     }
 

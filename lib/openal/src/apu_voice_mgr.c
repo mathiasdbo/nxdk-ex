@@ -9,7 +9,7 @@
  * Hardware Voice Tracking State
  * ============================================================================
  */
-static int s_hw_voice_owner[NV_PAPU_NUM_3D_VOICES];
+static int s_hw_voice_owner[APU_VOICE_MAX_SLOTS];
 
 /* Per-update standby candidate priorities, indexed by source id - 1 (0 = not a candidate) */
 static float s_promo_priority[AL_MAX_SOURCES];
@@ -21,14 +21,14 @@ static float s_promo_priority[AL_MAX_SOURCES];
  */
 
 void apu_voice_mgr_init(void) {
-    for (uint32_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
+    for (uint32_t v = 0; v < APU_VOICE_MAX_SLOTS; v++) {
         s_hw_voice_owner[v] = AL_HW_VOICE_INVALID;
     }
 }
 
 void apu_voice_mgr_deinit(void) {
     uintptr_t apu_base = al_source_get_apu_base();
-    for (uint32_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
+    for (uint32_t v = 0; v < APU_VOICE_MAX_SLOTS; v++) {
         if (s_hw_voice_owner[v] != AL_HW_VOICE_INVALID) {
             NVAPU_VOICE_CONTEXT_3D *vctx = apu_voice_get_context(v);
             if (vctx) {
@@ -44,7 +44,7 @@ void apu_voice_mgr_deinit(void) {
 }
 
 int apu_voice_mgr_get_owner(uint32_t hw_voice_idx) {
-    if (hw_voice_idx >= NV_PAPU_NUM_3D_VOICES) {
+    if (hw_voice_idx >= APU_VOICE_MAX_SLOTS) {
         return AL_HW_VOICE_INVALID;
     }
     return s_hw_voice_owner[hw_voice_idx];
@@ -107,14 +107,14 @@ int apu_voice_mgr_allocate(ALsource *src) {
     uintptr_t apu_base = al_source_get_apu_base();
 
     /* If source already holds a valid hardware slot and matches owner, keep it */
-    if (src->hw_voice_idx >= 0 && src->hw_voice_idx < (int)NV_PAPU_NUM_3D_VOICES) {
+    if (src->hw_voice_idx >= 0 && src->hw_voice_idx < (int)APU_VOICE_MAX_SLOTS) {
         if (s_hw_voice_owner[src->hw_voice_idx] == (int)src->id) {
             return src->hw_voice_idx;
         }
     }
 
     /* Pass 1: find free slot or slot whose owner is not playing or completed one-shot */
-    for (uint32_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
+    for (uint32_t v = 0; v < apu_voice_slot_count(); v++) {
         int owner_id = s_hw_voice_owner[v];
         if (owner_id <= 0) {
             s_hw_voice_owner[v] = (int)src->id;
@@ -143,14 +143,14 @@ int apu_voice_mgr_allocate(ALsource *src) {
         }
     }
 
-    /* Pass 2: all 64 slots busy, calculate priority of src and find victim
+    /* Pass 2: all slots busy, calculate priority of src and find victim
      * (lowest priority, oldest play_seq on ties) */
     float new_priority = apu_voice_mgr_calc_priority(src);
     int victim_voice = -1;
     float min_priority = 1e30f;
     uint32_t victim_seq = 0;
 
-    for (uint32_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
+    for (uint32_t v = 0; v < apu_voice_slot_count(); v++) {
         int owner_id = s_hw_voice_owner[v];
         ALsource *owner = al_source_get((ALuint)owner_id);
         float p = owner ? apu_voice_mgr_calc_priority(owner) : 0.0f;
@@ -251,7 +251,7 @@ void apu_voice_mgr_release(ALsource *src) {
     }
 
     al_source_voice_lost(src);
-    if (src->hw_voice_idx >= 0 && src->hw_voice_idx < (int)NV_PAPU_NUM_3D_VOICES) {
+    if (src->hw_voice_idx >= 0 && src->hw_voice_idx < (int)APU_VOICE_MAX_SLOTS) {
         uint32_t v = (uint32_t)src->hw_voice_idx;
         NVAPU_VOICE_CONTEXT_3D *vctx = apu_voice_get_context(v);
         /* Mute-then-halt in one call (no ramp, see the preemption protocol above) */
@@ -292,7 +292,7 @@ void apu_voice_mgr_update(uintptr_t apu_base) {
     }
 
     /* 1. Reap phase: detect completed one-shot hardware voices */
-    for (uint32_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
+    for (uint32_t v = 0; v < APU_VOICE_MAX_SLOTS; v++) {
         int owner_id = s_hw_voice_owner[v];
         if (owner_id <= 0) {
             continue;
@@ -321,7 +321,7 @@ void apu_voice_mgr_update(uintptr_t apu_base) {
      * Each standby candidate's priority is computed once per update; free slots
      * then take the best remaining candidate (ties: lowest source id). */
     bool candidates_ready = false;
-    for (uint32_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
+    for (uint32_t v = 0; v < apu_voice_slot_count(); v++) {
         if (s_hw_voice_owner[v] != AL_HW_VOICE_INVALID) {
             continue;
         }
@@ -369,7 +369,7 @@ void apu_voice_mgr_update(uintptr_t apu_base) {
 
 uint32_t apu_voice_mgr_get_active_hw_count(void) {
     uint32_t count = 0;
-    for (uint32_t v = 0; v < NV_PAPU_NUM_3D_VOICES; v++) {
+    for (uint32_t v = 0; v < APU_VOICE_MAX_SLOTS; v++) {
         if (s_hw_voice_owner[v] != AL_HW_VOICE_INVALID) {
             count++;
         }
