@@ -1,6 +1,6 @@
 # Plan: the OpenAL / MCPX APU feature set for Xash3D (Half-Life)
 
-Status: phase A done and verified on a console (2026-10-09); phases B-E planned. Scope: what `lib/openal` must provide so that the Xbox port of Xash3D can play
+Status: phases A and B done and verified on a console (2026-10-10); phases C-E planned. Scope: what `lib/openal` must provide so that the Xbox port of Xash3D can play
 Half-Life's sound through the real MCPX APU, in what order, and how each step is verified. The engine-side
 work happens in the Xash3D port; this document lists only the interfaces it needs from nxdk-ex.
 
@@ -134,6 +134,13 @@ Every phase ends with host tests green in both builds, a hardware run logged ove
    - **Probes:** the playing-record `LBO`/`EBO` write, then a cue-loop WAV from HL itself.
    - **Done when:** a scripted sequence of HL sounds (gunshots, a looping machine with a cue, door, pitch
      sweep) matches the CPU mixer within the stated tolerance, captured from the GP FIFO.
+   - **Result (2026-10-10):**
+     - **Built and verified on a console (`samples/openal_engine`):** loop points, offsets (F9), direct
+       gains, engine priority and no-virtualize, plus sample-space reclaiming and 2048 buffers. For an
+       engine author, see `ENGINE_INTEGRATION.md`.
+     - **Still open:**
+       - the probe of an `LBO`/`EBO` write on a playing record (`AL_LOOPING` changes apply at the next play);
+       - the comparison against the CPU mixer with real HL sounds, which needs the engine (phase C).
 3. **Phase C - Xash full backend.**
    - **Engine side:** each channel maps to a source, with music/VOX/cinematics and overflow in the CPU
      stream.

@@ -261,6 +261,26 @@ void al_stream_finish(al_stream_t *s) {
     s->q_done = s->q_n;
 }
 
+void al_stream_seek(al_stream_t *s, uint32_t frames) {
+    uint32_t i, end = 0;
+    if (frames > s->total) {
+        frames = s->total;
+    }
+    s->read_pos = s->write_pos = s->silent_pos = frames;
+    s->q_done = 0;
+    for (i = 0; i < s->q_n; i++) {
+        end += s->q_frames[i];
+        if (end > frames) {
+            break;
+        }
+        s->q_done = i + 1u;
+    }
+}
+
+uint32_t al_stream_read_pos(const al_stream_t *s) {
+    return s->read_pos;
+}
+
 static void ring_put(al_stream_t *s, uint32_t pos, const uint8_t *src, uint32_t frames) {
     /* src NULL: silence */
     while (frames > 0) {

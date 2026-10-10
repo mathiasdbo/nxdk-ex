@@ -62,6 +62,9 @@ int apu_voice_mgr_get_owner(uint32_t hw_voice_idx) {
  */
 
 float apu_voice_mgr_calc_priority(const ALsource *src) {
+    if (src && src->xbox_priority >= 0.0f) {
+        return src->xbox_priority;   /* AL_XBOX_PRIORITY: the engine decides */
+    }
     if (!src || src->gain < 0.001f) {
         return 0.0f;
     }
@@ -174,6 +177,17 @@ int apu_voice_mgr_allocate(ALsource *src) {
             victim->saved_prd_index = vctx->current_prd_index;
             victim->saved_sample_pos_frac = vctx->sample_pos_frac;
         }
+        if (victim && !victim->stream) {
+            /* Resume from the voice's position when it gets a voice again (a
+             * stream keeps its own read position) */
+            uint32_t len = (victim->buffer && victim->buffer->channels > 0 && victim->buffer->bits > 0)
+                               ? (uint32_t)victim->buffer->size /
+                                     (uint32_t)(victim->buffer->channels * (victim->buffer->bits / 8))
+                               : 0u;
+            uint32_t pos = apu_voice_get_position((uint32_t)victim_voice);
+            victim->offset_frames = (len > 0u && pos >= len) ? len - 1u : pos;
+            victim->has_offset = true;
+        }
 
         /*
          * 2. Mute: zero the shadow-context gains. The halt follows in this same
@@ -199,6 +213,14 @@ int apu_voice_mgr_allocate(ALsource *src) {
          */
         if (victim) {
             victim->hw_voice_idx = AL_HW_VOICE_INVALID;
+            if (!victim->virtualize) {
+                /* AL_XBOX_VIRTUALIZE off: a source that loses its voice stops */
+                victim->state = AL_STOPPED;
+                victim->has_offset = false;
+                if (victim->stream) {
+                    al_stream_finish(victim->stream);
+                }
+            }
         }
 
         /*

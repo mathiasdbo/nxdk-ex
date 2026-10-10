@@ -279,6 +279,21 @@ uint32_t apu_voice_debug_stop_count(void);
 void apu_voice_bind_buffer(uint32_t index, uint32_t phys, uint32_t bytes, int channels, int bits);
 
 /**
+ * After apu_voice_bind_buffer(): the loop region of a looping voice
+ * ([loop_start, loop_end) in frames, loop_end 0 = the whole buffer) and the
+ * frame the next trigger starts at (hardware backend; the software model's
+ * position starts there too).
+ */
+void apu_voice_bind_loop(uint32_t index, uint32_t loop_start, uint32_t loop_end, uint32_t start_frame);
+
+/**
+ * Direct mode (AL_XBOX_DIRECT_GAINS): the slot's left/right output gains
+ * (times the context's master volume) replace the pan; a mono slot plays as a
+ * plain voice, without HRTF. Takes effect at the next trigger or commit.
+ */
+void apu_voice_set_direct(uint32_t index, bool on, float left, float right);
+
+/**
  * Record a voice slot's source position in the listener frame (+x right,
  * +y up, +z behind); the hardware backend picks the HRTF entry from it.
  */

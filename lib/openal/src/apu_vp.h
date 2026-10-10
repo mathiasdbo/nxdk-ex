@@ -63,6 +63,9 @@ typedef struct {
     uint16_t vols[APU_VP_OUTPUTS];  /* 12-bit attenuation in 1/64 dB, 0 = unity, 0xFFF = mute */
     int hrtf_entry;         /* HRTF table entry 0..127 for handles below 64, -1 = none */
     uint32_t tail_bytes;    /* zeroed bytes readable after the data (APU_VP_SILENT_TAIL_BYTES), 0 = none */
+    uint32_t loop_start;    /* looping voices: frames [loop_start, loop_end) repeat (loop_end 0 = the whole buffer) */
+    uint32_t loop_end;
+    uint32_t start_frame;   /* first frame played (CBO at start) */
 } apu_vp_voice_params_t;
 
 /**
@@ -173,6 +176,14 @@ uint32_t apu_vp_voice_position(uint32_t handle);
  * @return number of traps serviced.
  */
 uint32_t apu_vp_service(uintptr_t bar0);
+
+/**
+ * Pages of the 2048-page sample space (APU_VP_SGE_ENTRIES) mapped for buffers
+ * that playing, paused or just-stopped voices use. Buffers are mapped when a
+ * voice starts; a mapping no voice uses is reclaimed when space is needed (or
+ * by this call), so freeing and loading buffers never runs the space out.
+ */
+uint32_t apu_vp_sample_pages_used(uintptr_t bar0);
 
 /** Voice record of a handle and the SGE table (host tests). */
 uint8_t *apu_vp_debug_voice_record(uint32_t handle);

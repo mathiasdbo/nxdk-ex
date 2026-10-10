@@ -88,6 +88,16 @@ void al_stream_rewind(al_stream_t *s);
 void al_stream_finish(al_stream_t *s);
 
 /**
+ * Move the read position to `frames` from the start of the queue (AL_*_OFFSET);
+ * the buffers before it count as processed. A playing voice must be restarted
+ * (al_stream_voice_start) to play from there.
+ */
+void al_stream_seek(al_stream_t *s, uint32_t frames);
+
+/** Frames played from the start of the queue (the AL_*_OFFSET of a streaming source). */
+uint32_t al_stream_read_pos(const al_stream_t *s);
+
+/**
  * A voice starts playing the ring at index 0 from the current read position:
  * fill the ring for it. Call before the voice is triggered.
  */

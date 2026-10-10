@@ -28,9 +28,20 @@ typedef struct {
     uint32_t bytes;
     int channels;
     int bits;
+    uint32_t loop_start;    /* loop region of a looping voice (loop_end 0 = whole buffer) */
+    uint32_t loop_end;
+    uint32_t start_frame;   /* first frame of the next trigger */
 } voice_buffer_t;
 
 static voice_buffer_t s_voice_buffer[NV_PAPU_NUM_3D_VOICES];
+
+/* Direct mode (AL_XBOX_DIRECT_GAINS): the engine's left/right gains replace the pan */
+typedef struct {
+    bool on;
+    float left, right;
+} voice_direct_t;
+
+static voice_direct_t s_voice_direct[NV_PAPU_NUM_3D_VOICES];
 
 /* Software model: play position of each slot (apu_voice_debug_set_position) */
 static uint32_t s_model_pos[NV_PAPU_NUM_3D_VOICES];
@@ -44,11 +55,22 @@ static uint32_t vp_handle(uint32_t index) {
     return s_voice_handle[index];
 }
 
-static void vp_params_from_context(const NVAPU_VOICE_CONTEXT_3D *ctx, bool hrtf, int16_t *pitch,
+static void vp_params_from_context(uint32_t index, const NVAPU_VOICE_CONTEXT_3D *ctx, bool hrtf, int16_t *pitch,
                                    uint8_t bins[APU_VP_OUTPUTS], uint16_t vols[APU_VP_OUTPUTS]) {
     float master = (float)ctx->master_vol_left / 65535.0f;
     int i;
     *pitch = apu_vp_pitch_from_ratio((float)ctx->pitch_step / 65536.0f);
+    if (s_voice_direct[index].on) {
+        /* Direct mode: output 0 -> bin 0 (left), output 1 -> bin 1 (right) at
+         * the engine's gains, full float precision into the 12-bit attenuation */
+        for (i = 0; i < APU_VP_OUTPUTS; i++) {
+            bins[i] = (uint8_t)(i & 1);
+            vols[i] = 0xFFFu;
+        }
+        vols[0] = apu_vp_atten_from_gain(master * s_voice_direct[index].left);
+        vols[1] = apu_vp_atten_from_gain(master * s_voice_direct[index].right);
+        return;
+    }
     for (i = 0; i < APU_VP_OUTPUTS; i++) {
         bins[i] = (uint8_t)((i < 6) ? i : 0);
     }
@@ -233,7 +255,7 @@ int apu_voice_trigger(uintptr_t apu_base, uint32_t index)
     if (s_voice_contexts != NULL) {
         s_voice_contexts[index].active = 1u;
     }
-    s_model_pos[index] = 0;
+    s_model_pos[index] = s_voice_buffer[index].start_frame;
 
     if (s_vp_hw) {
         const NVAPU_VOICE_CONTEXT_3D *ctx = &s_voice_contexts[index];
@@ -247,10 +269,13 @@ int apu_voice_trigger(uintptr_t apu_base, uint32_t index)
         p.bits = vb->bits;
         p.loop = ctx->loop_mode != 0u;
         p.tail_bytes = APU_VP_SILENT_TAIL_BYTES;   /* al_buffer.c pads every buffer with silence */
+        p.loop_start = vb->loop_start;
+        p.loop_end = vb->loop_end;
+        p.start_frame = vb->start_frame;
         /* Mono buffers are 3D sources: HRTF voice (handle = slot, below 64)
          * with the table entry for the source direction, where the HRTF stage
-         * is usable. Stereo, or no HRTF: plain voice panned by volumes. */
-        if (vb->channels == 1 && apu_vp_hrtf_available()) {
+         * is usable. Stereo, direct mode, or no HRTF: plain voice panned by volumes. */
+        if (vb->channels == 1 && apu_vp_hrtf_available() && !s_voice_direct[index].on) {
             s_voice_handle[index] = index;
             p.hrtf_entry = apu_hrtf_entry_for_local(s_voice_local[index]);
         } else {
@@ -265,7 +290,7 @@ int apu_voice_trigger(uintptr_t apu_base, uint32_t index)
             s_voice_handle[index] = h;
             p.hrtf_entry = -1;
         }
-        vp_params_from_context(ctx, p.hrtf_entry >= 0, &p.pitch, p.bins, p.vols);
+        vp_params_from_context(index, ctx, p.hrtf_entry >= 0, &p.pitch, p.bins, p.vols);
         if (apu_vp_voice_start(base, vp_handle(index), &p) != 0) {
             s_voice_contexts[index].active = 0u;
             return -2;
@@ -380,6 +405,29 @@ void apu_voice_bind_buffer(uint32_t index, uint32_t phys, uint32_t bytes, int ch
     s_voice_buffer[index].bytes = bytes;
     s_voice_buffer[index].channels = channels;
     s_voice_buffer[index].bits = bits;
+    s_voice_buffer[index].loop_start = 0;
+    s_voice_buffer[index].loop_end = 0;
+    s_voice_buffer[index].start_frame = 0;
+}
+
+void apu_voice_bind_loop(uint32_t index, uint32_t loop_start, uint32_t loop_end, uint32_t start_frame)
+{
+    if (index >= NV_PAPU_NUM_3D_VOICES) {
+        return;
+    }
+    s_voice_buffer[index].loop_start = loop_start;
+    s_voice_buffer[index].loop_end = loop_end;
+    s_voice_buffer[index].start_frame = start_frame;
+}
+
+void apu_voice_set_direct(uint32_t index, bool on, float left, float right)
+{
+    if (index >= NV_PAPU_NUM_3D_VOICES) {
+        return;
+    }
+    s_voice_direct[index].on = on;
+    s_voice_direct[index].left = left;
+    s_voice_direct[index].right = right;
 }
 
 void apu_voice_set_direction(uint32_t index, const float local_pos[3])
@@ -404,7 +452,7 @@ void apu_voice_commit(uintptr_t apu_base, uint32_t index)
         uint32_t h = vp_handle(index);
         int entry = (h < APU_VP_HANDLE_BASE) ? apu_hrtf_entry_for_local(s_voice_local[index]) : -1;
         /* the bins were set at start and do not change with the pan */
-        vp_params_from_context(&s_voice_contexts[index], entry >= 0, &pitch, bins, vols);
+        vp_params_from_context(index, &s_voice_contexts[index], entry >= 0, &pitch, bins, vols);
         apu_vp_voice_update((apu_base != 0) ? apu_base : s_apu_base, h, pitch, vols, entry);
     }
 }
