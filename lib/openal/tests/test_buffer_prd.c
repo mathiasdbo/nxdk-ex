@@ -343,24 +343,24 @@ int main(void) {
         assert(alIsBuffer(remaining[i]) == AL_FALSE);
     }
 
-    /* Test 8: Pool exhaustion at 256 buffers */
-    printf("[8] Testing 256 buffer pool limit...\n");
-    ALuint all_bufs[256];
-    alGenBuffers(256, all_bufs);
+    /* Test 8: Pool exhaustion at AL_MAX_BUFFERS buffers */
+    printf("[8] Testing the %d buffer pool limit...\n", AL_MAX_BUFFERS);
+    static ALuint all_bufs[AL_MAX_BUFFERS];
+    alGenBuffers(AL_MAX_BUFFERS, all_bufs);
     assert(alGetError() == AL_NO_ERROR);
-    for (int i = 0; i < 256; i++) {
+    for (int i = 0; i < AL_MAX_BUFFERS; i++) {
         assert(all_bufs[i] == (ALuint)(i + 1));
         assert(alIsBuffer(all_bufs[i]) == AL_TRUE);
     }
 
-    /* 257th buffer should fail with AL_OUT_OF_MEMORY */
+    /* One more should fail with AL_OUT_OF_MEMORY */
     ALuint overflow_buf = 0;
     alGenBuffers(1, &overflow_buf);
     assert(alGetError() == AL_OUT_OF_MEMORY);
     assert(overflow_buf == 0);
 
-    /* Clean up all 256 buffers */
-    alDeleteBuffers(256, all_bufs);
+    /* Clean up all of them */
+    alDeleteBuffers(AL_MAX_BUFFERS, all_bufs);
     assert(alGetError() == AL_NO_ERROR);
 
     /* Subsystem cleanup */

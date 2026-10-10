@@ -58,11 +58,15 @@ the host tests do by hand. On xemu the model register would not report completio
   described above. `alcSuspendContext` and the capture functions are stubs.
 * **Buffers:** `alGenBuffers`, `alDeleteBuffers`, `alIsBuffer`, `alBufferData` for
   `AL_FORMAT_MONO8/16` and `AL_FORMAT_STEREO8/16` (8-bit data is unsigned, as in OpenAL), `alGetBufferi`
-  (`AL_FREQUENCY`, `AL_BITS`, `AL_CHANNELS`, `AL_SIZE`). At most 256 buffers.
+  (`AL_FREQUENCY`, `AL_BITS`, `AL_CHANNELS`, `AL_SIZE`), `alBufferiv`/`alGetBufferiv` for
+  `AL_LOOP_POINTS_SOFT`. At most 2048 buffers.
 * **Sources:** `alGenSources`, `alDeleteSources`, `alIsSource`, `alSource*`/`alGetSource*` for position,
   velocity, direction, gain, min/max gain, pitch, looping, relative positioning, cone angles and gain,
-  reference distance, max distance, rolloff, `AL_BUFFER`, `AL_SOURCE_STATE`; `alSourcePlay`, `alSourcePause`,
-  `alSourceStop`, `alSourceRewind` and their vector forms. At most 256 sources.
+  reference distance, max distance, rolloff, `AL_BUFFER`, `AL_SOURCE_STATE`, `AL_SEC_OFFSET` / `AL_SAMPLE_OFFSET` /
+  `AL_BYTE_OFFSET`, buffer queueing (see the limitations), and the `AL_XBOX_source_control` attributes
+  (`include/AL/alext.h`); `alSourcePlay`, `alSourcePause`, `alSourceStop`, `alSourceRewind` and their vector
+  forms. At most 256 sources, 64 of them on hardware voices at once.
+* **Engine integration:** see `docs/ENGINE_INTEGRATION.md`.
 * **Listener:** position, velocity, orientation, gain.
 * **Global state:** `alDistanceModel` (inverse, linear, exponent, clamped variants, none), `alDopplerFactor`,
   `alSpeedOfSound`, `alGetError`, `alGetString` (vendor, version, renderer, extensions), `alGetInteger*`,
@@ -123,8 +127,8 @@ screen. There are no committed measurements.
     silence for the gap.
   * Verified on a retail console with `samples/openal_stream` (48/22.05/11.025 kHz, mono/stereo, 8/16-bit,
     starvation and 1.5 s main-thread stalls).
-* `AL_SEC_OFFSET`, `AL_SAMPLE_OFFSET` and `AL_BYTE_OFFSET` are defined but not implemented. Capture is stubbed.
-  Only mono and stereo 8/16-bit PCM is accepted; **no ADPCM**, no multichannel buffers.
+* Changing `AL_LOOPING` while a source plays takes effect at its next play on a console (the voice record is
+  not rewritten while the VP may read it). Capture is stubbed. Only mono and stereo 8/16-bit PCM is accepted; **no ADPCM**, no multichannel buffers.
 * **No clock: nothing completes by itself.** The library never observes real voice progress. A source reaches
   `AL_STOPPED` through `alSourceStop`, or when something clears its voice's model ACTIVE bit (the host tests do);
   a source waiting in virtual standby holds only a saved position and does not advance or finish until it is

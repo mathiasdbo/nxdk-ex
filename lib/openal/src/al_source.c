@@ -88,6 +88,12 @@ static void source_reset_defaults(ALsource *src, ALuint id) {
     src->play_seq = 0;
     src->source_type = AL_UNDETERMINED;
     src->stream = NULL;
+    src->has_offset = false;
+    src->offset_frames = 0;
+    src->direct = false;
+    src->direct_gain[0] = src->direct_gain[1] = 1.0f;
+    src->xbox_priority = -1.0f;
+    src->virtualize = AL_TRUE;
 }
 
 void al_source_reset(ALsource *src) {
@@ -287,6 +293,24 @@ void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc) {
     /* 5.1 Multichannel ITU-R BS.775 Equal-Power Panning & MixBin Quantization */
     apu_calc_panning_51(calc->local_pos[0], calc->local_pos[2], src->lfe_gain, &calc->pan_gains_51);
     apu_calc_mixbin_gains_51(&calc->pan_gains_51, calc->mixbin_gain);
+
+    if (src->direct) {
+        /* AL_XBOX_DIRECT_GAINS: the engine spatializes. Gain is AL_GAIN (within
+         * min/max) times the listener gain; the pan is the engine's left/right
+         * pair (the hardware backend takes it at full precision from
+         * apu_voice_set_direct()); no Doppler, ITD or elevation filter. */
+        float g = src->gain;
+        if (g < src->min_gain) g = src->min_gain;
+        if (g > src->max_gain) g = src->max_gain;
+        g *= al_listener_get_gain();
+        calc->effective_gain = (g < 0.0f) ? 0.0f : ((g > 1.0f) ? 1.0f : g);
+        calc->doppler_pitch = 1.0f;
+        calc->itd_delay_left = calc->itd_delay_right = 0;
+        apu_get_biquad_passthrough_q14(&calc->hrtf_coeffs);
+        memset(calc->mixbin_gain, 0, sizeof(calc->mixbin_gain));
+        calc->mixbin_gain[0] = (uint8_t)(src->direct_gain[0] * 255.0f + 0.5f);
+        calc->mixbin_gain[1] = (uint8_t)(src->direct_gain[1] * 255.0f + 0.5f);
+    }
 }
 
 
@@ -375,6 +399,7 @@ static void source_update_hw(const ALsource *src, unsigned fields) {
         }
     }
     apu_voice_set_direction((uint32_t)src->hw_voice_idx, calc.local_pos);
+    apu_voice_set_direct((uint32_t)src->hw_voice_idx, src->direct, src->direct_gain[0], src->direct_gain[1]);
     /* Hardware backend: apply the new pitch and volumes to the running voice */
     apu_voice_commit(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx);
 }
@@ -465,6 +490,14 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
 
     apu_voice_set_direction(hw_voice_idx, calc.local_pos);
     apu_voice_bind_buffer(hw_voice_idx, pb->data_phys, (uint32_t)pb->size, pb->channels, pb->bits);
+    if (!src->stream) {
+        /* A static buffer's loop points, and where to start: a pending offset
+         * (AL_*_OFFSET, or the position a preempted voice had reached) */
+        apu_voice_bind_loop(hw_voice_idx, (uint32_t)pb->loop_start, (uint32_t)pb->loop_end,
+                            src->has_offset ? src->offset_frames : 0u);
+    }
+    src->has_offset = false;
+    apu_voice_set_direct(hw_voice_idx, src->direct, src->direct_gain[0], src->direct_gain[1]);
     apu_voice_setup(hw_voice_idx, &ctx);
     if (src->stream) {
         /* The voice starts at ring index 0 from the stream's read position */
@@ -475,6 +508,108 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
     apu_voice_trigger(al_source_get_apu_base(), hw_voice_idx);
     if (src->stream) {
         al_stream_arm(src->stream, hw_voice_idx);
+    }
+}
+
+/*
+ * ----------------------------------------------------------------------------
+ * Playback position (AL_SEC_OFFSET, AL_SAMPLE_OFFSET, AL_BYTE_OFFSET)
+ * ----------------------------------------------------------------------------
+ */
+
+/* Frames a source can be positioned in: its static buffer, or its whole queue */
+static uint32_t source_length_frames(const ALsource *src) {
+    if (src->stream) {
+        return al_stream_total_frames(src->stream);
+    }
+    if (src->buffer && src->buffer->channels > 0 && src->buffer->bits > 0) {
+        return (uint32_t)src->buffer->size / (uint32_t)(src->buffer->channels * (src->buffer->bits / 8));
+    }
+    return 0;
+}
+
+static void source_update_stream(ALsource *src);
+
+/* Frames played; a stopped or initial source reports a pending offset, else 0 */
+static uint32_t source_position(ALsource *src) {
+    uint32_t len = source_length_frames(src), pos;
+    if (src->state != AL_PLAYING && src->state != AL_PAUSED) {
+        return src->has_offset ? src->offset_frames : 0u;
+    }
+    if (src->stream) {
+        source_update_stream(src);
+        pos = al_stream_read_pos(src->stream);
+    } else if (src->hw_voice_idx >= 0) {
+        pos = apu_voice_get_position((uint32_t)src->hw_voice_idx);
+    } else {
+        pos = src->has_offset ? src->offset_frames : 0u;   /* virtual standby: where it will resume */
+    }
+    return (len > 0u && pos >= len) ? len - 1u : pos;
+}
+
+/* An AL_*_OFFSET value in frames; false if outside the source's data */
+static bool offset_to_frames(const ALsource *src, ALenum param, double v, uint32_t *frames) {
+    const ALbuffer *b = al_source_play_buffer(src);
+    uint32_t len = source_length_frames(src);
+    double f;
+    if (!b || len == 0u || !(v >= 0.0)) {
+        return false;
+    }
+    switch (param) {
+    case AL_SEC_OFFSET:
+        f = v * (double)b->frequency;
+        break;
+    case AL_BYTE_OFFSET:
+        f = v / (double)(b->channels * (b->bits / 8));
+        break;
+    default:
+        f = v;
+        break;
+    }
+    if (f >= (double)len) {
+        return false;
+    }
+    *frames = (uint32_t)f;
+    return true;
+}
+
+static double frames_to_offset(const ALsource *src, ALenum param, uint32_t frames) {
+    const ALbuffer *b = al_source_play_buffer(src);
+    if (!b) {
+        return 0.0;
+    }
+    switch (param) {
+    case AL_SEC_OFFSET:
+        return (double)frames / (double)b->frequency;
+    case AL_BYTE_OFFSET:
+        return (double)frames * (double)(b->channels * (b->bits / 8));
+    default:
+        return (double)frames;
+    }
+}
+
+/* Set the position: a playing or paused source with a voice continues from
+ * there at once (a fresh voice); otherwise it applies at the next play or
+ * promotion */
+static void source_seek(ALsource *src, uint32_t frames) {
+    bool live = (src->state == AL_PLAYING || src->state == AL_PAUSED) && src->hw_voice_idx >= 0;
+    if (src->stream) {
+        if (src->state == AL_PLAYING || src->state == AL_PAUSED) {
+            al_stream_seek(src->stream, frames);
+        } else {
+            src->offset_frames = frames;   /* the next play rewinds, then seeks */
+            src->has_offset = true;
+        }
+    } else {
+        src->offset_frames = frames;
+        src->has_offset = true;
+    }
+    if (live) {
+        uint32_t idx = (uint32_t)src->hw_voice_idx;
+        al_source_program_hw_voice(src, idx);
+        if (src->state == AL_PAUSED) {
+            apu_voice_pause(al_source_get_apu_base(), idx, 1);
+        }
     }
 }
 
@@ -725,6 +860,22 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
             source_update_hw(src, SRC_HW_MIXBINS);
             break;
 
+        case AL_SEC_OFFSET:
+        case AL_SAMPLE_OFFSET:
+        case AL_BYTE_OFFSET: {
+            uint32_t frames;
+            if (!offset_to_frames(src, param, (double)value, &frames)) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            source_seek(src, frames);
+            break;
+        }
+
+        case AL_XBOX_PRIORITY:
+            src->xbox_priority = value;
+            break;
+
         default:
             alSetError(AL_INVALID_ENUM);
             break;
@@ -792,8 +943,29 @@ AL_API void AL_APIENTRY alSourcefv(ALuint source, ALenum param, const ALfloat *v
         case AL_CONE_OUTER_ANGLE:
         case AL_CONE_OUTER_GAIN:
         case AL_XBOX_LFE_GAIN:
+        case AL_SEC_OFFSET:
+        case AL_SAMPLE_OFFSET:
+        case AL_BYTE_OFFSET:
+        case AL_XBOX_PRIORITY:
             alSourcef(source, param, values[0]);
             break;
+
+        case AL_XBOX_DIRECT_GAINS: {
+            ALsource *src = al_source_get(source);
+            if (!src) {
+                alSetError(AL_INVALID_NAME);
+                return;
+            }
+            if (!(values[0] >= 0.0f && values[0] <= 1.0f && values[1] >= 0.0f && values[1] <= 1.0f)) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->direct_gain[0] = values[0];
+            src->direct_gain[1] = values[1];
+            src->direct = true;
+            source_update_hw(src, SRC_HW_SPATIAL);
+            break;
+        }
 
         default:
             if (!alIsSource(source)) {
@@ -867,6 +1039,35 @@ AL_API void AL_APIENTRY alSourcei(ALuint source, ALenum param, ALint value) {
             source_update_hw(src, SRC_HW_SPATIAL);
             break;
 
+        case AL_SEC_OFFSET:
+        case AL_SAMPLE_OFFSET:
+        case AL_BYTE_OFFSET: {
+            uint32_t frames;
+            if (!offset_to_frames(src, param, (double)value, &frames)) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            source_seek(src, frames);
+            break;
+        }
+
+        case AL_XBOX_DIRECT_MODE:
+            if (value != AL_TRUE && value != AL_FALSE) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->direct = (value == AL_TRUE);
+            source_update_hw(src, SRC_HW_SPATIAL);
+            break;
+
+        case AL_XBOX_VIRTUALIZE:
+            if (value != AL_TRUE && value != AL_FALSE) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->virtualize = (ALboolean)value;
+            break;
+
 
         default:
             alSetError(AL_INVALID_ENUM);
@@ -894,6 +1095,11 @@ AL_API void AL_APIENTRY alSourceiv(ALuint source, ALenum param, const ALint *val
         case AL_BUFFER:
         case AL_LOOPING:
         case AL_SOURCE_RELATIVE:
+        case AL_SEC_OFFSET:
+        case AL_SAMPLE_OFFSET:
+        case AL_BYTE_OFFSET:
+        case AL_XBOX_DIRECT_MODE:
+        case AL_XBOX_VIRTUALIZE:
             alSourcei(source, param, values[0]);
             break;
 
@@ -970,6 +1176,16 @@ AL_API void AL_APIENTRY alGetSourcef(ALuint source, ALenum param, ALfloat *value
             *value = src->lfe_gain;
             break;
 
+        case AL_SEC_OFFSET:
+        case AL_SAMPLE_OFFSET:
+        case AL_BYTE_OFFSET:
+            *value = (ALfloat)frames_to_offset(src, param, source_position(src));
+            break;
+
+        case AL_XBOX_PRIORITY:
+            *value = src->xbox_priority;
+            break;
+
         default:
             alSetError(AL_INVALID_ENUM);
             break;
@@ -1025,6 +1241,17 @@ AL_API void AL_APIENTRY alGetSourcefv(ALuint source, ALenum param, ALfloat *valu
         case AL_DIRECTION:
             alGetSource3f(source, param, &values[0], &values[1], &values[2]);
             break;
+
+        case AL_XBOX_DIRECT_GAINS: {
+            ALsource *src = al_source_get(source);
+            if (!src) {
+                alSetError(AL_INVALID_NAME);
+                return;
+            }
+            values[0] = src->direct_gain[0];
+            values[1] = src->direct_gain[1];
+            break;
+        }
 
         default:
             alGetSourcef(source, param, &values[0]);
@@ -1097,6 +1324,25 @@ AL_API void AL_APIENTRY alGetSourcei(ALuint source, ALenum param, ALint *value) 
 
         case AL_SOURCE_TYPE:
             *value = src->source_type;
+            break;
+
+        case AL_SEC_OFFSET:
+        case AL_SAMPLE_OFFSET:
+        case AL_BYTE_OFFSET:
+            *value = (ALint)frames_to_offset(src, param, source_position(src));
+            break;
+
+        case AL_XBOX_DIRECT_MODE:
+            *value = src->direct ? AL_TRUE : AL_FALSE;
+            break;
+
+        case AL_XBOX_VIRTUALIZE:
+            *value = src->virtualize;
+            break;
+
+        case AL_XBOX_HAS_VOICE:
+            *value = ((src->state == AL_PLAYING || src->state == AL_PAUSED) && src->hw_voice_idx >= 0) ? AL_TRUE
+                                                                                                      : AL_FALSE;
             break;
 
         default:
@@ -1202,6 +1448,9 @@ AL_API void AL_APIENTRY alSourcePlay(ALuint source) {
      * from a pause (it has no voice then: preempted while paused) */
     if (src->stream && src->state != AL_PAUSED) {
         al_stream_rewind(src->stream);
+        if (src->has_offset && src->state != AL_PLAYING) {
+            al_stream_seek(src->stream, src->offset_frames);   /* AL_*_OFFSET set while stopped */
+        }
     }
 
     /* OpenAL 1.1: Play on a playing source restarts it from the beginning.
@@ -1213,6 +1462,7 @@ AL_API void AL_APIENTRY alSourcePlay(ALuint source) {
         }
         src->saved_prd_index = 0;
         src->saved_sample_pos_frac = 0;
+        src->has_offset = false;   /* a restart plays from the beginning */
     }
     src->play_seq = ++s_play_seq;
 
@@ -1223,6 +1473,14 @@ AL_API void AL_APIENTRY alSourcePlay(ALuint source) {
     int idx = apu_voice_mgr_allocate(src);
     if (idx >= 0) {
         al_source_program_hw_voice(src, (uint32_t)idx);
+    } else if (!src->virtualize) {
+        /* AL_XBOX_VIRTUALIZE off: no voice means no playback; the engine sees AL_STOPPED */
+        if (src->stream) {
+            al_stream_finish(src->stream);
+        }
+        src->has_offset = false;
+        src->state = AL_STOPPED;
+        return;
     }
     src->state = AL_PLAYING;
 }
@@ -1261,6 +1519,7 @@ AL_API void AL_APIENTRY alSourceStop(ALuint source) {
         al_stream_finish(src->stream);   /* OpenAL 1.1: a stopped source has processed its whole queue */
     }
     src->saved_prd_index = 0;
+    src->has_offset = false;
     src->saved_sample_pos_frac = 0;
 }
 
@@ -1281,6 +1540,7 @@ AL_API void AL_APIENTRY alSourceRewind(ALuint source) {
         al_stream_rewind(src->stream);   /* nothing processed */
     }
     src->saved_prd_index = 0;
+    src->has_offset = false;
     src->saved_sample_pos_frac = 0;
 }
 
