@@ -11,7 +11,7 @@
  *      rest wait or stop; then restarts at random priorities
  *   6  buffer churn: 600 buffers of random sizes created, played and deleted
  *      (the APU's sample space must be reclaimed)
- * E:\openal_engine.txt gets the results. The APU frame counter is checked
+ * E:\openal_engine_N.txt (a new N each run) gets the results. The APU frame counter is checked
  * after every phase: if it stops, the log says so.
  */
 #include <hal/debug.h>
