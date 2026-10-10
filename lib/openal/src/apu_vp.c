@@ -832,22 +832,25 @@ void apu_vp_voice_off(uintptr_t bar0, uint32_t h) {
 
 uint32_t apu_vp_alloc_handle(uintptr_t bar0) {
     uint32_t now, k, h;
-    uint32_t span;
+    uint32_t base, span;
 
     if (!s_ready) {
         return MCPX_APU_LIST_END;
     }
-    span = (s_fe_ok ? APU_VP_MAX_HANDLES : APU_VP_HW_HANDLES) - APU_VP_HANDLE_BASE;
+    /* xemu: 64..255 (0..63 are the HRTF voices); a console: every handle 0..127
+     * (no HRTF stage there, and handles 0..63 play as plain voices, apu_probe3) */
+    base = s_fe_ok ? APU_VP_HANDLE_BASE : 0u;
+    span = (s_fe_ok ? APU_VP_MAX_HANDLES : APU_VP_HW_HANDLES) - base;
     now = reg_rd(bar0, MCPX_APU_XGSCNT);
     for (k = 0; k < span; k++) {
-        h = APU_VP_HANDLE_BASE + (s_alloc_next + k) % span;
+        h = base + (s_alloc_next + k) % span;
         if (s_list[h] != LIST_NONE || s_paused[h]) {
             continue;
         }
         if (s_retired[h] && now - s_retired_at[h] < APU_VP_QUARANTINE_SAMPLES) {
             continue;
         }
-        s_alloc_next = (h - APU_VP_HANDLE_BASE + 1u) % span;
+        s_alloc_next = (h - base + 1u) % span;
         return h;
     }
     return MCPX_APU_LIST_END;

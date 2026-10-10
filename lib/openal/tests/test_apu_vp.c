@@ -299,14 +299,14 @@ int main(void) {
         set_reg(MCPX_APU_XGSCNT, 1000);
         for (k = 0; k < 400u; k++) {
             h = apu_vp_alloc_handle(base);
-            assert(h >= 64u && h < APU_VP_HW_HANDLES && h != 5u);   /* real console: no handle above 127 */
+            assert(h < APU_VP_HW_HANDLES && h != 5u);   /* real console: handles 0..127; 5 is playing */
             if (h == 77u) seen77++;
         }
         /* 77 left its list at XGSCNT 0, so 1000 is past the quarantine */
         assert(seen77 > 0);
         apu_vp_voice_off(base, 5);                                   /* retired at XGSCNT 1000 */
         set_reg(MCPX_APU_XGSCNT, 1010);
-        for (k = 0; k < 400u; k++) assert(apu_vp_alloc_handle(base) != 5u);   /* 5 is not a plain handle anyway */
+        for (k = 0; k < 400u; k++) assert(apu_vp_alloc_handle(base) != 5u);   /* 5 is in its quarantine */
         assert(apu_vp_voice_start(base, 90, &p) == 0);
         assert(apu_vp_voice_start(base, 129, &p) != 0);              /* the VP would call it idle and stop */
         apu_vp_voice_off(base, 90);                                  /* retired at 1010 */

@@ -124,10 +124,10 @@ static void log_tick(const showcase_app_t *app, const showcase_perf_t *perf, boo
 }
 #endif
 
-/* Sources the APU is playing (VP voices of the 64 library slots) */
+/* Sources the APU is playing (VP voices of the library's slots) */
 static uint32_t apu_active_voices(void) {
     uint32_t i, n = 0;
-    for (i = 0; i < 64u; i++) {
+    for (i = 0; i < apu_voice_slot_count(); i++) {
         if (apu_vp_voice_active(apu_voice_hw_handle(i))) {
             n++;
         }

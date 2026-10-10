@@ -329,6 +329,19 @@ uint32_t apu_voice_hw_handle(uint32_t index);
  */
 bool apu_voice_hw_backend(void);
 
+/*
+ * Voice slots (the library's hardware voices, what the voice manager hands to
+ * sources). The software model and xemu have 64 (on xemu, mono slot n plays
+ * on HRTF handle n). A real console has 120: its VP plays every handle 0..127
+ * as a plain voice (apu_probe3: all 128 advance, 2389 restarts in 5 s); 8
+ * handles stay spare so a restart always finds one past the one-frame quarantine.
+ */
+#define APU_VOICE_MAX_SLOTS 128u
+#define APU_VOICE_HW_SLOTS  120u
+
+/** Voice slots of the active backend: APU_VOICE_HW_SLOTS on a console, 64 otherwise. */
+uint32_t apu_voice_slot_count(void);
+
 /**
  * Sample frame a voice slot is playing in its buffer: the VP's CBO on the
  * hardware backend; on the software model, the value last set with
