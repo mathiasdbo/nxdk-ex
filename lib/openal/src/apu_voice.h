@@ -294,6 +294,13 @@ void apu_voice_bind_loop(uint32_t index, uint32_t loop_start, uint32_t loop_end,
 void apu_voice_set_direct(uint32_t index, bool on, float left, float right);
 
 /**
+ * Switch looping of a running voice (AL_LOOPING while playing or paused): the
+ * hardware backend rewrites its loop markers in place (apu_vp_voice_set_loop);
+ * the software model updates the context's loop mode.
+ */
+void apu_voice_set_looping(uintptr_t apu_base, uint32_t index, bool loop);
+
+/**
  * Record a voice slot's source position in the listener frame (+x right,
  * +y up, +z behind); the hardware backend picks the HRTF entry from it.
  */

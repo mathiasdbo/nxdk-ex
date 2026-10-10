@@ -339,6 +339,38 @@ int main(void) {
     assert(voice_dw(79, MCPX_VOICE_CUR_PSH_SAMPLE) == 10000u && voice_dw(79, MCPX_VOICE_PAR_NEXT) == 10127u);
     assert((voice_dw(79, MCPX_VOICE_PAR_OFFSET) & 0xFFFFFFu) == 2000u);
     apu_vp_voice_off(base, 79);
+    /* AL_LOOPING while playing: release a loop, then loop a one-shot (apu_probe2 B1-B3) */
+    p.loop = true;
+    p.start_frame = 0;
+    assert(apu_vp_voice_start(base, 79, &p) == 0);
+    set_voice_dw(79, MCPX_VOICE_PAR_OFFSET, 3000);
+    assert(apu_vp_voice_set_loop(base, 79, false, 1000, 9000) == 0);          /* release */
+    assert(voice_dw(79, MCPX_VOICE_PAR_NEXT) == 10127u);                     /* end of the silent tail */
+    assert((voice_dw(79, MCPX_VOICE_CUR_PSH_SAMPLE) & 0xFFFFFFu) == 10000u); /* the tail loops */
+    assert(apu_vp_voice_active(79));
+    set_voice_dw(79, MCPX_VOICE_PAR_OFFSET, 10010);                          /* it reached the tail */
+    assert(!apu_vp_voice_active(79));
+    apu_vp_service(base);                                                    /* the end scan takes it off */
+    apu_vp_voice_off(base, 79);
+    p.loop = false;                                                          /* one-shot */
+    assert(apu_vp_voice_start(base, 79, &p) == 0);
+    set_voice_dw(79, MCPX_VOICE_PAR_OFFSET, 500);
+    assert(apu_vp_voice_set_loop(base, 79, true, 1000, 9000) == 0);
+    assert((voice_dw(79, MCPX_VOICE_CUR_PSH_SAMPLE) & 0xFFFFFFu) == 1000u && voice_dw(79, MCPX_VOICE_PAR_NEXT) == 8999u);
+    set_voice_dw(79, MCPX_VOICE_PAR_OFFSET, 9500);
+    assert(apu_vp_voice_active(79));                                         /* looping: not ended past the old end */
+    apu_vp_voice_off(base, 79);
+    assert(apu_vp_voice_start(base, 79, &p) == 0);                           /* again, but close to the loop end */
+    set_voice_dw(79, MCPX_VOICE_PAR_OFFSET, 8500);
+    assert(apu_vp_voice_set_loop(base, 79, true, 1000, 9000) == 0);
+    assert(voice_dw(79, MCPX_VOICE_PAR_NEXT) == 9999u);                      /* first to the end of the data */
+    set_voice_dw(79, MCPX_VOICE_PAR_OFFSET, 2000);                           /* wrapped to the loop */
+    apu_vp_service(base);
+    assert(voice_dw(79, MCPX_VOICE_PAR_NEXT) == 8999u);                      /* now the real loop end */
+    set_voice_dw(79, MCPX_VOICE_PAR_OFFSET, 10050);                          /* in the tail already: cannot loop */
+    assert(apu_vp_voice_set_loop(base, 79, false, 1000, 9000) == 0);
+    assert(apu_vp_voice_set_loop(base, 79, true, 1000, 9000) == -1);
+    apu_vp_voice_off(base, 79);
     p.loop_start = p.loop_end = p.start_frame = 0;
     /* The sample space is reclaimed: 300 different buffers (more than the 256
      * mappings), each played and stopped, then nothing left mapped */

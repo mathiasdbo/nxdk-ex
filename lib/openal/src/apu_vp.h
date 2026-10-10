@@ -147,6 +147,17 @@ int apu_vp_voice_start(uintptr_t bar0, uint32_t handle, const apu_vp_voice_param
 void apu_vp_voice_update(uintptr_t bar0, uint32_t handle, int16_t pitch, const uint16_t vols[APU_VP_OUTPUTS],
                          int hrtf_entry);
 
+/**
+ * Switch looping on or off while the voice plays (AL_LOOPING), by rewriting
+ * its loop markers in place. Off: the voice plays on to the end of its data
+ * and stops there. On: it loops [loop_start, loop_end) (loop_end 0 = the whole
+ * buffer); if it is already past the loop end it first plays to the end of
+ * the data. Works on paused voices too.
+ * @return 0, or negative if the handle is not playing, has already ended, or
+ *         cannot be released (no silent tail).
+ */
+int apu_vp_voice_set_loop(uintptr_t bar0, uint32_t h, bool loop, uint32_t loop_start, uint32_t loop_end);
+
 /** Pause (true: off its list, position kept) or resume (false: back on top of the 2D list). */
 void apu_vp_voice_pause(uintptr_t bar0, uint32_t handle, bool pause);
 
