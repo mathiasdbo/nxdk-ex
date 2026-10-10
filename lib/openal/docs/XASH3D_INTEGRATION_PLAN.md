@@ -1,6 +1,6 @@
 # Plan: the OpenAL / MCPX APU feature set for Xash3D (Half-Life)
 
-Status: draft, 2026-10-09. Scope: what `lib/openal` must provide so that the Xbox port of Xash3D can play
+Status: phase A done and verified on a console (2026-10-09); phases B-E planned. Scope: what `lib/openal` must provide so that the Xbox port of Xash3D can play
 Half-Life's sound through the real MCPX APU, in what order, and how each step is verified. The engine-side
 work happens in the Xash3D port; this document lists only the interfaces it needs from nxdk-ex.
 
@@ -16,7 +16,8 @@ Verified on a retail console (see `XEMU_VERIFICATION.md` 8.1b):
 | Playback control | play, pause, stop, rewind, `AL_LOOPING`, gain, pitch, position-based pan; target updates are ramped by the VP |
 | One-shots | loop over a 256-byte silent tail that every buffer carries; `alXboxUpdateVoices()` unlinks them (a voice that reaches its end stops the APU on hardware) |
 | 3D | distance and cone model in the library; on a console the pan is folded to stereo volumes (no HRTF: it needs front-end methods, which do not run on hardware) |
-| Missing | buffer queueing (`alSourceQueueBuffers` returns `AL_INVALID_OPERATION`), sample/byte/second offsets, loop points, any effect (the GP only copies the mix), an output pump that runs while the game is not calling the library |
+| Streaming | buffer queueing on a looping ring voice, and an AC97 pump thread that keeps the output going while the game is not calling the library (phase A, done) |
+| Missing | sample/byte/second offsets, loop points, direct gains, any effect (the GP only copies the mix) |
 
 Hardware limits any design must respect:
 - At most 64 concurrent voices. A handle above 127 freezes the APU until a reboot (the driver refuses it).
@@ -123,6 +124,11 @@ Every phase ends with host tests green in both builds, a hardware run logged ove
      with a simulated `CBO`).
    - **Enables:** Xash route 1, the CPU mix through one stream source with a cvar to switch it, an A/B
      against the existing AC97/SDL path.
+   - **Result (2026-10-09, retail console, `samples/openal_stream`):** 145 s across all six phases (48 kHz
+     mono16, 22.05 kHz stereo16, 11.025 kHz mono8, starvation, 1.5 s main-thread stalls, soak) with 0 AC97
+     underruns and 0 padded buffers. The longest gap between pump passes was 5 ms, also during the stalls;
+     the static tone played through them and the stream went quiet without repeating. `openal_vp` and the
+     showcase run unchanged on the pump thread.
 2. **Phase B - Hardware voices for effects (F2, F3, F5, F7).**
    - **Build:** loop points, direct gains, the no-virtualize flag and the pitch range.
    - **Probes:** the playing-record `LBO`/`EBO` write, then a cue-loop WAV from HL itself.
