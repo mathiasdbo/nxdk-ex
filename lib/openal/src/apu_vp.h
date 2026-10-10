@@ -123,6 +123,7 @@ void apu_vp_debug_set_map_guard(uint32_t pages);
 #define APU_VP_DBG_NO_STALL_DETECT  4u   /* apu_vp_service() does not read the GP frame counter */
 #define APU_VP_DBG_NO_END_SCAN      8u   /* apu_vp_service() leaves one-shots in their silent tail listed */
 #define APU_VP_DBG_NO_FE_PROBE     16u   /* apu_vp_init() sends no methods and assumes a real console */
+#define APU_VP_DBG_NO_AC97_THREAD  32u   /* pump the AC97 from apu_vp_service(), no thread (next apu_vp_init()) */
 void apu_vp_debug_set_flags(uint32_t flags);
 
 /** Copy up to `max` of the most recent operations, oldest first. @return count. */

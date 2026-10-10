@@ -36,6 +36,7 @@ void apu_voice_mgr_deinit(void) {
                 vctx->master_vol_right = 0;
                 memset(vctx->mixbin_gain, 0, sizeof(vctx->mixbin_gain));
             }
+            al_source_voice_lost(al_source_get((ALuint)s_hw_voice_owner[v]));
             apu_voice_stop(apu_base, v);
             s_hw_voice_owner[v] = AL_HW_VOICE_INVALID;
         }
@@ -77,7 +78,7 @@ float apu_voice_mgr_calc_priority(const ALsource *src) {
         d = 0.1f;
     }
 
-    float base_priority = src->looping ? 3.0f : 1.0f;
+    float base_priority = al_source_voice_loops(src) ? 3.0f : 1.0f;   /* looping and streaming sources */
     return base_priority * (calc.effective_gain / d);
 }
 
@@ -121,6 +122,7 @@ int apu_voice_mgr_allocate(ALsource *src) {
         ALsource *owner = al_source_get((ALuint)owner_id);
         if (!owner || (owner->state != AL_PLAYING && owner->state != AL_PAUSED)) {
             if (owner) {
+                al_source_voice_lost(owner);
                 owner->hw_voice_idx = AL_HW_VOICE_INVALID;
             }
             s_hw_voice_owner[v] = (int)src->id;
@@ -129,7 +131,7 @@ int apu_voice_mgr_allocate(ALsource *src) {
         }
 
         /* Check if one-shot voice playback completed in hardware */
-        if (!owner->looping && apu_voice_is_active(apu_base, v) == 0) {
+        if (!al_source_voice_loops(owner) && apu_voice_is_active(apu_base, v) == 0) {
             owner->state = AL_STOPPED;
             owner->hw_voice_idx = AL_HW_VOICE_INVALID;
             s_hw_voice_owner[v] = (int)src->id;
@@ -186,6 +188,7 @@ int apu_voice_mgr_allocate(ALsource *src) {
         /*
          * 3. Halt the channel: clear its ACTIVE bit (the register readback only echoes the write).
          */
+        al_source_voice_lost(victim);
         apu_voice_stop(apu_base, (uint32_t)victim_voice);
         if (apu_voice_is_active(apu_base, (uint32_t)victim_voice) != 0) {
             apu_voice_stop(apu_base, (uint32_t)victim_voice);
@@ -225,6 +228,7 @@ void apu_voice_mgr_release(ALsource *src) {
         return;
     }
 
+    al_source_voice_lost(src);
     if (src->hw_voice_idx >= 0 && src->hw_voice_idx < (int)NV_PAPU_NUM_3D_VOICES) {
         uint32_t v = (uint32_t)src->hw_voice_idx;
         NVAPU_VOICE_CONTEXT_3D *vctx = apu_voice_get_context(v);
@@ -280,11 +284,12 @@ void apu_voice_mgr_update(uintptr_t apu_base) {
 
         uint32_t is_active = hw ? (uint32_t)apu_voice_is_active(base, v) :
                              (v < 32u) ? (active0 & (1u << v)) : (active1 & (1u << (v - 32u)));
-        if (is_active == 0 && !owner->looping) {
+        if (is_active == 0 && !al_source_voice_loops(owner)) {
             owner->state = AL_STOPPED;
             owner->hw_voice_idx = AL_HW_VOICE_INVALID;
             s_hw_voice_owner[v] = AL_HW_VOICE_INVALID;
         } else if (owner->state != AL_PLAYING && owner->state != AL_PAUSED) {
+            al_source_voice_lost(owner);
             owner->hw_voice_idx = AL_HW_VOICE_INVALID;
             s_hw_voice_owner[v] = AL_HW_VOICE_INVALID;
         }
@@ -304,7 +309,7 @@ void apu_voice_mgr_update(uintptr_t apu_base) {
                 ALsource *src = al_source_get(id);
                 s_promo_priority[id - 1] = 0.0f;
                 if (src && src->in_use && src->state == AL_PLAYING &&
-                    src->hw_voice_idx == AL_HW_VOICE_INVALID && src->buffer != NULL) {
+                    src->hw_voice_idx == AL_HW_VOICE_INVALID && al_source_play_buffer(src) != NULL) {
                     s_promo_priority[id - 1] = apu_voice_mgr_calc_priority(src);
                 }
             }
