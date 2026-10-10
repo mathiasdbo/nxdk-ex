@@ -420,6 +420,20 @@ void apu_voice_bind_loop(uint32_t index, uint32_t loop_start, uint32_t loop_end,
     s_voice_buffer[index].start_frame = start_frame;
 }
 
+void apu_voice_set_looping(uintptr_t apu_base, uint32_t index, bool loop)
+{
+    if (index >= NV_PAPU_NUM_3D_VOICES) {
+        return;
+    }
+    if (s_voice_contexts != NULL) {
+        s_voice_contexts[index].loop_mode = loop ? NVAPU_VOICE_LOOP_ON : NVAPU_VOICE_LOOP_OFF;
+    }
+    if (s_vp_hw) {
+        (void)apu_vp_voice_set_loop((apu_base != 0) ? apu_base : s_apu_base, vp_handle(index), loop,
+                                    s_voice_buffer[index].loop_start, s_voice_buffer[index].loop_end);
+    }
+}
+
 void apu_voice_set_direct(uint32_t index, bool on, float left, float right)
 {
     if (index >= NV_PAPU_NUM_3D_VOICES) {
