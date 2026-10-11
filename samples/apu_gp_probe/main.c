@@ -1,20 +1,26 @@
 /*
- * GP DSP probe, round 1 (reverb plan phase 0, lib/openal/docs/GP_REVERB_PLAN.md).
- * Clean-room: our own GP program (gp_probe.asm, assembled with
- * lib/openal/tools/dsp56asm.py) and our own data; nothing left by other software.
+ * GP DSP probe (reverb plan, lib/openal/docs/GP_REVERB_PLAN.md). Clean-room:
+ * our own GP program (gp_probe.asm, assembled with lib/openal/tools/dsp56asm.py)
+ * and our own data; nothing left by other software.
  *
- * Measures what a reverb program on the GP depends on:
- *   1-3  X/Y/P memory seen through the host windows (size, aliasing)
- *   4    the same words read by the DSP core
- *   5-7  scratch DMA: DSP -> circular buffer, circular buffer -> DSP, and both
- *        chained as a delay line (frame stamp read back K frames later)
- *   8    DMA end-of-list flag ($FFFFC5 bit 7) as a completion wait
- *   9    instruction budget: cycles of NOP per frame before frames slow down
- *   10   descriptor budget: DMA blocks per frame
- *   11-12 a voice's output 4 routed to mixbin 2 (send bus), plain and HRTF voice
+ * Round 1 (phase 0, results in XEMU_VERIFICATION.md 8.1b): X RAM $000-$BFF
+ * ($C00-$FFF mirror the mixbins), Y $000-$7FF, P $000-$FFF; circular scratch
+ * DMA works both ways with byte offsets and write-back, and as a delay line
+ * (stamp read back exactly K frames later); the end-of-list flag works as a
+ * wait; 64000 NOP cycles and 64 descriptors per frame keep full rate; output 4
+ * of plain and HRTF voices reaches mixbin 2. But a linear block with
+ * dsp_step 0 moved one DSP word 32 times, and format 2 keeps a word in bits 31:8.
+ *
+ * Round 2:
+ *   1-3  linear blocks with dsp_step 1: DSP -> scratch (formats 2 and 6) and back
+ *   4-5  phase 2: an echo on the GP. A click voice plays into bins 0/1 and the
+ *        send bin 2; the program adds wet * line to the output and feeds
+ *        bin 2 + fb * line back into a DMA delay line of D samples
+ *        (D = 12000 and 12007: whole and partial frames)
+ *   6    listening: AC97 output on, the echo switches on and off every 4 s
  *
  * Log appended to E:\apu_gp_probe.txt. Resumable across a freeze through
- * E:\gp_probe_progress.txt: a step that did not finish is reported and skipped.
+ * E:\gp_probe2_progress.txt.
  */
 #include <hal/debug.h>
 #include <hal/video.h>
@@ -27,6 +33,7 @@
 #include <string.h>
 #include <windows.h>
 
+#include "apu_ac97.h"
 #include "apu_gp.h"
 #include "apu_hardware.h"
 #include "apu_mem.h"
@@ -39,27 +46,27 @@
 #define XW(n)       (*(volatile uint32_t *)(BAR0 + MCPX_APU_GP_XMEM + 4u * (n)))
 #define YW(n)       (*(volatile uint32_t *)(BAR0 + 0x36000u + 4u * (n)))
 #define PW(n)       (*(volatile uint32_t *)(BAR0 + MCPX_APU_GP_PMEM + 4u * (n)))
-#define PROGRESS    "E:\\gp_probe_progress.txt"
+#define PROGRESS    "E:\\gp_probe2_progress.txt"
 #define LOGFILE     "E:\\apu_gp_probe.txt"
 
-/* DMA descriptor control words (xemu's field list; the probe checks them) */
+/* DMA descriptor control words */
 #define EOL         0x004000u
-#define CTL_W       0x0009D2u   /* DSP -> memory, offset write-back, circular scratch (0xE), format 2 (24-bit) */
-#define CTL_R       0x0009D0u   /* memory -> DSP, same */
+#define STEP1       (1u << 14)  /* dsp_step 1: the DSP address advances one word per item */
+#define CTL_W       (0x0009D2u | STEP1)   /* DSP -> memory, offset write-back, circular scratch, format 2 */
+#define CTL_W6      (0x0019D2u | STEP1)   /* the same with format 6 */
+#define CTL_R       (0x0009D0u | STEP1)   /* memory -> DSP, format 2 */
 
 /* Scratch layout (byte offsets; 0..$1FFF hold the program image) */
 #define SCR_W       0x2000u
 #define SCR_R       0x3000u
-#define SCR_D       0x4000u
-#define SCR_BUDGET  0x8000u     /* + i * 0x1000, i < 64 */
-#define SCR_BYTES   (SCR_BUDGET + 64u * 0x1000u)
+#define SCR_LINE    0x10000u
+#define LINE_MAX    0x10000u    /* 16384 words: delays up to 341 ms */
+#define SCR_BYTES   (SCR_LINE + LINE_MAX)
 #define LINE_BYTES  0x1000u
 
 #define DESC_W      0x100u
 #define DESC_R      0x108u
-#define DESC_BUDGET 0x400u      /* + 8 i */
 #define BLOCK_IN    0x340u      /* the read descriptor's DSP block */
-
 static char s_log[48 * 1024];
 static size_t s_log_len, s_saved;
 
@@ -151,342 +158,202 @@ static void chain(uint32_t head) {
     XW(0u) = head;   /* the FIFO descriptor's next pointer */
 }
 
+
 /* ---------------------------------------------------------------- 1-3 */
 
-static void sweep(const char *name, volatile uint32_t *(*at)(uint32_t), uint32_t tag, uint32_t first, uint32_t end,
-                  uint32_t skip) {
-    uint32_t a, run_start = first, run_kind = 0xFFFFFFFFu, n_ok = 0, runs = 0;
-    for (a = first; a < end; a++) {
-        if (a != skip) *at(a) = tag | a;
-    }
-    Sleep(2);
-    logf_("  %s:$%04lx-$%04lx (tag %06lx):\n", name, (unsigned long)first, (unsigned long)end - 1u, (unsigned long)tag);
-    for (a = first; a <= end; a++) {
-        uint32_t kind;
-        if (a == end) {
-            kind = 0xFFFFFFFEu;
-        } else if (a == skip) {
-            kind = 3u;
-        } else {
-            uint32_t v = *at(a) & 0xFFFFFFu;
-            if (v == (tag | a)) {
-                kind = 0u;
-                n_ok++;
-            } else if ((v & 0xFF0000u) == tag) {
-                kind = 0x10000u + ((v - a) & 0xFFFFu);   /* aliased: reads the word at a + delta */
-            } else {
-                kind = 1u;
-            }
-        }
-        if (kind != run_kind) {
-            if (run_kind != 0xFFFFFFFFu && runs < 24u) {
-                const char *k = run_kind == 0u ? "ok" : run_kind == 1u ? "other" : run_kind == 3u ? "skipped" : "alias";
-                logf_("    $%04lx-$%04lx %s", (unsigned long)run_start, (unsigned long)a - 1u, k);
-                if (run_kind >= 0x10000u) logf_(" (+$%04lx)", (unsigned long)(run_kind & 0xFFFFu));
-                if (run_kind == 1u) logf_(" (first value %06lx)", (unsigned long)(*at(run_start) & 0xFFFFFFu));
-                logf_("\n");
-                runs++;
-            }
-            run_kind = kind;
-            run_start = a;
-        }
-    }
-    logf_("    %lu words ok\n", (unsigned long)n_ok);
-}
-
-static volatile uint32_t *x_at(uint32_t a) { return &XW(a); }
-static volatile uint32_t *y_at(uint32_t a) { return &YW(a); }
-static volatile uint32_t *p_at(uint32_t a) { return &PW(a); }
-
-static void step_sweep_x(void) { sweep("X", x_at, 0x5A0000u, 0x40u, 0x1400u, GP_PROBE_STAMP); }
-static void step_sweep_y(void) { sweep("Y", y_at, 0x6B0000u, 0x0u, 0x1000u, 0xFFFFFFFFu); }
-static void step_sweep_p(void) { sweep("P", p_at, 0x7C0000u, 0x800u, 0x1000u, 0xFFFFFFFFu); }
-
-/* ---------------------------------------------------------------- 4 */
-
-static void step_core_read(void) {
-    static const uint32_t addr[] = { 0x100u, 0x7FFu, 0x800u, 0xBFFu, 0xC00u, 0xFFFu, 0x1000u, 0x13FFu };
-    uint32_t i;
-    for (i = 0; i < sizeof(addr) / sizeof(addr[0]); i++) {
-        uint32_t a = addr[i], wy = 0;
-        XW(a) = 0x3C0000u | a;
-        if (a < 0x1000u) YW(a) = 0x4D0000u | a;
-        XW(GP_PROBE_RX) = 0xEEEEEEu;
-        XW(GP_PROBE_RY) = 0xEEEEEEu;
-        XW(GP_PROBE_RADDR) = a;
-        XW(GP_PROBE_FLAGS) = 4u;
-        Sleep(10);
-        XW(GP_PROBE_FLAGS) = 0u;
-        Sleep(2);
-        if (a < 0x1000u) wy = YW(a) & 0xFFFFFFu;
-        logf_("  $%04lx: window X %06lx core X %06lx | window Y %06lx core Y %06lx\n", (unsigned long)a,
-              (unsigned long)(XW(a) & 0xFFFFFFu), (unsigned long)(XW(GP_PROBE_RX) & 0xFFFFFFu), (unsigned long)wy,
-              (unsigned long)(XW(GP_PROBE_RY) & 0xFFFFFFu));
-    }
-}
-
-/* ---------------------------------------------------------------- 5 */
-
-static void find_pattern(const char *what) {
-    uint32_t off, hits = 0;
-    for (off = SCR_BYTES - 4u; off >= 0x2000u && hits < 4u; off -= 4u) {
-        uint32_t w = *(volatile uint32_t *)(s_scr + off);
-        if (w == pat(1) || w == (pat(1) << 8)) {
-            if (hits == 0u) logf_("  %s: pattern word 1 found at scratch", what);
-            logf_(" %05lx%s", (unsigned long)off, w == pat(1) ? "" : "(<<8)");
-            hits++;
-        }
-    }
-    logf_(hits ? "\n" : "  %s: pattern word 1 not found anywhere in scratch\n", what);
-}
-
-static void step_dma_write(void) {
-    uint32_t i, b, match_lsb = 0, match_msb = 0, f0;
+static void dma_write(uint32_t ctl, bool msb) {
+    uint32_t i, b, match = 0, f0, first_bad = 0xFFFFFFFFu;
     for (i = 1; i < 32u; i++) XW(GP_PROBE_STAMP + i) = pat(i);
-    memset(s_scr + 0x2000u, 0xEE, SCR_BYTES - 0x2000u);
-    set_desc(DESC_W, EOL, CTL_W, 32u, GP_PROBE_STAMP, 0u, SCR_W, LINE_BYTES);
+    memset(s_scr + SCR_W, 0xEE, LINE_BYTES);
+    set_desc(DESC_W, EOL, ctl, 32u, GP_PROBE_STAMP, 0u, SCR_W, LINE_BYTES);
     f0 = frames_now();
     chain(DESC_W);
     Sleep(50);
     chain(EOL);
     Sleep(5);
-    logf_("  frames %lu, write-back offset %06lx (byte semantics: advances 128 per frame mod 4096)\n",
+    logf_("  control %06lx: frames %lu, offset %06lx; block 0 raw:", (unsigned long)ctl,
           (unsigned long)((frames_now() - f0) & 0xFFFFFFu), (unsigned long)(XW(DESC_W + 4u) & 0xFFFFFFu));
-    logf_("  block 0 raw:");
     for (i = 0; i < 6u; i++) logf_(" %08lx", (unsigned long)((volatile uint32_t *)(s_scr + SCR_W))[i]);
-    logf_("\n  stamps by block:");
     for (b = 0; b < LINE_BYTES / 128u; b++) {
         volatile uint32_t *blk = (volatile uint32_t *)(s_scr + SCR_W + 128u * b);
-        uint32_t ok_l = 1, ok_m = 1;
+        uint32_t ok = 1;
         for (i = 1; i < 32u; i++) {
-            if (blk[i] != pat(i)) ok_l = 0;
-            if (blk[i] != (pat(i) << 8)) ok_m = 0;
+            uint32_t want = msb ? (pat(i) << 8) : pat(i);
+            if (blk[i] != want) {
+                ok = 0;
+                if (first_bad == 0xFFFFFFFFu) first_bad = b * 32u + i;
+            }
         }
-        match_lsb += ok_l;
-        match_msb += ok_m;
-        logf_(" %lx", (unsigned long)(blk[0] & 0xFFFFFFFFu));
+        match += ok;
     }
-    logf_("\n  blocks with the payload: %lu as 24-bit in bits 23:0, %lu as bits 31:8 (of %lu)\n",
-          (unsigned long)match_lsb, (unsigned long)match_msb, (unsigned long)(LINE_BYTES / 128u));
-    find_pattern("write");
+    logf_("\n    blocks holding words 1-31 as bits %s: %lu of %lu", msb ? "31:8" : "23:0", (unsigned long)match,
+          (unsigned long)(LINE_BYTES / 128u));
+    if (first_bad != 0xFFFFFFFFu) {
+        uint32_t w = first_bad;
+        logf_(" (first mismatch at word %lu: %08lx, wanted %06lx)", (unsigned long)w,
+              (unsigned long)((volatile uint32_t *)(s_scr + SCR_W))[w], (unsigned long)pat(w % 32u));
+    }
+    logf_("\n");
 }
 
-/* ---------------------------------------------------------------- 6 */
+static void step_write2(void) { dma_write(CTL_W, true); }
+static void step_write6(void) { dma_write(CTL_W6, false); }
 
-static void step_dma_read(void) {
-    uint32_t i, k;
+static void step_read(void) {
+    uint32_t i, k, bad = 0, first;
     volatile uint32_t *r = (volatile uint32_t *)(s_scr + SCR_R);
-    for (i = 0; i < LINE_BYTES / 4u; i++) r[i] = 0x400000u | i;
+    for (i = 0; i < LINE_BYTES / 4u; i++) r[i] = (0x400000u | i) << 8;
     for (i = 0; i < 32u; i++) XW(BLOCK_IN + i) = 0;
     set_desc(DESC_R, EOL, CTL_R, 32u, BLOCK_IN, 0u, SCR_R, LINE_BYTES);
     chain(DESC_R);
-    for (k = 0; k < 8u; k++) {
+    for (k = 0; k < 4u; k++) {
         Sleep(3);
         logf_("  X:$340 %06lx  X:$35F %06lx  offset %06lx\n", (unsigned long)(XW(BLOCK_IN) & 0xFFFFFFu),
               (unsigned long)(XW(BLOCK_IN + 31u) & 0xFFFFFFu), (unsigned long)(XW(DESC_R + 4u) & 0xFFFFFFu));
     }
     chain(EOL);
     Sleep(3);
-    {
-        uint32_t first = XW(BLOCK_IN) & 0xFFFFFFu, bad = 0;
-        for (i = 1; i < 32u; i++) {
-            if ((XW(BLOCK_IN + i) & 0xFFFFFFu) != ((first + i) & 0xFFFFFFu)) bad++;
-        }
-        logf_("  last block: first word %06lx, %lu of 31 words not consecutive\n", (unsigned long)first,
-              (unsigned long)bad);
+    first = XW(BLOCK_IN) & 0xFFFFFFu;
+    for (i = 1; i < 32u; i++) {
+        if ((XW(BLOCK_IN + i) & 0xFFFFFFu) != ((first + i) & 0xFFFFFFu)) bad++;
     }
+    logf_("  last block: first word %06lx, %lu of 31 words not consecutive\n", (unsigned long)first, (unsigned long)bad);
 }
 
-/* ---------------------------------------------------------------- 7 */
+/* ---------------------------------------------------------------- 4-6 */
 
-static void delay_line(uint32_t k_frames, bool read_first) {
-    uint32_t hist[10], i, other = 0;
-    memset(hist, 0, sizeof(hist));
-    memset(s_scr + SCR_D, 0, LINE_BYTES);
-    for (i = 0; i < 32u; i++) XW(BLOCK_IN + i) = 0;
-    /* write at offset 128 K, read at 0: the read trails the write by K blocks */
-    if (read_first) {
-        set_desc(DESC_R, DESC_W, CTL_R, 32u, BLOCK_IN, 0u, SCR_D, LINE_BYTES);
-        set_desc(DESC_W, EOL, CTL_W, 32u, GP_PROBE_STAMP, 128u * k_frames, SCR_D, LINE_BYTES);
-        chain(DESC_R);
-    } else {
-        set_desc(DESC_W, DESC_R, CTL_W, 32u, GP_PROBE_STAMP, 128u * k_frames, SCR_D, LINE_BYTES);
-        set_desc(DESC_R, EOL, CTL_R, 32u, BLOCK_IN, 0u, SCR_D, LINE_BYTES);
-        chain(DESC_W);
-    }
-    Sleep(30);
-    for (i = 0; i < 60u; i++) {
-        uint32_t d = (XW(GP_PROBE_STAMP) - XW(BLOCK_IN)) & 0xFFFFFFu;
-        if (d < 10u) hist[d]++; else other++;
-        Sleep(1u + (i % 3u));
-    }
-    chain(EOL);
-    Sleep(3);
-    logf_("  K=%lu %s: stamp - read-back:", (unsigned long)k_frames, read_first ? "read then write" : "write then read");
-    for (i = 0; i < 10u; i++) if (hist[i]) logf_(" %lu:%lu", (unsigned long)i, (unsigned long)hist[i]);
-    if (other) logf_(" other:%lu (last X:$340 %06lx)", (unsigned long)other, (unsigned long)(XW(BLOCK_IN) & 0xFFFFFFu));
-    logf_("\n");
-}
+#define CLICK_FRAMES 48000u   /* one click per second */
+#define CAP_FRAMES   60000u
+static uint32_t s_click_phys;
+static int16_t s_cap[2 * CAP_FRAMES];
+static const uint32_t s_voice = 5u;
 
-static void step_delay(void) {
-    for (uint32_t i = 1; i < 32u; i++) XW(GP_PROBE_STAMP + i) = pat(i);
-    delay_line(4u, false);
-    delay_line(1u, false);
-    delay_line(0u, false);
-    delay_line(4u, true);
-    delay_line(1u, true);
-}
-
-/* ---------------------------------------------------------------- 8 */
-
-static void wait_report(const char *what) {
-    XW(GP_PROBE_SPMAX) = 0;
-    XW(GP_PROBE_TMOUT) = 0;
-    XW(GP_PROBE_SPLIM) = 5000u;
-    XW(GP_PROBE_FLAGS) = 1u;
-    {
-        uint32_t rate = frame_rate(300);
-        logf_("  %s: %lu frames/s, polls last %lu max %lu, timeouts %lu, $FFFFC5 before clear %06lx, CONTROL %06lx\n",
-              what, (unsigned long)rate, (unsigned long)(XW(GP_PROBE_SPINS) & 0xFFFFFFu),
-              (unsigned long)(XW(GP_PROBE_SPMAX) & 0xFFFFFFu), (unsigned long)(XW(GP_PROBE_TMOUT) & 0xFFFFFFu),
-              (unsigned long)(XW(GP_PROBE_RAWC5) & 0xFFFFFFu), (unsigned long)(XW(GP_PROBE_DMACTL) & 0xFFFFFFu));
-    }
-    XW(GP_PROBE_FLAGS) = 0u;
-    Sleep(5);
-}
-
-static void step_eol(void) {
-    chain(EOL);
-    wait_report("FIFO only");
-    set_desc(DESC_W, DESC_R, CTL_W, 32u, GP_PROBE_STAMP, 512u, SCR_D, LINE_BYTES);
-    set_desc(DESC_R, EOL, CTL_R, 32u, BLOCK_IN, 0u, SCR_D, LINE_BYTES);
-    chain(DESC_W);
-    wait_report("FIFO + write + read");
-    chain(EOL);
-}
-
-/* ---------------------------------------------------------------- 9 */
-
-static void step_burn(void) {
-    static const uint32_t n[] = { 1000u, 4000u, 8000u, 16000u, 24000u, 32000u, 48000u, 64000u, 96000u, 128000u,
-                                  192000u, 256000u };
-    uint32_t i;
-    logf_("  baseline %lu frames/s\n", (unsigned long)frame_rate(300));
-    for (i = 0; i < sizeof(n) / sizeof(n[0]); i++) {
-        uint32_t rate;
-        XW(GP_PROBE_BURN) = n[i];
-        XW(GP_PROBE_FLAGS) = 2u;
-        Sleep(50);
-        rate = frame_rate(300);
-        logf_("  rep %6lu nop: %lu frames/s\n", (unsigned long)n[i], (unsigned long)rate);
-        save_log();
-        if (rate < 1400u) break;
-    }
-    XW(GP_PROBE_FLAGS) = 0u;
-    Sleep(20);
-    logf_("  after: %lu frames/s\n", (unsigned long)frame_rate(200));
-}
-
-/* ---------------------------------------------------------------- 10 */
-
-static uint32_t budget(uint32_t k, bool mixed) {
-    uint32_t i, rate;
-    for (i = 0; i < k; i++) {
-        uint32_t at = DESC_BUDGET + 8u * i, next = (i + 1u < k) ? at + 8u : EOL;
-        if (mixed && (i & 1u)) {
-            set_desc(at, next, CTL_R, 32u, BLOCK_IN, 0u, SCR_BUDGET + 0x1000u * i, LINE_BYTES);
-        } else {
-            set_desc(at, next, CTL_W, 32u, GP_PROBE_STAMP, 0u, SCR_BUDGET + 0x1000u * i, LINE_BYTES);
-        }
-    }
-    XW(GP_PROBE_SPMAX) = 0;
-    XW(GP_PROBE_TMOUT) = 0;
-    XW(GP_PROBE_SPLIM) = 20000u;
-    XW(GP_PROBE_FLAGS) = 1u;
-    chain(DESC_BUDGET);
-    Sleep(30);
-    rate = frame_rate(300);
-    logf_("  %2lu %s: %lu frames/s, polls last %lu max %lu, timeouts %lu, offsets first %06lx last %06lx\n",
-          (unsigned long)k, mixed ? "write/read" : "writes", (unsigned long)rate,
-          (unsigned long)(XW(GP_PROBE_SPINS) & 0xFFFFFFu), (unsigned long)(XW(GP_PROBE_SPMAX) & 0xFFFFFFu),
-          (unsigned long)(XW(GP_PROBE_TMOUT) & 0xFFFFFFu), (unsigned long)(XW(DESC_BUDGET + 4u) & 0xFFFFFFu),
-          (unsigned long)(XW(DESC_BUDGET + 8u * (k - 1u) + 4u) & 0xFFFFFFu));
-    chain(EOL);
-    XW(GP_PROBE_FLAGS) = 0u;
-    Sleep(10);
-    save_log();
-    return rate;
-}
-
-static void step_budget(void) {
-    static const uint32_t k[] = { 8u, 16u, 32u, 48u, 64u };
-    uint32_t i;
-    for (i = 0; i < 5u; i++) if (budget(k[i], false) < 1400u) break;
-    for (i = 1; i < 5u; i++) if (budget(k[i], true) < 1400u) break;
-}
-
-/* ---------------------------------------------------------------- 11-12 */
-
-#define TONE_FRAMES 4800u
-static uint32_t s_tone_phys;
-static int16_t s_cap[2 * 4800];
-
-static void capture_peaks(int *l, int *r) {
-    uint32_t got = 0, i;
-    DWORD t0 = GetTickCount();
-    apu_gp_fifo_discard(BAR0);
-    while (got < 4800u && GetTickCount() - t0 < 400u) {
-        got += apu_gp_fifo_read(BAR0, s_cap + 2u * got, 4800u - got);
-        Sleep(2);
-    }
-    *l = *r = 0;
-    for (i = 0; i < got; i++) {
-        int a = abs(s_cap[2 * i]), b = abs(s_cap[2 * i + 1]);
-        if (a > *l) *l = a;
-        if (b > *r) *r = b;
-    }
-}
-
-static void send_test(bool hrtf) {
+static void click_on(void) {
     apu_vp_voice_params_t p;
-    uint32_t i, h = 5u;
-    int l01, r01, l23, r23;
+    uint32_t i;
     memset(&p, 0, sizeof(p));
-    p.phys = s_tone_phys;
-    p.bytes = TONE_FRAMES * 2u;
+    p.phys = s_click_phys;
+    p.bytes = CLICK_FRAMES * 2u;
     p.channels = 1;
     p.bits = 16;
     p.loop = true;
     p.tail_bytes = APU_VP_SILENT_TAIL_BYTES;
-    p.hrtf_entry = hrtf ? 0 : -1;
+    p.hrtf_entry = -1;
     for (i = 0; i < APU_VP_OUTPUTS; i++) {
         p.bins[i] = (uint8_t)(i & 1u);
         p.vols[i] = 0xFFFu;
     }
-    p.vols[0] = 0;
-    if (hrtf) p.vols[2] = 0;      /* the right ear's submix slot */
+    p.vols[0] = p.vols[1] = 0;    /* dry: both channels */
     p.bins[4] = 2;                /* the send */
     p.vols[4] = 0;
-    if (apu_vp_voice_start(BAR0, h, &p) != 0) {
-        logf_("  voice start failed\n");
-        return;
-    }
-    Sleep(40);
-    XW(3u) = 0x1400u;
-    Sleep(5);
-    capture_peaks(&l01, &r01);
-    XW(3u) = 0x1440u;
-    Sleep(5);
-    capture_peaks(&l23, &r23);
-    XW(3u) = 0x1400u;
-    logf_("  %s voice (3D list %s): bins 0/1 peaks %d / %d, bins 2/3 peaks %d / %d\n", hrtf ? "HRTF" : "plain",
-          apu_vp_voice_is_hrtf(h) ? "yes" : "no", l01, r01, l23, r23);
-    apu_vp_voice_off(BAR0, h);
-    Sleep(10);
+    apu_vp_voice_start(BAR0, s_voice, &p);
 }
 
-static void step_send_plain(void) { send_test(false); }
-static void step_send_hrtf(void) { send_test(true); }
+static void echo_on(uint32_t d, uint32_t wet, uint32_t fb) {
+    uint32_t i;
+    for (i = 0; i < 0x80u; i++) XW(0x200u + i) = 0;   /* staging, DIN, LOUT */
+    memset(s_scr + SCR_LINE, 0, LINE_MAX);
+    /* chain A: the line block written d samples ago -> DIN */
+    set_desc(DESC_R, EOL, CTL_R, 32u, GP_PROBE_DIN, 0u, SCR_LINE, LINE_MAX);
+    /* chain B: LOUT -> the line, then the FIFO descriptor at X:0 */
+    set_desc(DESC_W, 0u, CTL_W, 32u, GP_PROBE_LOUT, 4u * d, SCR_LINE, LINE_MAX);
+    XW(GP_PROBE_WET) = wet;
+    XW(GP_PROBE_FB) = fb;
+    XW(GP_PROBE_SPLIM) = 4000u;
+    XW(GP_PROBE_SPMAX) = 0;
+    XW(GP_PROBE_TMOUT) = 0;
+    XW(GP_PROBE_HEADB) = DESC_W;
+    XW(GP_PROBE_HEADA) = DESC_R;
+    XW(3u) = GP_PROBE_OUTL;       /* the FIFO sends the staging area */
+    XW(GP_PROBE_FLAGS) = 8u;
+}
+
+static void echo_off(void) {
+    XW(GP_PROBE_FLAGS) = 0u;
+    XW(GP_PROBE_HEADA) = 0u;
+    XW(GP_PROBE_HEADB) = 0u;
+    XW(3u) = 0x1400u;
+}
+
+static uint32_t capture(uint32_t frames) {
+    uint32_t got = 0;
+    DWORD t0 = GetTickCount();
+    apu_gp_fifo_discard(BAR0);
+    while (got < frames && GetTickCount() - t0 < 2000u) {
+        got += apu_gp_fifo_read(BAR0, s_cap + 2u * got, frames - got);
+        Sleep(2);
+    }
+    return got;
+}
+
+/* Clicks and echoes in the left channel: local peaks above 300, 400 samples apart */
+static void list_peaks(uint32_t n) {
+    uint32_t i, found = 0, last = 0;
+    logf_("    peaks (sample: L R):");
+    for (i = 0; i < n && found < 12u; i++) {
+        int v = abs(s_cap[2 * i]);
+        uint32_t j, end = (i + 200u < n) ? i + 200u : n;
+        bool is_max = v > 300;
+        if (!is_max || (found && i - last < 400u)) continue;
+        for (j = (i > 200u ? i - 200u : 0); j < end && is_max; j++) {
+            if (abs(s_cap[2 * j]) > v) is_max = false;
+        }
+        if (!is_max) continue;
+        logf_(" %lu: %d %d", (unsigned long)i, s_cap[2 * i], s_cap[2 * i + 1]);
+        found++;
+        last = i;
+    }
+    logf_("%s\n", found ? "" : " none");
+}
+
+static void echo_test(uint32_t d) {
+    uint32_t n, rate;
+    echo_on(d, 0x400000u, 0x400000u);   /* wet 0.5, feedback 0.5 */
+    Sleep(1500);                         /* the line fills */
+    n = capture(CAP_FRAMES);
+    rate = frame_rate(200);
+    logf_("  D = %lu samples, wet 0.5, feedback 0.5: %lu frames captured, %lu frames/s, waits: last %lu polls, max %lu, "
+          "timeouts %lu\n", (unsigned long)d, (unsigned long)n, (unsigned long)rate,
+          (unsigned long)(XW(GP_PROBE_SPINS) & 0xFFFFFFu), (unsigned long)(XW(GP_PROBE_SPMAX) & 0xFFFFFFu),
+          (unsigned long)(XW(GP_PROBE_TMOUT) & 0xFFFFFFu));
+    list_peaks(n);
+    echo_off();
+    Sleep(20);
+    n = capture(CAP_FRAMES);
+    logf_("  echo off:\n");
+    list_peaks(n);
+}
+
+static void step_echo_whole(void) { echo_test(12000u); }
+static void step_echo_part(void) { echo_test(12007u); }
+
+#define LISTEN_STEP 5   /* index of step_listen in s_steps */
+
+static void step_listen(void) {
+    apu_ac97_stats_t st;
+    uint32_t round = 0;
+    if (apu_ac97_start(BAR0) != 0) {
+        logf_("  AC97 start failed\n");
+        return;
+    }
+    logf_("  AC97 on: a click every second; echo (250 ms, feedback 0.5) on for 4 s, off for 4 s, repeating\n");
+    write_progress(LISTEN_STEP + 1);   /* the loop never ends: mark the round done */
+    save_log();
+    for (;;) {
+        echo_on(12000u, 0x400000u, 0x400000u);
+        debugPrint("echo ON\n");
+        Sleep(4000);
+        echo_off();
+        debugPrint("echo off\n");
+        Sleep(4000);
+        if (++round == 4u) {
+            apu_ac97_get_stats(&st);
+            logf_("  after 32 s: AC97 underruns %lu, padded buffers %lu\n", (unsigned long)st.underruns,
+                  (unsigned long)st.padded);
+            save_log();
+        }
+    }
+}
 
 /* ---------------------------------------------------------------- driver */
 
@@ -496,18 +363,12 @@ typedef struct {
 } step_t;
 
 static const step_t s_steps[] = {
-    { "1 X window sweep", step_sweep_x },
-    { "2 Y window sweep", step_sweep_y },
-    { "3 P window sweep ($800-$FFF)", step_sweep_p },
-    { "4 core reads", step_core_read },
-    { "5 DMA DSP -> circular scratch", step_dma_write },
-    { "6 DMA circular scratch -> DSP", step_dma_read },
-    { "7 delay line (write and read chained)", step_delay },
-    { "8 end-of-list wait", step_eol },
-    { "9 instruction budget", step_burn },
-    { "10 descriptor budget", step_budget },
-    { "11 send: plain voice output 4 -> bin 2", step_send_plain },
-    { "12 send: HRTF voice output 4 -> bin 2", step_send_hrtf },
+    { "1 DMA DSP -> scratch, dsp_step 1, format 2", step_write2 },
+    { "2 DMA DSP -> scratch, dsp_step 1, format 6", step_write6 },
+    { "3 DMA scratch -> DSP, dsp_step 1, format 2", step_read },
+    { "4 echo, delay 12000 samples", step_echo_whole },
+    { "5 echo, delay 12007 samples", step_echo_part },
+    { "6 listening (runs until switched off)", step_listen },
 };
 #define N_STEPS ((int)(sizeof(s_steps) / sizeof(s_steps[0])))
 
@@ -517,15 +378,13 @@ int main(void) {
     XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
     resume = read_progress();
     if (resume >= N_STEPS) {
-        logf_("\n=== apu_gp_probe round 1: all %d steps already ran (delete %s to run them again)\n", N_STEPS, PROGRESS);
-        save_log();
-        for (;;) Sleep(1000);
-    }
-    if (resume < 0) {
-        logf_("\n=== apu_gp_probe round 1: %d steps (fresh start)\n", N_STEPS);
+        logf_("\n=== apu_gp_probe round 2: all steps ran (delete %s to run them again); listening only\n", PROGRESS);
+        resume = LISTEN_STEP;
+    } else if (resume < 0) {
+        logf_("\n=== apu_gp_probe round 2: %d steps (fresh start)\n", N_STEPS);
         resume = 0;
     } else {
-        logf_("\n=== apu_gp_probe round 1: resumed; step %s did not finish (FROZE?)\n", s_steps[resume].name);
+        logf_("\n=== apu_gp_probe round 2: resumed; step %s did not finish (FROZE?)\n", s_steps[resume].name);
         resume++;
     }
     save_log();
@@ -540,16 +399,18 @@ int main(void) {
     }
     s_scr = (uint8_t *)apu_gp_debug_scratch();
     {
-        int16_t *pcm = (int16_t *)apu_mem_alloc_table(TONE_FRAMES * 2u + APU_VP_SILENT_TAIL_BYTES, &s_tone_phys);
-        uint32_t i;
-        for (i = 0; i < TONE_FRAMES; i++) pcm[i] = (int16_t)(((i / 50u) & 1u) ? -8000 : 8000);   /* 480 Hz */
-        memset(pcm + TONE_FRAMES, 0, APU_VP_SILENT_TAIL_BYTES);
+        int16_t *pcm = (int16_t *)apu_mem_alloc_table(CLICK_FRAMES * 2u + APU_VP_SILENT_TAIL_BYTES, &s_click_phys);
+        memset(pcm, 0, CLICK_FRAMES * 2u + APU_VP_SILENT_TAIL_BYTES);
+        pcm[0] = 12000;
+        pcm[1] = 16000;
+        pcm[2] = 12000;
     }
-    logf_("program loaded %s, scratch %lu bytes at %p, start retries %lu, %lu frames/s, HRTF %s\n",
-          apu_gp_program_loaded() ? "yes" : "NO", (unsigned long)apu_gp_scratch_bytes(), (void *)s_scr,
-          (unsigned long)apu_vp_start_retries(), (unsigned long)frame_rate(200),
-          apu_vp_hrtf_available() ? "available" : "not available");
+    logf_("program loaded %s (%u words), scratch %lu bytes, start retries %lu, %lu frames/s\n",
+          apu_gp_program_loaded() ? "yes" : "NO", (unsigned)GP_PROBE_WORDS, (unsigned long)apu_gp_scratch_bytes(),
+          (unsigned long)apu_vp_start_retries(), (unsigned long)frame_rate(200));
     save_log();
+    click_on();
+    Sleep(50);
 
     for (k = resume; k < N_STEPS; k++) {
         uint32_t rate;
