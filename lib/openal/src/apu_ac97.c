@@ -30,6 +30,7 @@ void apu_ac97_set_thread_hook(void (*fn)(void)) {
 #define AC97_PO_LVI   0x115u   /* PCM out: last valid index */
 #define AC97_PO_SR    0x116u   /* PCM out: status */
 #define AC97_SR_DCH   0x01u    /* DMA controller halted */
+#define AC97_PO_CR    0x11Bu   /* PCM out: control (bit 0 run, bit 1 reset registers) */
 
 static int16_t *s_slot[SLOTS];
 static uint32_t s_next;     /* slot being filled */
@@ -180,7 +181,19 @@ void apu_ac97_stop(void) {
     free_slots();
 }
 
+void apu_ac97_halt_dma(void) {
+    volatile uint8_t *pb = ac97_regs();
+    if (!pb) {
+        return;
+    }
+    pb[AC97_PO_CR] = 0;       /* stop the PCM-out DMA */
+    pb[AC97_PO_CR] = 0x02u;   /* and reset its registers: it no longer reads the old buffers */
+}
+
 #else /* host: no codec */
+
+void apu_ac97_halt_dma(void) {
+}
 
 int apu_ac97_start(uintptr_t bar0) {
     (void)bar0;

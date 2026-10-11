@@ -200,6 +200,12 @@ uint32_t apu_vp_service(uintptr_t bar0);
  */
 uint32_t apu_vp_sample_pages_used(uintptr_t bar0);
 
+/**
+ * Frame starts apu_vp_init() had to redo since boot because the GP counted no
+ * frames after the first one (a console only; 0 is the normal case).
+ */
+uint32_t apu_vp_start_retries(void);
+
 /** Voice record of a handle and the SGE table (host tests). */
 uint8_t *apu_vp_debug_voice_record(uint32_t handle);
 const uint32_t *apu_vp_debug_sge(void);

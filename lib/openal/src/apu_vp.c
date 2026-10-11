@@ -456,6 +456,68 @@ uint32_t apu_vp_service(uintptr_t bar0) {
  * ============================================================================
  */
 
+static uint32_t s_start_retries;   /* frame starts redone since boot (apu_vp_start_retries) */
+
+uint32_t apu_vp_start_retries(void) {
+    return s_start_retries;
+}
+
+#if defined(OPENAL_TARGET_XBOX)
+#include <xboxkrnl/xboxkrnl.h>
+
+/* The GP counts frames (1500/s): give it ~10 ms of XGSCNT to count three */
+static bool frames_running(uintptr_t bar0) {
+    uint32_t g0 = apu_gp_frames(bar0), x0 = reg_rd(bar0, MCPX_APU_XGSCNT), guard;
+    for (guard = 0; guard < 2000000u; guard++) {
+        if (((apu_gp_frames(bar0) - g0) & 0xFFFFFFu) >= 3u) {
+            return true;
+        }
+        if (reg_rd(bar0, MCPX_APU_XGSCNT) - x0 > 480u) {
+            break;
+        }
+    }
+    return false;
+}
+
+/*
+ * When the program ends (the kernel's quick reboot back to the dashboard, or
+ * to another program) the APU would keep running: the VP reading voice
+ * records, the GP writing its FIFO ring and the AC97 reading its buffers, all
+ * in memory the next program is given. Stop it all from the kernel's shutdown
+ * notification. (A periodic "beat" in the showcase run after other programs,
+ * and starts that ran no frames, fit memory written by a previous program's APU.)
+ */
+static HAL_SHUTDOWN_REGISTRATION s_shutdown;
+static bool s_shutdown_registered;
+static uintptr_t s_shutdown_bar0;
+
+static VOID NTAPI on_shutdown(PHAL_SHUTDOWN_REGISTRATION reg) {
+    uintptr_t bar0 = s_shutdown_bar0;
+    (void)reg;
+    apu_ac97_halt_dma();
+    reg_wr(bar0, MCPX_APU_TVL2D, MCPX_APU_LIST_END);
+    reg_wr(bar0, MCPX_APU_TVL3D, MCPX_APU_LIST_END);
+    reg_wr(bar0, MCPX_APU_TVLMP, MCPX_APU_LIST_END);
+    reg_wr(bar0, MCPX_APU_SECTL, 0);
+    reg_wr(bar0, MCPX_APU_GPRST, 0);
+    reg_wr(bar0, MCPX_APU_EPRST, 0);
+    reg_wr(bar0, MCPX_APU_IEN, 0);
+}
+
+static void register_shutdown(uintptr_t bar0, bool on) {
+    if (on && !s_shutdown_registered) {
+        s_shutdown_bar0 = bar0;
+        s_shutdown.NotificationRoutine = on_shutdown;
+        s_shutdown.Priority = 0;
+        HalRegisterShutdownNotification(&s_shutdown, TRUE);
+        s_shutdown_registered = true;
+    } else if (!on && s_shutdown_registered) {
+        HalRegisterShutdownNotification(&s_shutdown, FALSE);
+        s_shutdown_registered = false;
+    }
+}
+#endif
+
 static void free_tables(void) {
     if (s_voices) apu_mem_free_phys(s_voices);
     if (s_sge) apu_mem_free_phys(s_sge);
@@ -563,6 +625,26 @@ int apu_vp_init(uintptr_t bar0) {
 
     /* Start frame generation (17) */
     reg_wr(bar0, MCPX_APU_SECTL, MCPX_APU_SECTL_RUN);
+#if defined(OPENAL_TARGET_XBOX)
+    /* On a console a start occasionally ran one or two frames and stopped for
+     * good (openal_engine, apu_vp_stress F3, the showcase after other
+     * programs): check that the GP keeps counting frames and redo the GP and
+     * frame start if it does not */
+    {
+        uint32_t attempt;
+        for (attempt = 0; attempt < 3u && !frames_running(bar0); attempt++) {
+            s_start_retries++;
+            reg_wr(bar0, MCPX_APU_SECTL, 0);
+            apu_gp_deinit(bar0);
+            if (apu_gp_init(bar0) != 0) {
+                free_tables();
+                return -1;
+            }
+            reg_wr(bar0, MCPX_APU_SECTL, MCPX_APU_SECTL_RUN);
+        }
+    }
+    register_shutdown(bar0, true);
+#endif
     s_ready = true;
 
     /* Real console: nothing else turns the GP output into sound */
@@ -580,6 +662,9 @@ void apu_vp_deinit(uintptr_t bar0) {
     if (!s_ready) {
         return;
     }
+#if defined(OPENAL_TARGET_XBOX)
+    register_shutdown(bar0, false);
+#endif
     apu_ac97_stop();
     for (h = 0; h < APU_VP_MAX_HANDLES; h++) {
         unlink_voice(bar0, h);
