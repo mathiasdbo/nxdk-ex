@@ -33,7 +33,7 @@ typedef struct {
     uint32_t start_frame;   /* first frame of the next trigger */
 } voice_buffer_t;
 
-static voice_buffer_t s_voice_buffer[NV_PAPU_NUM_3D_VOICES];
+static voice_buffer_t s_voice_buffer[APU_VOICE_MAX_SLOTS];
 
 /* Direct mode (AL_XBOX_DIRECT_GAINS): the engine's left/right gains replace the pan */
 typedef struct {
@@ -41,15 +41,24 @@ typedef struct {
     float left, right;
 } voice_direct_t;
 
-static voice_direct_t s_voice_direct[NV_PAPU_NUM_3D_VOICES];
+static voice_direct_t s_voice_direct[APU_VOICE_MAX_SLOTS];
 
 /* Software model: play position of each slot (apu_voice_debug_set_position) */
-static uint32_t s_model_pos[NV_PAPU_NUM_3D_VOICES];
+static uint32_t s_model_pos[APU_VOICE_MAX_SLOTS];
 
 /* VP handle each slot last started (mono 3D sources: slot n -> HRTF handle n;
  * everything else: APU_VP_HANDLE_BASE + n), and each slot's source direction */
-static uint32_t s_voice_handle[NV_PAPU_NUM_3D_VOICES];
-static float s_voice_local[NV_PAPU_NUM_3D_VOICES][3];
+static uint32_t s_voice_handle[APU_VOICE_MAX_SLOTS];
+
+/* Slot that last started each VP handle. Handles are reused across slots, so a
+ * slot only stops, pauses or updates its handle while it still owns it */
+static uint16_t s_handle_slot[APU_VP_MAX_HANDLES];
+
+static bool owns_handle(uint32_t index) {
+    uint32_t h = s_voice_handle[index];
+    return h < APU_VP_MAX_HANDLES && s_handle_slot[h] == index;
+}
+static float s_voice_local[APU_VOICE_MAX_SLOTS][3];
 
 static uint32_t vp_handle(uint32_t index) {
     return s_voice_handle[index];
@@ -132,14 +141,19 @@ int apu_voice_subsystem_init(uintptr_t apu_base, void *context_array_virt, uint3
     s_voice_contexts = (NVAPU_VOICE_CONTEXT_3D *)context_array_virt;
     s_voice_contexts_phys = context_array_phys;
 
-    /* Reset all 64 contexts in the array */
+    /* Reset the 64 contexts every caller provides (the device's array holds
+     * APU_VOICE_MAX_SLOTS; the rest are reset below for the hardware backend) */
     for (i = 0; i < NV_PAPU_NUM_3D_VOICES; ++i) {
         apu_voice_context_reset(&s_voice_contexts[i]);
     }
     memset(s_voice_buffer, 0, sizeof(s_voice_buffer));
     memset(s_voice_local, 0, sizeof(s_voice_local));
-    for (i = 0; i < NV_PAPU_NUM_3D_VOICES; ++i) {
-        s_voice_handle[i] = APU_VP_HANDLE_BASE + i;
+    memset(s_voice_direct, 0, sizeof(s_voice_direct));
+    for (i = 0; i < APU_VOICE_MAX_SLOTS; ++i) {
+        s_voice_handle[i] = 0xFFFFu;   /* none yet: never turn off a handle another slot may hold */
+    }
+    for (i = 0; i < APU_VP_MAX_HANDLES; ++i) {
+        s_handle_slot[i] = 0xFFFFu;
     }
 
 #ifdef OPENAL_APU_REAL_MMIO
@@ -148,6 +162,9 @@ int apu_voice_subsystem_init(uintptr_t apu_base, void *context_array_virt, uint3
          * which target a register map that does not exist (XEMU_VERIFICATION.md C8.1) */
         if (apu_vp_init(s_apu_base) != 0) {
             return -2;
+        }
+        for (i = NV_PAPU_NUM_3D_VOICES; i < APU_VOICE_MAX_SLOTS; ++i) {
+            apu_voice_context_reset(&s_voice_contexts[i]);   /* alc_context.c allocates all of them */
         }
         s_vp_hw = true;
         s_subsystem_initialized = true;
@@ -224,7 +241,7 @@ void apu_voice_context_reset(NVAPU_VOICE_CONTEXT_3D *ctx)
 
 int apu_voice_setup(uint32_t index, const NVAPU_VOICE_CONTEXT_3D *ctx)
 {
-    if (index >= NV_PAPU_NUM_3D_VOICES || ctx == NULL || s_voice_contexts == NULL) {
+    if (index >= APU_VOICE_MAX_SLOTS || ctx == NULL || s_voice_contexts == NULL) {
         return -1;
     }
 
@@ -234,7 +251,7 @@ int apu_voice_setup(uint32_t index, const NVAPU_VOICE_CONTEXT_3D *ctx)
 
 NVAPU_VOICE_CONTEXT_3D *apu_voice_get_context(uint32_t index)
 {
-    if (index >= NV_PAPU_NUM_3D_VOICES || s_voice_contexts == NULL) {
+    if (index >= APU_VOICE_MAX_SLOTS || s_voice_contexts == NULL) {
         return NULL;
     }
 
@@ -245,7 +262,7 @@ int apu_voice_trigger(uintptr_t apu_base, uint32_t index)
 {
     uintptr_t base;
 
-    if (index >= NV_PAPU_NUM_3D_VOICES) {
+    if (index >= APU_VOICE_MAX_SLOTS) {
         return -1;
     }
 
@@ -276,13 +293,18 @@ int apu_voice_trigger(uintptr_t apu_base, uint32_t index)
          * with the table entry for the source direction, where the HRTF stage
          * is usable. Stereo, direct mode, or no HRTF: plain voice panned by volumes. */
         if (vb->channels == 1 && apu_vp_hrtf_available() && !s_voice_direct[index].on) {
+            if (owns_handle(index) && vp_handle(index) != index) {
+                apu_vp_voice_off(base, vp_handle(index));   /* its previous plain voice */
+            }
             s_voice_handle[index] = index;
             p.hrtf_entry = apu_hrtf_entry_for_local(s_voice_local[index]);
         } else {
             /* A fresh handle each start: the slot's previous voice may still be
              * in the VP's current frame, and its record must not be rewritten */
             uint32_t h = apu_vp_alloc_handle(base);
-            apu_vp_voice_off(base, vp_handle(index));
+            if (owns_handle(index)) {
+                apu_vp_voice_off(base, vp_handle(index));
+            }
             if (h == 0xFFFFu) {
                 s_voice_contexts[index].active = 0u;
                 return -2;
@@ -290,6 +312,7 @@ int apu_voice_trigger(uintptr_t apu_base, uint32_t index)
             s_voice_handle[index] = h;
             p.hrtf_entry = -1;
         }
+        s_handle_slot[vp_handle(index)] = (uint16_t)index;
         vp_params_from_context(index, ctx, p.hrtf_entry >= 0, &p.pitch, p.bins, p.vols);
         if (apu_vp_voice_start(base, vp_handle(index), &p) != 0) {
             s_voice_contexts[index].active = 0u;
@@ -314,7 +337,7 @@ int apu_voice_stop(uintptr_t apu_base, uint32_t index)
 {
     uintptr_t base;
 
-    if (index >= NV_PAPU_NUM_3D_VOICES) {
+    if (index >= APU_VOICE_MAX_SLOTS) {
         return -1;
     }
 
@@ -328,7 +351,9 @@ int apu_voice_stop(uintptr_t apu_base, uint32_t index)
     }
 
     if (s_vp_hw) {
-        apu_vp_voice_off(base, vp_handle(index));
+        if (owns_handle(index)) {
+            apu_vp_voice_off(base, vp_handle(index));
+        }
         return 0;
     }
 
@@ -348,14 +373,16 @@ int apu_voice_pause(uintptr_t apu_base, uint32_t index, int pause)
 {
     uintptr_t base;
 
-    if (index >= NV_PAPU_NUM_3D_VOICES) {
+    if (index >= APU_VOICE_MAX_SLOTS) {
         return -1;
     }
 
     base = (apu_base != 0) ? apu_base : s_apu_base;
 
     if (s_vp_hw) {
-        apu_vp_voice_pause(base, vp_handle(index), pause != 0);
+        if (owns_handle(index)) {
+            apu_vp_voice_pause(base, vp_handle(index), pause != 0);
+        }
         return 0;
     }
 
@@ -376,7 +403,7 @@ int apu_voice_is_active(uintptr_t apu_base, uint32_t index)
 {
     uintptr_t base;
 
-    if (index >= NV_PAPU_NUM_3D_VOICES) {
+    if (index >= APU_VOICE_MAX_SLOTS) {
         return 0;
     }
 
@@ -386,7 +413,7 @@ int apu_voice_is_active(uintptr_t apu_base, uint32_t index)
         /* apu_vp_voice_active() already treats a one-shot past its data as
          * ended; the service runs once per frame from apu_voice_service() */
         (void)base;
-        return apu_vp_voice_active(vp_handle(index)) ? 1 : 0;
+        return (owns_handle(index) && apu_vp_voice_active(vp_handle(index))) ? 1 : 0;
     }
 
     if (index < 32u) {
@@ -398,7 +425,7 @@ int apu_voice_is_active(uintptr_t apu_base, uint32_t index)
 
 void apu_voice_bind_buffer(uint32_t index, uint32_t phys, uint32_t bytes, int channels, int bits)
 {
-    if (index >= NV_PAPU_NUM_3D_VOICES) {
+    if (index >= APU_VOICE_MAX_SLOTS) {
         return;
     }
     s_voice_buffer[index].phys = phys;
@@ -412,7 +439,7 @@ void apu_voice_bind_buffer(uint32_t index, uint32_t phys, uint32_t bytes, int ch
 
 void apu_voice_bind_loop(uint32_t index, uint32_t loop_start, uint32_t loop_end, uint32_t start_frame)
 {
-    if (index >= NV_PAPU_NUM_3D_VOICES) {
+    if (index >= APU_VOICE_MAX_SLOTS) {
         return;
     }
     s_voice_buffer[index].loop_start = loop_start;
@@ -420,9 +447,23 @@ void apu_voice_bind_loop(uint32_t index, uint32_t loop_start, uint32_t loop_end,
     s_voice_buffer[index].start_frame = start_frame;
 }
 
+void apu_voice_set_looping(uintptr_t apu_base, uint32_t index, bool loop)
+{
+    if (index >= APU_VOICE_MAX_SLOTS) {
+        return;
+    }
+    if (s_voice_contexts != NULL) {
+        s_voice_contexts[index].loop_mode = loop ? NVAPU_VOICE_LOOP_ON : NVAPU_VOICE_LOOP_OFF;
+    }
+    if (s_vp_hw && owns_handle(index)) {
+        (void)apu_vp_voice_set_loop((apu_base != 0) ? apu_base : s_apu_base, vp_handle(index), loop,
+                                    s_voice_buffer[index].loop_start, s_voice_buffer[index].loop_end);
+    }
+}
+
 void apu_voice_set_direct(uint32_t index, bool on, float left, float right)
 {
-    if (index >= NV_PAPU_NUM_3D_VOICES) {
+    if (index >= APU_VOICE_MAX_SLOTS) {
         return;
     }
     s_voice_direct[index].on = on;
@@ -432,7 +473,7 @@ void apu_voice_set_direct(uint32_t index, bool on, float left, float right)
 
 void apu_voice_set_direction(uint32_t index, const float local_pos[3])
 {
-    if (index >= NV_PAPU_NUM_3D_VOICES || local_pos == NULL) {
+    if (index >= APU_VOICE_MAX_SLOTS || local_pos == NULL) {
         return;
     }
     memcpy(s_voice_local[index], local_pos, sizeof(s_voice_local[index]));
@@ -444,8 +485,8 @@ void apu_voice_commit(uintptr_t apu_base, uint32_t index)
     uint8_t bins[APU_VP_OUTPUTS];
     uint16_t vols[APU_VP_OUTPUTS];
 
-    if (!s_vp_hw || index >= NV_PAPU_NUM_3D_VOICES || s_voice_contexts == NULL ||
-        !s_voice_contexts[index].active) {
+    if (!s_vp_hw || index >= APU_VOICE_MAX_SLOTS || s_voice_contexts == NULL ||
+        !s_voice_contexts[index].active || !owns_handle(index)) {
         return;
     }
     {
@@ -466,7 +507,7 @@ void apu_voice_service(uintptr_t apu_base)
 
 uint32_t apu_voice_hw_handle(uint32_t index)
 {
-    return (index < NV_PAPU_NUM_3D_VOICES) ? vp_handle(index) : 0xFFFFu;
+    return (index < APU_VOICE_MAX_SLOTS && owns_handle(index)) ? vp_handle(index) : 0xFFFFu;
 }
 
 bool apu_voice_hw_backend(void)
@@ -481,18 +522,25 @@ uint32_t apu_voice_debug_stop_count(void)
 
 uint32_t apu_voice_get_position(uint32_t index)
 {
-    if (index >= NV_PAPU_NUM_3D_VOICES) {
+    if (index >= APU_VOICE_MAX_SLOTS) {
         return 0;
     }
     if (s_vp_hw) {
-        return apu_vp_voice_position(vp_handle(index));
+        return owns_handle(index) ? apu_vp_voice_position(vp_handle(index)) : 0u;
     }
     return s_model_pos[index];
 }
 
 void apu_voice_debug_set_position(uint32_t index, uint32_t frames)
 {
-    if (index < NV_PAPU_NUM_3D_VOICES) {
+    if (index < APU_VOICE_MAX_SLOTS) {
         s_model_pos[index] = frames;
     }
+}
+
+uint32_t apu_voice_slot_count(void)
+{
+    /* A console (no HRTF stage) plays plain voices on handles 0..127 */
+    return (s_vp_hw && !apu_vp_hrtf_available() && apu_vp_plain_handles() >= APU_VP_HW_HANDLES) ? APU_VOICE_HW_SLOTS
+                                                                                         : NV_PAPU_NUM_3D_VOICES;
 }

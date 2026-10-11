@@ -45,10 +45,13 @@
 #define   MCPX_APU_FETFORCE1_SE2FE_IDLE_VOICE (1u << 15)
 #define MCPX_APU_SECTL          0x2000u
 #define   MCPX_APU_SECTL_XCNTMODE   0x00000018u /* 0 = off; no frames unless non-zero */
-/* Frames on: XCNTMODE 1 plus bits 2:0 as DirectSound leaves them (7). Every
- * working probe kept bits 2:0 = 7; with only 0x08 a real console runs no
- * frames at all (openal_vp, first hardware run). xemu ignores bits 2:0. */
-#define   MCPX_APU_SECTL_RUN        0x0000000Fu
+/* Frames on: XCNTMODE 1. Measured on a console (samples/apu_probe3, part 2b):
+ * every value 0x08..0x0F runs frames at the full 1500/s, so bits 2:0 are not
+ * needed. (An early openal_vp build that wrote 0x08 ran no frames, but that
+ * build also loaded the GP image from write-combining memory, which ran stale
+ * code; the 0x0F used since came from state DirectSound leaves and is no
+ * longer used, see the clean-room note in XEMU_VERIFICATION.md 8.1b.) */
+#define   MCPX_APU_SECTL_RUN        0x00000008u
 #define MCPX_APU_XGSCNT         0x200Cu
 #define MCPX_APU_VPVADDR        0x202Cu         /* voice array, physical; voice h at + h * 0x80 */
 #define MCPX_APU_VPSGEADDR      0x2030u         /* SGE page table, physical */

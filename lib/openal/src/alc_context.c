@@ -199,7 +199,7 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
 
         /* 2. 8KB 4KB-aligned Voice Context Array */
         s_hw_voice_table_virt = apu_mem_alloc_phys(
-            NV_PAPU_VOICE_ARRAY_SIZE_3D,
+            APU_VOICE_MAX_SLOTS * NV_PAPU_VOICE_CONTEXT_SIZE,   /* 64 on the model, up to 128 on a console */
             NV_PAPU_VOICE_ARRAY_ALIGN,
             &s_hw_voice_table_phys
         );
@@ -210,7 +210,7 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
             alc_set_error(NULL, ALC_OUT_OF_MEMORY);
             return NULL;
         }
-        memset(s_hw_voice_table_virt, 0, NV_PAPU_VOICE_ARRAY_SIZE_3D);
+        memset(s_hw_voice_table_virt, 0, APU_VOICE_MAX_SLOTS * NV_PAPU_VOICE_CONTEXT_SIZE);
 
         /* 2b. Hardware ITD Circular Buffer Pool (16KB) */
         if (apu_itd_subsystem_init() != 0) {
@@ -383,8 +383,8 @@ ALC_API ALCcontext * ALC_APIENTRY alcCreateContext(ALCdevice *device, const ALCi
     ctx->frequency = 48000;
     ctx->refresh = 60;
     ctx->sync = ALC_FALSE;
-    ctx->mono_sources = 64;
-    ctx->stereo_sources = 32;
+    ctx->mono_sources = (ALCint)apu_voice_slot_count();
+    ctx->stereo_sources = (ALCint)(apu_voice_slot_count() / 2u);
 
     if (attrlist != NULL) {
         for (const ALCint *attr = attrlist; *attr != 0; attr += 2) {
@@ -578,9 +578,9 @@ ALC_API void ALC_APIENTRY alcGetIntegerv(ALCdevice *device, ALCenum param, ALCsi
             values[4] = ALC_SYNC;
             values[5] = ALC_FALSE;
             values[6] = ALC_MONO_SOURCES;
-            values[7] = 64;
+            values[7] = (ALCint)apu_voice_slot_count();
             values[8] = ALC_STEREO_SOURCES;
-            values[9] = 32;
+            values[9] = (ALCint)(apu_voice_slot_count() / 2u);
             values[10] = 0;
             break;
 
@@ -597,11 +597,11 @@ ALC_API void ALC_APIENTRY alcGetIntegerv(ALCdevice *device, ALCenum param, ALCsi
             break;
 
         case ALC_MONO_SOURCES:
-            *values = 64;
+            *values = (ALCint)apu_voice_slot_count();
             break;
 
         case ALC_STEREO_SOURCES:
-            *values = 32;
+            *values = (ALCint)(apu_voice_slot_count() / 2u);
             break;
 
         case ALC_CAPTURE_SAMPLES:
@@ -741,7 +741,7 @@ AL_API void AL_APIENTRY alXboxGetHardwareStatus(ALenum param, ALint *value) {
 
     switch (param) {
         case AL_XBOX_HW_VOICE_COUNT:
-            *value = 64;
+            *value = (ALint)apu_voice_slot_count();
             break;
 
         case AL_XBOX_AV_PACK_TYPE: {
@@ -789,7 +789,7 @@ AL_API void AL_APIENTRY alXboxGetHardwareStatus(ALenum param, ALint *value) {
             break;
 
         case AL_XBOX_FREE_VOICES:
-            *value = (s_active_device_count > 0) ? (ALint)(64u - apu_voice_mgr_get_active_hw_count()) : 0;
+            *value = (s_active_device_count > 0) ? (ALint)(apu_voice_slot_count() - apu_voice_mgr_get_active_hw_count()) : 0;
             break;
 
         /* The APU's sample space: buffers are mapped into it when a voice starts
