@@ -315,6 +315,9 @@ int apu_voice_trigger(uintptr_t apu_base, uint32_t index)
          * handle is the slot, below 64; on a console any fresh handle). Stereo,
          * direct mode, AL_XBOX_HRTF off, or no HRTF: plain voice panned by volumes. */
         bool want_hrtf = vb->channels == 1 && apu_vp_hrtf_available() && !s_voice_direct[index].on && s_hrtf_enabled;
+        if (want_hrtf && !apu_vp_front_end_ok() && apu_vp_hrtf_voices() >= APU_VP_HRTF_MAX_VOICES) {
+            want_hrtf = false;   /* the VP's HRTF budget is used up: pan this one by volume */
+        }
         s_slot_hrtf[index] = want_hrtf;
         if (want_hrtf && apu_vp_front_end_ok()) {
             if (owns_handle(index) && vp_handle(index) != index) {

@@ -1048,3 +1048,13 @@ bool apu_vp_voice_is_hrtf(uint32_t h) {
 const uint32_t *apu_vp_debug_hrtf_target(void) {
     return s_hrtf_hw ? s_hrtf_target : NULL;
 }
+
+uint32_t apu_vp_hrtf_voices(void) {
+    uint32_t h, n = 0;
+    for (h = 0; h < APU_VP_MAX_HANDLES; h++) {
+        if (s_voice_hrtf[h] && (s_list[h] != LIST_NONE || s_paused[h])) {
+            n++;
+        }
+    }
+    return n;
+}
