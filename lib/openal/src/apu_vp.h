@@ -41,7 +41,7 @@ extern "C" {
 #define APU_VP_HW_HANDLES    128u
 /* BA is 24-bit (16 MiB), but on a real console the VP stops all frame
  * processing for good when it fetches through an SGE entry above 2047
- * (apu_probe round 18; the dashboard leaves 0x2018 = 0x7FF): 2048 entries,
+ * (apu_probe round 18): 2048 entries,
  * an 8 MiB linear space of 4 KiB pages */
 #define APU_VP_SGE_ENTRIES   2048u
 #define APU_VP_OUTPUTS       8
@@ -127,6 +127,7 @@ void apu_vp_debug_set_map_guard(uint32_t pages);
 #define APU_VP_DBG_NO_END_SCAN      8u   /* apu_vp_service() leaves one-shots in their silent tail listed */
 #define APU_VP_DBG_NO_FE_PROBE     16u   /* apu_vp_init() sends no methods and assumes a real console */
 #define APU_VP_DBG_NO_AC97_THREAD  32u   /* pump the AC97 from apu_vp_service(), no thread (next apu_vp_init()) */
+#define APU_VP_DBG_HANDLES_HIGH    64u   /* a console allocates handles 64..127 only, as before handles 0..63 were used */
 void apu_vp_debug_set_flags(uint32_t flags);
 
 /** Copy up to `max` of the most recent operations, oldest first. @return count. */
@@ -147,6 +148,17 @@ int apu_vp_voice_start(uintptr_t bar0, uint32_t handle, const apu_vp_voice_param
 void apu_vp_voice_update(uintptr_t bar0, uint32_t handle, int16_t pitch, const uint16_t vols[APU_VP_OUTPUTS],
                          int hrtf_entry);
 
+/**
+ * Switch looping on or off while the voice plays (AL_LOOPING), by rewriting
+ * its loop markers in place. Off: the voice plays on to the end of its data
+ * and stops there. On: it loops [loop_start, loop_end) (loop_end 0 = the whole
+ * buffer); if it is already past the loop end it first plays to the end of
+ * the data. Works on paused voices too.
+ * @return 0, or negative if the handle is not playing, has already ended, or
+ *         cannot be released (no silent tail).
+ */
+int apu_vp_voice_set_loop(uintptr_t bar0, uint32_t h, bool loop, uint32_t loop_start, uint32_t loop_end);
+
 /** Pause (true: off its list, position kept) or resume (false: back on top of the 2D list). */
 void apu_vp_voice_pause(uintptr_t bar0, uint32_t handle, bool pause);
 
@@ -163,6 +175,9 @@ void apu_vp_voice_off(uintptr_t bar0, uint32_t handle);
  * @return the handle, or 0xFFFF if none is free.
  */
 uint32_t apu_vp_alloc_handle(uintptr_t bar0);
+
+/** Handles apu_vp_alloc_handle() can return: 192 on xemu, 128 on a console (64 with APU_VP_DBG_HANDLES_HIGH). */
+uint32_t apu_vp_plain_handles(void);
 
 /** Playing or paused: false once a one-shot ended or the voice was switched off. */
 bool apu_vp_voice_active(uint32_t handle);
@@ -184,6 +199,12 @@ uint32_t apu_vp_service(uintptr_t bar0);
  * by this call), so freeing and loading buffers never runs the space out.
  */
 uint32_t apu_vp_sample_pages_used(uintptr_t bar0);
+
+/**
+ * Frame starts apu_vp_init() had to redo since boot because the GP counted no
+ * frames after the first one (a console only; 0 is the normal case).
+ */
+uint32_t apu_vp_start_retries(void);
 
 /** Voice record of a handle and the SGE table (host tests). */
 uint8_t *apu_vp_debug_voice_record(uint32_t handle);

@@ -39,6 +39,11 @@ static uint32_t s_retired_at[APU_VP_MAX_HANDLES]; /* XGSCNT when the handle left
 static uint8_t s_retired[APU_VP_MAX_HANDLES];     /* has left a list since init */
 static uint32_t s_alloc_next;                      /* round-robin start for apu_vp_alloc_handle() */
 static uint32_t s_handle_page[APU_VP_MAX_HANDLES]; /* page_phys of the mapping the handle's buffer uses */
+static uint32_t s_frames[APU_VP_MAX_HANDLES];      /* data frames of the buffer the handle plays */
+static uint32_t s_tail[APU_VP_MAX_HANDLES];        /* silent-tail frames after them (0: none) */
+static uint32_t s_pending_ebo[APU_VP_MAX_HANDLES];  /* loop end - 1 to set once the voice is before it, 0 = none */
+static uint32_t s_loop_start[APU_VP_MAX_HANDLES];   /* with s_pending_ebo */
+#define LOOP_MARGIN_FRAMES 1024u   /* frames a voice may advance between a read of CBO and an EBO write */
 
 /* XGSCNT samples a handle stays unused after leaving its list: more than one
  * 32-sample frame, so the VP has finished any frame that was processing it */
@@ -388,6 +393,19 @@ uint32_t apu_vp_service(uintptr_t bar0) {
         reg_wr(bar0, MCPX_APU_ISTS, MCPX_APU_ISTS_FETINTSTS);
         served++;
     }
+    /* A voice set looping past its loop end gets the loop end once it has
+     * wrapped back before it (apu_vp_voice_set_loop) */
+    for (h = 0; h < APU_VP_MAX_HANDLES; h++) {
+        uint32_t c;
+        if (s_pending_ebo[h] == 0u || s_list[h] == LIST_NONE) {
+            continue;
+        }
+        c = *voice_dw(h, MCPX_VOICE_PAR_OFFSET) & 0xFFFFFFu;
+        if (c >= s_loop_start[h] && c + LOOP_MARGIN_FRAMES < s_pending_ebo[h]) {
+            *voice_dw(h, MCPX_VOICE_PAR_NEXT) = s_pending_ebo[h];
+            s_pending_ebo[h] = 0;
+        }
+    }
     /* One-shots that ended: the VP cleared ACTIVE_VOICE, or (real console) CBO
      * passed the data into the silent tail; take them off their list */
     for (h = 0; h < APU_VP_MAX_HANDLES && !(s_dbg & APU_VP_DBG_NO_END_SCAN); h++) {
@@ -438,6 +456,68 @@ uint32_t apu_vp_service(uintptr_t bar0) {
  * ============================================================================
  */
 
+static uint32_t s_start_retries;   /* frame starts redone since boot (apu_vp_start_retries) */
+
+uint32_t apu_vp_start_retries(void) {
+    return s_start_retries;
+}
+
+#if defined(OPENAL_TARGET_XBOX)
+#include <xboxkrnl/xboxkrnl.h>
+
+/* The GP counts frames (1500/s): give it ~10 ms of XGSCNT to count three */
+static bool frames_running(uintptr_t bar0) {
+    uint32_t g0 = apu_gp_frames(bar0), x0 = reg_rd(bar0, MCPX_APU_XGSCNT), guard;
+    for (guard = 0; guard < 2000000u; guard++) {
+        if (((apu_gp_frames(bar0) - g0) & 0xFFFFFFu) >= 3u) {
+            return true;
+        }
+        if (reg_rd(bar0, MCPX_APU_XGSCNT) - x0 > 480u) {
+            break;
+        }
+    }
+    return false;
+}
+
+/*
+ * When the program ends (the kernel's quick reboot back to the dashboard, or
+ * to another program) the APU would keep running: the VP reading voice
+ * records, the GP writing its FIFO ring and the AC97 reading its buffers, all
+ * in memory the next program is given. Stop it all from the kernel's shutdown
+ * notification. (A periodic "beat" in the showcase run after other programs,
+ * and starts that ran no frames, fit memory written by a previous program's APU.)
+ */
+static HAL_SHUTDOWN_REGISTRATION s_shutdown;
+static bool s_shutdown_registered;
+static uintptr_t s_shutdown_bar0;
+
+static VOID NTAPI on_shutdown(PHAL_SHUTDOWN_REGISTRATION reg) {
+    uintptr_t bar0 = s_shutdown_bar0;
+    (void)reg;
+    apu_ac97_halt_dma();
+    reg_wr(bar0, MCPX_APU_TVL2D, MCPX_APU_LIST_END);
+    reg_wr(bar0, MCPX_APU_TVL3D, MCPX_APU_LIST_END);
+    reg_wr(bar0, MCPX_APU_TVLMP, MCPX_APU_LIST_END);
+    reg_wr(bar0, MCPX_APU_SECTL, 0);
+    reg_wr(bar0, MCPX_APU_GPRST, 0);
+    reg_wr(bar0, MCPX_APU_EPRST, 0);
+    reg_wr(bar0, MCPX_APU_IEN, 0);
+}
+
+static void register_shutdown(uintptr_t bar0, bool on) {
+    if (on && !s_shutdown_registered) {
+        s_shutdown_bar0 = bar0;
+        s_shutdown.NotificationRoutine = on_shutdown;
+        s_shutdown.Priority = 0;
+        HalRegisterShutdownNotification(&s_shutdown, TRUE);
+        s_shutdown_registered = true;
+    } else if (!on && s_shutdown_registered) {
+        HalRegisterShutdownNotification(&s_shutdown, FALSE);
+        s_shutdown_registered = false;
+    }
+}
+#endif
+
 static void free_tables(void) {
     if (s_voices) apu_mem_free_phys(s_voices);
     if (s_sge) apu_mem_free_phys(s_sge);
@@ -486,6 +566,7 @@ int apu_vp_init(uintptr_t bar0) {
     memset(s_soft_end, 0, sizeof(s_soft_end));
     memset(s_retired, 0, sizeof(s_retired));
     memset(s_handle_page, 0, sizeof(s_handle_page));
+    memset(s_pending_ebo, 0, sizeof(s_pending_ebo));
     s_alloc_next = 0;
     memset(s_notify, 0, APU_VP_NOTIFY_BYTES);
     memset(s_sge_used, 0, sizeof(s_sge_used));
@@ -544,6 +625,26 @@ int apu_vp_init(uintptr_t bar0) {
 
     /* Start frame generation (17) */
     reg_wr(bar0, MCPX_APU_SECTL, MCPX_APU_SECTL_RUN);
+#if defined(OPENAL_TARGET_XBOX)
+    /* On a console a start occasionally ran one or two frames and stopped for
+     * good (openal_engine, apu_vp_stress F3, the showcase after other
+     * programs): check that the GP keeps counting frames and redo the GP and
+     * frame start if it does not */
+    {
+        uint32_t attempt;
+        for (attempt = 0; attempt < 3u && !frames_running(bar0); attempt++) {
+            s_start_retries++;
+            reg_wr(bar0, MCPX_APU_SECTL, 0);
+            apu_gp_deinit(bar0);
+            if (apu_gp_init(bar0) != 0) {
+                free_tables();
+                return -1;
+            }
+            reg_wr(bar0, MCPX_APU_SECTL, MCPX_APU_SECTL_RUN);
+        }
+    }
+    register_shutdown(bar0, true);
+#endif
     s_ready = true;
 
     /* Real console: nothing else turns the GP output into sound */
@@ -561,6 +662,9 @@ void apu_vp_deinit(uintptr_t bar0) {
     if (!s_ready) {
         return;
     }
+#if defined(OPENAL_TARGET_XBOX)
+    register_shutdown(bar0, false);
+#endif
     apu_ac97_stop();
     for (h = 0; h < APU_VP_MAX_HANDLES; h++) {
         unlink_voice(bar0, h);
@@ -661,6 +765,9 @@ int apu_vp_voice_start(uintptr_t bar0, uint32_t h, const apu_vp_voice_params_t *
     *voice_dw(h, MCPX_VOICE_PAR_OFFSET) = start;                      /* CBO */
     *voice_dw(h, MCPX_VOICE_PAR_NEXT) = soft_end ? frames - 1u + tail_frames : (p->loop ? loop_end - 1u : frames - 1u);
     s_soft_end[h] = soft_end ? frames : 0u;
+    s_frames[h] = frames;
+    s_tail[h] = tail_frames;
+    s_pending_ebo[h] = 0;
     *voice_dw(h, MCPX_VOICE_TAR_VOLA) = vola;
     *voice_dw(h, MCPX_VOICE_TAR_VOLB) = volb;
     *voice_dw(h, MCPX_VOICE_TAR_VOLC) = volc;
@@ -701,6 +808,82 @@ void apu_vp_voice_update(uintptr_t bar0, uint32_t h, int16_t pitch, const uint16
 }
 
 /* Pause = out of the list (the VP leaves the record, and CBO, alone); resume = back on top */
+/*
+ * Looping on or off while the voice plays (AL_LOOPING). The VP follows
+ * single-dword changes of LBO and EBO in a live record and keeps them (apu_probe2
+ * B1-B3 on a console); the order of the two writes keeps EBO ahead of the play
+ * position at every moment, so the voice never runs past it:
+ *   off ("release"): EBO := end of the silent tail, then LBO := end of the data;
+ *                    the voice plays on and the end scan stops it in the tail
+ *   on:              LBO := loop start, then EBO := loop end - 1 if the play
+ *                    position is well before it, else the end of the data (the
+ *                    loop end is set at a later service once the voice has wrapped)
+ */
+int apu_vp_voice_set_loop(uintptr_t bar0, uint32_t h, bool loop, uint32_t loop_start, uint32_t loop_end) {
+    volatile uint32_t *lbo, *ebo;
+    uint32_t frames, ls, le, cbo;
+
+    if (!s_ready || h >= APU_VP_MAX_HANDLES || (s_list[h] == LIST_NONE && !s_paused[h]) || s_frames[h] == 0u) {
+        return -1;
+    }
+    frames = s_frames[h];
+    le = (loop_end == 0u || loop_end > frames) ? frames : loop_end;
+    ls = (loop_start < le) ? loop_start : 0u;
+    lbo = voice_dw(h, MCPX_VOICE_CUR_PSH_SAMPLE);
+    ebo = voice_dw(h, MCPX_VOICE_PAR_NEXT);
+    cbo = *voice_dw(h, MCPX_VOICE_PAR_OFFSET) & 0xFFFFFFu;
+    s_pending_ebo[h] = 0;
+
+    if (s_fe_ok) {
+        /* xemu: voices end for real, the FMT loop bit decides */
+        volatile uint32_t *fmt = voice_dw(h, MCPX_VOICE_CFG_FMT);
+        if (loop) {
+            *lbo = (*lbo & 0xFF000000u) | ls;
+            *ebo = le - 1u;
+            *fmt |= MCPX_FMT_LOOP;
+        } else {
+            *fmt &= ~MCPX_FMT_LOOP;
+            *ebo = frames - 1u;
+        }
+        trace(bar0, loop ? 'P' : 'R', h, cbo);
+        return 0;
+    }
+    if (!loop) {
+        if (s_soft_end[h] != 0u) {
+            return 0;          /* already a one-shot */
+        }
+        if (s_tail[h] == 0u) {
+            return -1;         /* no silent tail to end in: it keeps looping */
+        }
+        *ebo = frames - 1u + s_tail[h];
+        wc_flush();
+        *lbo = (*lbo & 0xFF000000u) | frames;
+        s_soft_end[h] = frames;
+        trace(bar0, 'R', h, cbo);   /* released: a = CBO */
+        return 0;
+    }
+    if (s_soft_end[h] == 0u) {
+        return 0;              /* already looping (loop points are fixed while the buffer is in use) */
+    }
+    if (cbo >= frames) {
+        return -1;             /* already in its silent tail: it has ended */
+    }
+    *lbo = (*lbo & 0xFF000000u) | ls;
+    wc_flush();
+    if (cbo + LOOP_MARGIN_FRAMES < le) {
+        *ebo = le - 1u;
+    } else {
+        *ebo = frames - 1u;    /* past (or near) the loop end: once to the end of the data, then the loop */
+        if (le < frames) {
+            s_pending_ebo[h] = le - 1u;
+            s_loop_start[h] = ls;
+        }
+    }
+    s_soft_end[h] = 0;
+    trace(bar0, 'P', h, cbo);       /* looping again: a = CBO */
+    return 0;
+}
+
 void apu_vp_voice_pause(uintptr_t bar0, uint32_t h, bool pause) {
     if (!s_ready || h >= APU_VP_MAX_HANDLES) {
         return;
@@ -734,22 +917,25 @@ void apu_vp_voice_off(uintptr_t bar0, uint32_t h) {
 
 uint32_t apu_vp_alloc_handle(uintptr_t bar0) {
     uint32_t now, k, h;
-    uint32_t span;
+    uint32_t base, span;
 
     if (!s_ready) {
         return MCPX_APU_LIST_END;
     }
-    span = (s_fe_ok ? APU_VP_MAX_HANDLES : APU_VP_HW_HANDLES) - APU_VP_HANDLE_BASE;
+    /* xemu: 64..255 (0..63 are the HRTF voices); a console: every handle 0..127
+     * (no HRTF stage there, and handles 0..63 play as plain voices, apu_probe3) */
+    base = (s_fe_ok || (s_dbg & APU_VP_DBG_HANDLES_HIGH)) ? APU_VP_HANDLE_BASE : 0u;
+    span = (s_fe_ok ? APU_VP_MAX_HANDLES : APU_VP_HW_HANDLES) - base;
     now = reg_rd(bar0, MCPX_APU_XGSCNT);
     for (k = 0; k < span; k++) {
-        h = APU_VP_HANDLE_BASE + (s_alloc_next + k) % span;
+        h = base + (s_alloc_next + k) % span;
         if (s_list[h] != LIST_NONE || s_paused[h]) {
             continue;
         }
         if (s_retired[h] && now - s_retired_at[h] < APU_VP_QUARANTINE_SAMPLES) {
             continue;
         }
-        s_alloc_next = (h - APU_VP_HANDLE_BASE + 1u) % span;
+        s_alloc_next = (h - base + 1u) % span;
         return h;
     }
     return MCPX_APU_LIST_END;
@@ -780,4 +966,11 @@ uint8_t *apu_vp_debug_voice_record(uint32_t h) {
 
 const uint32_t *apu_vp_debug_sge(void) {
     return s_sge;
+}
+
+uint32_t apu_vp_plain_handles(void) {
+    if (s_fe_ok) {
+        return APU_VP_MAX_HANDLES - APU_VP_HANDLE_BASE;
+    }
+    return (s_dbg & APU_VP_DBG_HANDLES_HIGH) ? APU_VP_HW_HANDLES - APU_VP_HANDLE_BASE : APU_VP_HW_HANDLES;
 }

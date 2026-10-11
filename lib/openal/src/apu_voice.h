@@ -294,6 +294,13 @@ void apu_voice_bind_loop(uint32_t index, uint32_t loop_start, uint32_t loop_end,
 void apu_voice_set_direct(uint32_t index, bool on, float left, float right);
 
 /**
+ * Switch looping of a running voice (AL_LOOPING while playing or paused): the
+ * hardware backend rewrites its loop markers in place (apu_vp_voice_set_loop);
+ * the software model updates the context's loop mode.
+ */
+void apu_voice_set_looping(uintptr_t apu_base, uint32_t index, bool loop);
+
+/**
  * Record a voice slot's source position in the listener frame (+x right,
  * +y up, +z behind); the hardware backend picks the HRTF entry from it.
  */
@@ -321,6 +328,19 @@ uint32_t apu_voice_hw_handle(uint32_t index);
  * True when the voice calls drive the hardware Voice Processor.
  */
 bool apu_voice_hw_backend(void);
+
+/*
+ * Voice slots (the library's hardware voices, what the voice manager hands to
+ * sources). The software model and xemu have 64 (on xemu, mono slot n plays
+ * on HRTF handle n). A real console has 120: its VP plays every handle 0..127
+ * as a plain voice (apu_probe3: all 128 advance, 2389 restarts in 5 s); 8
+ * handles stay spare so a restart always finds one past the one-frame quarantine.
+ */
+#define APU_VOICE_MAX_SLOTS 128u
+#define APU_VOICE_HW_SLOTS  120u
+
+/** Voice slots of the active backend: APU_VOICE_HW_SLOTS on a console, 64 otherwise. */
+uint32_t apu_voice_slot_count(void);
 
 /**
  * Sample frame a voice slot is playing in its buffer: the VP's CBO on the

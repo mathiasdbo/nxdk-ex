@@ -22,6 +22,8 @@
 #include "apu_hardware.h"
 #include "apu_voice.h"
 #include "apu_vp.h"
+#include "al_source.h"
+#include "mcpx_apu_regs.h"
 
 #if defined(NXDK) || defined(__NXDK__) || defined(_XBOX)
 #  include <stdarg.h>
@@ -83,7 +85,8 @@ static void log_tick(const showcase_app_t *app, const showcase_perf_t *perf, boo
     if (t0 == 0) {
         t0 = t_last = t_saved = now;
         gp_last = apu_ok ? apu_gp_frames((uintptr_t)NV_PAPU_BASE) : 0;
-        log_line("openal_showcase: audio %s\n", apu_ok ? "APU (VP+GP)" : "CPU mixer / silent");
+        log_line("openal_showcase: audio %s, APU frame-start retries %lu\n", apu_ok ? "APU (VP+GP)" : "CPU mixer / silent",
+                 (unsigned long)apu_vp_start_retries());
         return;
     }
     if (now - t_last < 1000u) {
@@ -94,10 +97,35 @@ static void log_tick(const showcase_app_t *app, const showcase_perf_t *perf, boo
         apu_ac97_stats_t as;
         uint32_t gp = apu_gp_frames((uintptr_t)NV_PAPU_BASE);
         apu_ac97_get_stats(&as);
-        log_line("t %6lu ms mode %d fps %5.1f audio %5.2f ms scene %5.2f ms voices %2u GP %7lu AC97 %6lu und %lu pad %lu\n",
-                 (unsigned long)(now - t0), app->current_mode, perf->fps, perf->audio_ms, perf->scene_ms,
-                 (unsigned)perf->voices, (unsigned long)gp, (unsigned long)as.chunks, (unsigned long)as.underruns,
-                 (unsigned long)as.padded);
+        /* nxdk's printf has no %f: times in 1/100 ms, fps in 1/10 */
+        log_line("t %6lu ms mode %d fps %ld/10 audio %ld/100 ms scene %ld/100 ms voices %2u GP %7lu AC97 %6lu und %lu pad %lu\n",
+                 (unsigned long)(now - t0), app->current_mode, (long)(perf->fps * 10.0f),
+                 (long)(perf->audio_ms * 100.0f), (long)(perf->scene_ms * 100.0f), (unsigned)perf->voices,
+                 (unsigned long)gp, (unsigned long)as.chunks, (unsigned long)as.underruns, (unsigned long)as.padded);
+        {   /* the orbit source (mode 1, helicopter loop): its voice as the VP sees it */
+            ALsource *o = al_source_get(app->src_orbit);
+            ALint st = 0, off = 0;
+            alGetSourcei(app->src_orbit, AL_SOURCE_STATE, &st);
+            alGetSourcei(app->src_orbit, AL_SAMPLE_OFFSET, &off);
+            if (o && o->hw_voice_idx >= 0) {
+                uint32_t h = apu_voice_hw_handle((uint32_t)o->hw_voice_idx);
+                const volatile uint32_t *r = (h < APU_VP_MAX_HANDLES)
+                                                 ? (const volatile uint32_t *)apu_vp_debug_voice_record(h)
+                                                 : NULL;
+                log_line("   orbit: state %x offset %ld slot %d handle %lu", (unsigned)st, (long)off, o->hw_voice_idx,
+                         (unsigned long)h);
+                if (r) {
+                    log_line(" FMT %08lx LBO %08lx CBO %08lx EBO %08lx pitch %04lx vol %08lx state %08lx",
+                             (unsigned long)r[MCPX_VOICE_CFG_FMT / 4], (unsigned long)r[MCPX_VOICE_CUR_PSH_SAMPLE / 4],
+                             (unsigned long)r[MCPX_VOICE_PAR_OFFSET / 4], (unsigned long)r[MCPX_VOICE_PAR_NEXT / 4],
+                             (unsigned long)(r[MCPX_VOICE_TAR_PITCH_LINK / 4] >> 16), (unsigned long)r[MCPX_VOICE_TAR_VOLA / 4],
+                             (unsigned long)r[MCPX_VOICE_PAR_STATE / 4]);
+                }
+                log_line("\n");
+            } else {
+                log_line("   orbit: state %x offset %ld, no voice\n", (unsigned)st, (long)off);
+            }
+        }
         if (gp == gp_last && !stalled) {
             /* Frames stopped: keep the driver's last list operations */
             static apu_vp_trace_t tr[64];
@@ -113,9 +141,9 @@ static void log_tick(const showcase_app_t *app, const showcase_perf_t *perf, boo
         }
         gp_last = gp;
     } else {
-        log_line("t %6lu ms mode %d fps %5.1f audio %5.2f ms scene %5.2f ms voices %2u und %u\n",
-                 (unsigned long)(now - t0), app->current_mode, perf->fps, perf->audio_ms, perf->scene_ms,
-                 (unsigned)perf->voices, (unsigned)perf->underruns);
+        log_line("t %6lu ms mode %d fps %ld/10 audio %ld/100 ms scene %ld/100 ms voices %2u und %u\n",
+                 (unsigned long)(now - t0), app->current_mode, (long)(perf->fps * 10.0f), (long)(perf->audio_ms * 100.0f),
+                 (long)(perf->scene_ms * 100.0f), (unsigned)perf->voices, (unsigned)perf->underruns);
     }
     if (now - t_saved >= 5000u) {
         log_save();
@@ -124,10 +152,10 @@ static void log_tick(const showcase_app_t *app, const showcase_perf_t *perf, boo
 }
 #endif
 
-/* Sources the APU is playing (VP voices of the 64 library slots) */
+/* Sources the APU is playing (VP voices of the library's slots) */
 static uint32_t apu_active_voices(void) {
     uint32_t i, n = 0;
-    for (i = 0; i < 64u; i++) {
+    for (i = 0; i < apu_voice_slot_count(); i++) {
         if (apu_vp_voice_active(apu_voice_hw_handle(i))) {
             n++;
         }
@@ -154,6 +182,10 @@ int main(void) {
 
     /* 4. Initialize OpenAL APU Audio & Asset Subsystem */
     static showcase_app_t app;
+#ifdef SHOWCASE_HIGH_HANDLES
+    /* A/B diagnostic: VP handles 64..127 only, as before handles 0..63 were used */
+    apu_vp_debug_set_flags(APU_VP_DBG_HANDLES_HIGH);
+#endif
     if (showcase_app_init(&app) != 0) {
         showcase_input_shutdown();
         showcase_scene_shutdown();

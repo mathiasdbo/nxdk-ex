@@ -56,6 +56,13 @@ int apu_ac97_start(uintptr_t bar0);
 /** Queue whatever the GP has written since the last call (non-blocking; nothing while the pump thread runs). */
 void apu_ac97_pump(uintptr_t bar0);
 
+/**
+ * Stop the AC97 PCM-out DMA at once, without touching the driver's state
+ * (shutdown notification: the program is ending, its buffers are about to be
+ * freed and must not be read any more).
+ */
+void apu_ac97_halt_dma(void);
+
 /** Stop the pump thread, pause the AC97 output and free the buffers. */
 void apu_ac97_stop(void);
 

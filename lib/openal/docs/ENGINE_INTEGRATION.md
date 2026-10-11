@@ -27,7 +27,7 @@ the AC97 codec. Console verification of each feature is recorded in `XEMU_VERIFI
 
 | Resource | Limit | Notes |
 | --- | --- | --- |
-| Hardware voices | 64 | handles 64-127; the APU stops for good on a higher handle, and the driver refuses one |
+| Hardware voices | 120 (64 on xemu) | handles 0-127; the APU can stop for good on a higher handle, and the driver refuses one |
 | Sources | 256 | the rest wait in virtual standby, or stop (`AL_XBOX_VIRTUALIZE`) |
 | Buffers | 2048 | |
 | Formats | mono/stereo, 8-bit unsigned or 16-bit signed PCM | any sample rate; no ADPCM, no multichannel |
@@ -88,9 +88,10 @@ alBufferiv(buf, AL_LOOP_POINTS_SOFT, lp);
 alSourcei(src, AL_LOOPING, AL_TRUE);
 ```
 
-The voice plays from the start, then repeats `[start, end)` in hardware. Stop the sound with `alSourceStop`.
-Changing `AL_LOOPING` while the source plays applies at its next play on a console: the library never rewrites
-the record of a voice the APU may be reading.
+The voice plays from the start, then repeats `[start, end)` in hardware. Stop the sound with `alSourceStop`, or
+set `AL_LOOPING` to `AL_FALSE` while it plays to let it play on to the end of the data and stop there.
+Setting it to `AL_TRUE` on a playing one-shot makes it loop (if it is already past the loop end, it first plays
+to the end of the data).
 
 ### 3.4 Positions and seeking
 

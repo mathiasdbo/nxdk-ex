@@ -427,7 +427,7 @@ void al_source_update_all_gains(void) {
 
 void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
     const ALbuffer *pb = al_source_play_buffer(src);
-    if (!src || pb == NULL || hw_voice_idx >= NV_PAPU_NUM_3D_VOICES) {
+    if (!src || pb == NULL || hw_voice_idx >= APU_VOICE_MAX_SLOTS) {
         return;
     }
 
@@ -1022,11 +1022,12 @@ AL_API void AL_APIENTRY alSourcei(ALuint source, ALenum param, ALint value) {
                 return;
             }
             src->looping = (ALboolean)value;
-            {
-                NVAPU_VOICE_CONTEXT_3D *ctx = source_live_context(src);
-                if (ctx) {
-                    ctx->loop_mode = al_source_voice_loops(src) ? NVAPU_VOICE_LOOP_ON : NVAPU_VOICE_LOOP_OFF;
-                }
+            if (source_live_context(src)) {
+                /* A playing or paused voice changes at once: released, it plays on
+                 * to its end; set looping, it repeats its loop section. A stream's
+                 * ring always loops (al_stream.c handles AL_LOOPING itself). */
+                apu_voice_set_looping(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx,
+                                      al_source_voice_loops(src));
             }
             break;
 
