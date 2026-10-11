@@ -1,7 +1,14 @@
 # Reverb on the GP DSP (F8): implementation plan
 
-Branch `feat/gp-reverb`. Status: plan, nothing implemented. Facts below marked *measured* come from our probes
-(`XEMU_VERIFICATION.md` 8.1b); the rest is xemu's model or a design choice, and phase 0 measures it.
+Branch `feat/gp-reverb`. Status: phases 0 and 2 done on a console (`samples/apu_gp_probe` rounds 1-2), the
+assembler of phase 1 done; the reverb program (phase 3) next. Facts marked *measured* come from our probes
+(`XEMU_VERIFICATION.md` 8.1b).
+
+**Phase 0/2 results, in short:** on-chip RAM is X 3072 + Y 2048 words (as in xemu), so the delay lines go to
+system RAM over DMA as planned; circular scratch DMA works both ways (blocks need `dsp_step` = 1); a chained
+write/read pair delays by exactly the planned amount; the end-of-list flag works as the wait; 64000 cycles and
+64 descriptors per frame still run at full rate; output 4 of plain and HRTF voices reaches bin 2; an echo on the
+GP came out sample-exact, also for delays that are not a multiple of 32.
 
 ## 1. Goal
 
@@ -43,8 +50,8 @@ no dumps, no state left by other software.
 - **Instructions (measured).** `movep #imm`, `jclr`, `inc a`, `move a0,x:aa`, `jmp`. xemu's interpreter
   implements 106 of the 187 templates and asserts on the rest, so a program that runs on xemu decodes
   everywhere we need; the reverse is not guaranteed (xemu may lack an instruction the silicon has).
-- **Unknown.** The GP clock and so the instruction budget per frame; DMA throughput and latency; whether
-  memory -> DSP scratch DMA works on silicon as modelled.
+- **Unknown before phase 0 (now measured, see the status above).** The GP clock and so the instruction budget
+  per frame; DMA throughput and latency; whether memory -> DSP scratch DMA works on silicon as modelled.
 
 ## 3. Design
 
