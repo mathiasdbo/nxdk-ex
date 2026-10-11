@@ -343,6 +343,16 @@ bool apu_voice_hw_backend(void);
 uint32_t apu_voice_slot_count(void);
 
 /**
+ * AL_XBOX_HRTF: mono 3D sources play through the APU's HRTF stage where it is
+ * usable (on by default). Takes effect at the next voice start.
+ */
+void apu_voice_set_hrtf_enabled(bool on);
+bool apu_voice_hrtf_enabled(void);
+
+/** True if HRTF is on and the hardware backend can do it (xemu, or a console). */
+bool apu_voice_hrtf_active(void);
+
+/**
  * Sample frame a voice slot is playing in its buffer: the VP's CBO on the
  * hardware backend; on the software model, the value last set with
  * apu_voice_debug_set_position() (0 after a trigger), since nothing plays there.

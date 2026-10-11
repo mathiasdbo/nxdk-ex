@@ -266,17 +266,41 @@ int main(void) {
     memset(s_bar0, 0, BAR0_SIZE);
     set_reg(MCPX_APU_FEPIOQ, 0x00191901u);                           /* one method stuck in the queue */
     assert(apu_vp_init(base) == 0);
-    assert(!apu_vp_hrtf_available());
+    assert(!apu_vp_front_end_ok() && apu_vp_hrtf_available());       /* HRTF through the arrays, no methods */
     assert(reg(MCPX_APU_FETFORCE1) == 0);                            /* ended voices must not halt frames */
     assert(meth(MCPX_METH_SET_HRIR_X) == 0 && meth(MCPX_METH_SET_HRTF_SUBMIXES) == 0);   /* no HRTF methods */
     assert(reg(MCPX_APU_FECTL) == 0);                                /* left free-running after the steps */
     assert(reg(MCPX_APU_SECTL) == MCPX_APU_SECTL_RUN && reg(MCPX_APU_GPRST) == 3u);
+    /* Console HRTF (apu_hrtf_probe rounds 2-5): our arrays, ears to bins 0/1, the table in the hardware code */
+    assert(reg(MCPX_APU_VPHTADDR) != 0 && reg(MCPX_APU_VPHCADDR) != 0);
+    assert(reg(MCPX_APU_HRTF_SUBMIXES) == (0u | (31u << 8) | (1u << 16) | (31u << 24)));
+    {
+        static apu_hrtf_entry_t table[APU_HRTF_ENTRIES];
+        uint32_t packed[APU_HRTF_HW_ENTRY_DWORDS];
+        const uint32_t *ht = apu_vp_debug_hrtf_target();
+        assert(ht != NULL);
+        apu_hrtf_build_table(table);
+        apu_hrtf_pack_hw_entry(&table[40], packed);
+        assert(memcmp(ht + 40u * APU_HRTF_HW_ENTRY_DWORDS, packed, sizeof(packed)) == 0);
+    }
     p.phys = phys_a;
     p.bytes = 20000;
     p.channels = 1;
     p.hrtf_entry = 40;
+    assert(apu_vp_voice_start(base, 6, &p) == 0);
+    assert(voice_dw(6, MCPX_VOICE_CFG_HRTF_TARGET) == 40u && apu_vp_voice_is_hrtf(6));
+    assert(reg(MCPX_APU_TVL3D) == 6 && reg(MCPX_APU_TVL2D) == 0xFFFFu);   /* HRTF voices go on the 3D list */
+    apu_vp_voice_update(base, 6, 0, p.vols, 41);
+    assert(voice_dw(6, MCPX_VOICE_CFG_HRTF_TARGET) == 41u);          /* a new direction, live */
+    apu_vp_voice_pause(base, 6, true);
+    assert(reg(MCPX_APU_TVL3D) == 0xFFFFu);
+    apu_vp_voice_pause(base, 6, false);
+    assert(reg(MCPX_APU_TVL3D) == 6);                                /* back on its own list */
+    apu_vp_voice_off(base, 6);
+    assert(reg(MCPX_APU_TVL3D) == 0xFFFFu);
+    p.hrtf_entry = -1;                                               /* plain voices from here on */
     assert(apu_vp_voice_start(base, 5, &p) == 0);
-    assert(voice_dw(5, MCPX_VOICE_CFG_HRTF_TARGET) == 0xFFFFu);      /* no HRTF without the table */
+    assert(voice_dw(5, MCPX_VOICE_CFG_HRTF_TARGET) == 0xFFFFu && !apu_vp_voice_is_hrtf(5));
     assert(meth(MCPX_METH_TAR_HRTF) == 0 && reg(MCPX_APU_TVL2D) == 5);
     /* A one-shot never reaches its end on hardware: it loops over the silent tail */
     p.loop = false;

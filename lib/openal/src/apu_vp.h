@@ -13,11 +13,14 @@
  * forwards it to the AC97 (both verified on a retail console). On xemu with
  * real-time DSP processing off, the VP output itself is the audio output.
  *
- * HRTF needs methods (the table upload and xemu's per-voice latch), so it is
- * only available where the front end works (apu_vp_hrtf_available()).
+ * HRTF: on xemu through methods (the table upload and the per-voice latch,
+ * handles below 64); on a real console, where methods stall, the driver
+ * writes the HRTF target array itself and plays HRTF voices on the 3D list
+ * (any handle; apu_hrtf_probe rounds 2-5, see the comment at
+ * HRTF_TARGET_BYTES in apu_vp.c).
  *
- * Library voice slot n (0..63) is VP handle APU_VP_HANDLE_BASE + n: handles of
- * 64 and above are plain voices that skip the HRTF stage.
+ * Handles: xemu uses 64..255 for plain voices and 0..63 for HRTF voices; a
+ * console uses 0..127 for both (APU_VP_HW_HANDLES).
  *
  * Every function takes the BAR0 base, so the encodings can be checked on the
  * host against plain memory.
@@ -91,10 +94,28 @@ void apu_vp_load_hrtf(uintptr_t bar0, const apu_hrtf_entry_t table[APU_HRTF_ENTR
 bool apu_vp_ready(void);
 
 /**
- * True if front-end methods execute, so the HRTF stage (handles below 64) is
- * usable: on xemu, not on a real console.
+ * True if the HRTF stage is usable: on xemu through front-end methods
+ * (handles below 64), on a real console through the HRTF arrays the driver
+ * sets up (any handle, 3D list; APU_VP_DBG_NO_HRTF turns it off).
  */
 bool apu_vp_hrtf_available(void);
+
+/** True if front-end methods execute (xemu); a real console stalls them (HRTF there goes through the arrays). */
+bool apu_vp_front_end_ok(void);
+
+/** True if the handle plays as a console HRTF voice (3D list, CFG_HRTF_TARGET). */
+bool apu_vp_voice_is_hrtf(uint32_t h);
+
+/*
+ * The VP runs a two-ear 31-tap filter per HRTF voice every frame: 120 of them
+ * at once slowed its frames below real time on a console (openal_engine
+ * phase 5: the AC97 feed padded 1047 buffers), so the voice layer plays at
+ * most APU_VP_HRTF_MAX_VOICES as HRTF voices and pans the rest by volume.
+ */
+#define APU_VP_HRTF_MAX_VOICES 64u
+
+/** Console HRTF voices playing or paused now. */
+uint32_t apu_vp_hrtf_voices(void);
 
 /* Front-end messages seen on a real console (FECTL bit 15) */
 typedef struct {
@@ -128,6 +149,7 @@ void apu_vp_debug_set_map_guard(uint32_t pages);
 #define APU_VP_DBG_NO_FE_PROBE     16u   /* apu_vp_init() sends no methods and assumes a real console */
 #define APU_VP_DBG_NO_AC97_THREAD  32u   /* pump the AC97 from apu_vp_service(), no thread (next apu_vp_init()) */
 #define APU_VP_DBG_HANDLES_HIGH    64u   /* a console allocates handles 64..127 only, as before handles 0..63 were used */
+#define APU_VP_DBG_NO_HRTF        128u   /* a console does not set up its HRTF stage (next apu_vp_init()) */
 void apu_vp_debug_set_flags(uint32_t flags);
 
 /** Copy up to `max` of the most recent operations, oldest first. @return count. */
@@ -205,6 +227,9 @@ uint32_t apu_vp_sample_pages_used(uintptr_t bar0);
  * frames after the first one (a console only; 0 is the normal case).
  */
 uint32_t apu_vp_start_retries(void);
+
+/** The console HRTF target array (host tests), NULL if not set up. */
+const uint32_t *apu_vp_debug_hrtf_target(void);
 
 /** Voice record of a handle and the SGE table (host tests). */
 uint8_t *apu_vp_debug_voice_record(uint32_t handle);

@@ -1454,10 +1454,35 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
     registers a kernel shutdown notification that stops all of it, and checks that the GP keeps counting frames
     after the start (redoing the start up to three times). Stream, showcase, engine and showcase again, run in
     a row without a power cycle: all started at once (0 retries) and played normally.
-  * **HRTF without front-end methods:** pointing the HRTF target/current address registers (0x2038/0x203C) at
-    our own arrays and giving voices below 64 a `CFG_HRTF_TARGET` changed nothing (same output with an impulse
-    filter, a zero filter or 0xFFFF; the arrays stayed untouched). The HRTF stage needs something only the front
-    end sets. Not pursued: the project stays clean-room, so the state DirectSound or games leave is not studied.
+  * **HRTF without front-end methods, first attempt:** pointing the HRTF target/current address registers
+    (0x2038/0x203C) at our own arrays and giving voices on the 2D list a `CFG_HRTF_TARGET` changed nothing. Solved
+    below (the voice list was the missing piece).
+* **HRTF on a console** (branch `feat/hrtf-probe`, `samples/apu_hrtf_probe` rounds 1-5; clean-room: our own arrays,
+  filters and test signals, candidates from the public xemu field list):
+  * **Round 1:** no voice-record bit (FMT 10-15, `CFG_MISC` `FMODE` and free bits, `CFG_HRTF_TARGET` 31:16, `VBIN`
+    15/31) engages HRTF on the 2D list. `FMT` bit 12 doubles a voice's output; `FMODE` 1 and 3 change its level.
+  * **Round 2, the enable:** a voice on the **3D list** (or the multipass list) with `CFG_HRTF_TARGET` != 0xFFFF
+    runs the HRTF stage. Its filter is entry `CFG_HRTF_TARGET` of the target array (0x2038), 64 bytes per entry;
+    the VP keeps its filter state in the current array (0x203C), 128 bytes per voice handle. Register 0x20AC
+    routes the four HRTF submix slots to mixbins (bins at 4:0, 12:8, 20:16, 28:24, the xemu
+    `SET_HRTF_SUBMIXES` layout). A zero filter silenced the voice; a tap-0 impulse passed it.
+  * **Rounds 3-4, the entry:** dword k < 15 holds taps 2k and 2k+1 of each ear (left | right << 8 | left << 16 |
+    right << 24), dword 15 tap 30 and the ITD in bits 31:16 (s6.9 samples: +10.0 delayed the left ear by 10
+    samples, -10.0 the right, +0.5 split a click over two samples). The left ear feeds submix slots 0 and 1, the
+    right ear slots 2 and 3, each scaled by the voice output volume of the same number.
+  * **Rounds 4-5, the coefficients:** an 8-bit float, not xemu's linear int8: sign bit 7, exponent 6:4, mantissa
+    3:0, magnitude m (exponent 0) or (16 + m) << (exponent - 1), of a full scale of 2048. Sixteen codes from
+    0x01 to 0xFF gave exactly the predicted levels and signs (0x7F = 0.969, 0x40 = 0.0625, 0xFF = -0.969).
+  * **Round 5:** handles 70 and 127 run HRTF like handle 1, and a live change of `CFG_HRTF_TARGET` moved the sound
+    from one ear to the other at once.
+  * **In the library:** `apu_vp_init()` sets up the arrays and routes slot 0 to bin 0 and slot 2 to bin 1, and
+    writes the spherical-head table (`apu_hrtf.c`) in the hardware encoding. Mono 3D sources play as HRTF voices on
+    the 3D list, following the direction by a live target write; `alDisable(AL_XBOX_HRTF)` goes back to volume
+    panning. `samples/openal_hrtf` (a noise burst circling, at fixed directions and moving up and down, with HRTF
+    and with panning) played with 0 underruns and sounded as expected.
+  * **Cost:** 120 HRTF voices at once slowed the VP's frames below real time (`openal_engine` phase 5: 1047 padded
+    AC97 buffers). The library plays at most 64 HRTF voices (`APU_VP_HRTF_MAX_VOICES`) and pans the rest; phase 5
+    then ran at full speed with 0 padded buffers.
   * **PCI:** the APU has a power-management capability at config 0x44 (D3hot -> D0 reset untested: no freeze
     to recover from occurred in these runs).
 * Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
