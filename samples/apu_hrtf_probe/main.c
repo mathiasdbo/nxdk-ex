@@ -14,7 +14,7 @@
  * measures for 60 ms: CBO advance, GP output peak (bins 0/1), and how many
  * current-array dwords changed. A change in the last two is the signal.
  *
- * A candidate may freeze the APU: progress goes to E:\hrtf_progress.txt before
+ * A candidate may freeze the APU: progress goes to E:\hrtf2_progress.txt before
  * every test; after a power cycle the probe resumes past the test that froze
  * and logs it. Delete that file to start over. Log: E:\apu_hrtf_probe.txt (appended).
  */
@@ -83,7 +83,7 @@ static int read_progress(void) {
     FILE *f;
     int v = -1;
     mount_e();
-    f = fopen("E:\\hrtf_progress.txt", "rb");
+    f = fopen("E:\\hrtf2_progress.txt", "rb");
     if (f) {
         if (fscanf(f, "%d", &v) != 1) v = -1;
         fclose(f);
@@ -94,7 +94,7 @@ static int read_progress(void) {
 static void write_progress(int v) {
     FILE *f;
     mount_e();
-    f = fopen("E:\\hrtf_progress.txt", "wb");
+    f = fopen("E:\\hrtf2_progress.txt", "wb");
     if (f) {
         fprintf(f, "%d\n", v);
         fclose(f);
@@ -108,49 +108,55 @@ typedef struct {
     uint32_t off;     /* record dword to modify (0xFFFF: none) */
     uint32_t value;   /* OR-ed into it */
     uint32_t target;  /* CFG_HRTF_TARGET */
+    uint32_t list;    /* 0 = 2D (TVL2D), 1 = 3D (TVL3D), 2 = multipass (TVLMP) */
+    uint32_t submix;  /* written to 0x20AC before the test, 0 = leave it */
+    bool impulse;     /* target array record 0..3: a unit impulse at tap 0 (else all zero) */
 } test_t;
+
+static const uint32_t s_list_reg[3] = { MCPX_APU_TVL2D, MCPX_APU_TVL3D, MCPX_APU_TVLMP };
+static const char *s_list_name[3] = { "2D", "3D", "MP" };
 
 #define N_TESTS 64
 static test_t s_tests[N_TESTS];
 static int s_n;
 
-static void add(const char *name, uint32_t off, uint32_t value, uint32_t target) {
+static void add(const char *name, uint32_t list, uint32_t target, bool impulse, uint32_t submix) {
     if (s_n < N_TESTS) {
         s_tests[s_n].name = name;
-        s_tests[s_n].off = off;
-        s_tests[s_n].value = value;
+        s_tests[s_n].off = 0xFFFFu;
+        s_tests[s_n].value = 0;
         s_tests[s_n].target = target;
+        s_tests[s_n].list = list;
+        s_tests[s_n].submix = submix;
+        s_tests[s_n].impulse = impulse;
         s_n++;
     }
 }
 
-static const char *s_bitname[32] = { "b0", "b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8", "b9", "b10", "b11",
-                                     "b12", "b13", "b14", "b15", "b16", "b17", "b18", "b19", "b20", "b21",
-                                     "b22", "b23", "b24", "b25", "b26", "b27", "b28", "b29", "b30", "b31" };
+/*
+ * Round 1 (2026-10-11): no record bit engaged HRTF on the 2D list (FMT 10-15,
+ * MISC FMODE / free bits, HRTF_TARGET 31:16, VBIN 15/31): the current array
+ * stayed untouched and the output unchanged. (FMT bit 12 doubled the output;
+ * FMODE 1 and 3 changed its level: the voice filter.)
+ * Round 2: the voice LIST. The VP walks three lists; HRTF may belong to the 3D
+ * list. 0x20AC would hold the four HRTF submix bins in the SET_HRTF_SUBMIXES
+ * layout (xemu: bins at 4:0, 12:8, 20:16, 28:24); we write our own value,
+ * bins 0, 1, 2, 3, so HRTF output would land on the bins the GP forwards.
+ */
+#define SUBMIX_0123 0x03020100u
 
 static void build_tests(void) {
-    uint32_t b;
-    add("baseline, target 0xFFFF", 0xFFFFu, 0, 0xFFFFu);
-    add("baseline, target 0", 0xFFFFu, 0, 0);
-    for (b = 10; b <= 15; b++) add(s_bitname[b], MCPX_VOICE_CFG_FMT, 1u << b, 0);           /* FMT 10-15 (HEADROOM 13-15) */
-    add("FMODE 1", MCPX_VOICE_CFG_ENV1 + 8u, 1u << 16, 0);                                 /* CFG_MISC 0x18 */
-    add("FMODE 2", MCPX_VOICE_CFG_ENV1 + 8u, 2u << 16, 0);
-    add("FMODE 3", MCPX_VOICE_CFG_ENV1 + 8u, 3u << 16, 0);
-    for (b = 12; b <= 15; b++) add(s_bitname[b], MCPX_VOICE_CFG_ENV1 + 8u, 1u << b, 0);    /* MISC 12-15 */
-    for (b = 18; b <= 31; b++) add(s_bitname[b], MCPX_VOICE_CFG_ENV1 + 8u, 1u << b, 0);    /* MISC 18-31 */
-    for (b = 16; b <= 31; b++) add(s_bitname[b], MCPX_VOICE_CFG_HRTF_TARGET, 1u << b, 0);  /* HRTF_TARGET 16-31 */
-    add(s_bitname[15], MCPX_VOICE_CFG_VBIN, 1u << 15, 0);
-    add(s_bitname[31], MCPX_VOICE_CFG_VBIN, 1u << 31, 0);
-}
-
-static const char *field_name(uint32_t off) {
-    switch (off) {
-    case MCPX_VOICE_CFG_VBIN: return "VBIN";
-    case MCPX_VOICE_CFG_FMT: return "FMT";
-    case MCPX_VOICE_CFG_ENV1 + 8u: return "MISC";
-    case MCPX_VOICE_CFG_HRTF_TARGET: return "HRTF_TARGET";
-    default: return "-";
-    }
+    add("2D, target 0xFFFF (baseline)", 0, 0xFFFFu, false, 0);
+    add("3D, target 0xFFFF", 1, 0xFFFFu, false, 0);
+    add("3D, target 0, zero filter", 1, 0, false, 0);
+    add("3D, target 0, impulse filter", 1, 0, true, 0);
+    add("3D, target 0, zero, submix 0-3", 1, 0, false, SUBMIX_0123);
+    add("3D, target 0, impulse, submix 0-3", 1, 0, true, SUBMIX_0123);
+    add("3D, target 3, impulse, submix 0-3", 1, 3, true, SUBMIX_0123);
+    add("3D, target 0xFFFF, submix 0-3", 1, 0xFFFFu, false, SUBMIX_0123);
+    add("2D, target 0, impulse, submix 0-3", 0, 0, true, SUBMIX_0123);
+    add("MP, target 0xFFFF", 2, 0xFFFFu, false, SUBMIX_0123);
+    add("MP, target 0, impulse, submix 0-3", 2, 0, true, SUBMIX_0123);
 }
 
 /* ---- measurement ---- */
@@ -183,10 +189,14 @@ static void fifo_peak(uint32_t ms, int *pl, int *pr) {
     *pr = r;
 }
 
-static void reset_arrays(void) {
+static void reset_arrays(bool impulse) {
     uint32_t i;
     memset(s_ht, 0, ARRAY_BYTES);
     for (i = 0; i < ARRAY_BYTES / 4u; i++) s_hc[i] = SENTINEL;
+    if (impulse) {
+        /* guess: 64-byte records in the SET_HRIR order (L0 R0 L1 R1 ...): tap 0 = 127 for both ears */
+        for (i = 0; i < 4u; i++) s_ht[i * 16u] = 0x00007F7Fu;
+    }
 }
 
 /* A fresh looping-tone record on handle H, linked at the 2D list head */
@@ -214,11 +224,13 @@ static void start_voice(const test_t *t) {
     r[MCPX_VOICE_TAR_VOLC / 4] = volc;
     r[MCPX_VOICE_TAR_PITCH_LINK / 4] = MCPX_APU_LIST_END;
     r[MCPX_VOICE_PAR_STATE / 4] = MCPX_PAR_STATE_ACTIVE_VOICE;
-    REG(MCPX_APU_TVL2D) = H;   /* the only voice on the list */
+    REG(s_list_reg[t->list]) = H;   /* the only voice on any list */
 }
 
 static void stop_voice(void) {
     REG(MCPX_APU_TVL2D) = MCPX_APU_LIST_END;
+    REG(MCPX_APU_TVL3D) = MCPX_APU_LIST_END;
+    REG(MCPX_APU_TVLMP) = MCPX_APU_LIST_END;
     Sleep(3);   /* past any frame still holding it */
 }
 
@@ -230,7 +242,7 @@ int main(void) {
     build_tests();
     resume = read_progress();
     if (resume >= s_n) {
-        logf_("\n=== apu_hrtf_probe: all %d tests already ran (delete E:\\hrtf_progress.txt to run them again)\n", s_n);
+        logf_("\n=== apu_hrtf_probe: all %d tests already ran (delete E:\\hrtf2_progress.txt to run them again)\n", s_n);
         save_log();
         for (;;) Sleep(1000);
     }
@@ -239,7 +251,7 @@ int main(void) {
         resume = 0;
     } else {
         logf_("\n=== apu_hrtf_probe: resumed; test %d (%s %s) did not finish (FROZE?)\n", resume,
-              field_name(s_tests[resume].off), s_tests[resume].name);
+              s_list_name[s_tests[resume].list], s_tests[resume].name);
         resume++;
     }
     save_log();
@@ -282,7 +294,10 @@ int main(void) {
         uint32_t c0, c1, i, changed = 0, first = 0xFFFFFFFFu;
         int pl, pr;
         write_progress(k);
-        reset_arrays();
+        reset_arrays(t->impulse);
+        if (t->submix) {
+            REG(0x20ACu) = t->submix;
+        }
         start_voice(t);
         Sleep(20);
         c0 = ((volatile uint32_t *)apu_vp_debug_voice_record(H))[MCPX_VOICE_PAR_OFFSET / 4] & 0xFFFFFFu;
@@ -295,8 +310,8 @@ int main(void) {
             }
         }
         stop_voice();
-        logf_("%2d %-11s %-26s CBO +%5ld  peak %5d/%5d  cur %4lu\n", k, field_name(t->off), t->name,
-              (long)(int32_t)(c1 - c0), pl, pr, (unsigned long)changed);
+        logf_("%2d %-2s %-36s CBO +%5ld  peak %5d/%5d  cur %4lu  20AC %08lx\n", k, s_list_name[t->list], t->name,
+              (long)(int32_t)(c1 - c0), pl, pr, (unsigned long)changed, (unsigned long)REG(0x20ACu));
         if (changed) {
             logf_("      first changed dword at +%05lx: %08lx %08lx %08lx %08lx\n", (unsigned long)first,
                   (unsigned long)s_hc[first / 4u], (unsigned long)s_hc[first / 4u + 1u],
@@ -310,7 +325,7 @@ int main(void) {
         save_log();
     }
     write_progress(s_n);   /* all done: the next run resumes past the end */
-    logf_("done (delete E:\\hrtf_progress.txt to run the list again)\n");
+    logf_("done (delete E:\\hrtf2_progress.txt to run the list again)\n");
     save_log();
     for (;;) Sleep(1000);
     return 0;
