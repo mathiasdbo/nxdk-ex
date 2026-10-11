@@ -85,7 +85,8 @@ static void log_tick(const showcase_app_t *app, const showcase_perf_t *perf, boo
     if (t0 == 0) {
         t0 = t_last = t_saved = now;
         gp_last = apu_ok ? apu_gp_frames((uintptr_t)NV_PAPU_BASE) : 0;
-        log_line("openal_showcase: audio %s\n", apu_ok ? "APU (VP+GP)" : "CPU mixer / silent");
+        log_line("openal_showcase: audio %s, APU frame-start retries %lu\n", apu_ok ? "APU (VP+GP)" : "CPU mixer / silent",
+                 (unsigned long)apu_vp_start_retries());
         return;
     }
     if (now - t_last < 1000u) {

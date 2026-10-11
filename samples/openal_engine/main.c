@@ -34,6 +34,7 @@
 #include "apu_gp.h"
 #include "apu_hardware.h"
 #include "apu_voice.h"
+#include "apu_vp.h"
 #include "mcpx_apu_regs.h"
 
 #define TWO_PI 6.28318531f
@@ -387,6 +388,7 @@ int main(void) {
               (unsigned long)r[MCPX_APU_FEDECMETH / 4u], (unsigned long)r[MCPX_APU_FEDECPARAM / 4u],
               (unsigned long)r[MCPX_APU_FETFORCE1 / 4u], (unsigned long)(r[MCPX_APU_TVL2D / 4u] & 0xFFFFu),
               (unsigned long)r[MCPX_APU_XGSCNT / 4u]);
+        logf_("   frame-start retries since boot: %lu\n", (unsigned long)apu_vp_start_retries());
     }
     check_apu("start");
 
