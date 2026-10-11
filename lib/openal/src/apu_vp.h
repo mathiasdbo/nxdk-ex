@@ -106,6 +106,17 @@ bool apu_vp_front_end_ok(void);
 /** True if the handle plays as a console HRTF voice (3D list, CFG_HRTF_TARGET). */
 bool apu_vp_voice_is_hrtf(uint32_t h);
 
+/*
+ * The VP runs a two-ear 31-tap filter per HRTF voice every frame: 120 of them
+ * at once slowed its frames below real time on a console (openal_engine
+ * phase 5: the AC97 feed padded 1047 buffers), so the voice layer plays at
+ * most APU_VP_HRTF_MAX_VOICES as HRTF voices and pans the rest by volume.
+ */
+#define APU_VP_HRTF_MAX_VOICES 64u
+
+/** Console HRTF voices playing or paused now. */
+uint32_t apu_vp_hrtf_voices(void);
+
 /* Front-end messages seen on a real console (FECTL bit 15) */
 typedef struct {
     uint32_t events;
