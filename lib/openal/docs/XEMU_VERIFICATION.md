@@ -1382,8 +1382,8 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
   * **Probe round 18: the VP SGE table works only up to entry 2047.** The tone mapped at entries 0 to 1047 came
     out clean (peak 8000, about 87 zero crossings per 100 ms, 0 sample-to-sample glitches). Mapped from entry
     2047 upward, the VP stopped all frame processing for good, and the GP counted no more frames until the
-    console restarted. The dashboard leaves `0x2018 = 0x7FF` (next to `0x2010 = 0x800` and `0x2014 = 0x400`);
-    writing `0xFFF` does not lift the limit. `APU_VP_SGE_ENTRIES` is now 2048, an 8 MiB linear space.
+    console restarted. Writing `0xFFF` to `0x2018` does not lift the
+    limit. `APU_VP_SGE_ENTRIES` is now 2048, an 8 MiB linear space.
   * **Rounds 19-21: routing and the right channel.** Each VP output reaches its own mixbin. The GP output DMA
     needs a channel stride: with descriptor control bits 23:14 (`dsp_step`) at 0, a console reads mixbin 0 for
     every channel of an interleaved transfer, so the right speaker was silent. `dsp_step = 32` (one bin) fixes
@@ -1405,8 +1405,9 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
     `apu_vp_alloc_handle()` hands out 64-127 and `apu_vp_voice_start()` refuses higher handles. Verified on the
     console: 40 and 60 concurrent one-shots for 8 s each (1413 starts, no refusals), `samples/openal_vp` for
     90 s+ (4413 starts, 0 underruns) and the showcase's polyphony mode.
-  * **Handles 0-63 as plain voices** (no HRTF target) neither froze nor played: their `CBO` never advanced.
-    They need the HRTF stage, so a console has 64 voices.
+  * **Handles 0-63 as plain voices:** the first test (`apu_vp_stress` F3) saw their `CBO` never advance. That run
+    had started with the APU barely running (3 GP frames in 50 ms), and `apu_probe3` later showed every handle
+    0..127 playing (see "120 voices" below).
 * **Streaming and the AC97 pump thread** (branch `feat/openal-streaming`, phase A of
   `XASH3D_INTEGRATION_PLAN.md`):
   * **Design:** a streaming source plays one voice looping over a 16384-frame ring. Queued buffers are copied
@@ -1431,7 +1432,34 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
   * **Output:** 0 AC97 underruns.
   * **One unexplained run:** a run after `openal_stream` and the showcase never started frames (GP counter
     stuck at 1 from the start). It did not reproduce. `openal_engine` now logs the APU state at start-up
-    (`E:\openal_engine_N.txt`) in case it returns.
+    (`E:\openal_engine_N.txt`) in case it returns. It turned out to belong with the program-end problem below.
+* **Live loops, 120 voices, start-up and program end** (branch `feat/apu-reset-hrtf-looping`; `samples/apu_probe2`,
+  `apu_probe3`):
+  * **Loop markers of a playing voice can be rewritten:** a new `LBO` took effect at the next wrap, a "release"
+    (`EBO` to the end of the silent tail, then `LBO` to the end of the data) played on into the tail and stayed
+    there, and a one-shot became a loop (`LBO`, then `EBO`). The VP kept the written values. Through OpenAL
+    (`AL_LOOPING` on a playing source): a released loop stopped 221 ms later; a one-shot set looping kept
+    looping; one set looping past its loop end played once to the end, then looped.
+  * **120 voices:** looping voices on all handles 0..127 advanced, and 2389 random restarts across them in 5 s
+    never stalled the APU. The library now uses 120 slots on handles 0..127 (8 spare for restarts);
+    `openal_engine` played 140 sources as 120 voiced / 10 waiting / 10 stopped. A freshly written record on
+    handle 129 alone did not freeze the APU in these runs; the original freeze came with the stress pattern,
+    so handles stay below 128.
+  * **`SECTL`:** every value 0x08..0x0F runs frames at the full 1500/s; the library writes 0x08 (XCNTMODE 1).
+    The 0x0F used before was first seen in the state DirectSound leaves; it is not used any more.
+  * **Start-up:** 20 of 20 driver deinit/init cycles in one program ran frames.
+  * **Program end:** a showcase run after other programs played a periodic "beat" over its loop, and some first
+    runs after another program were silent; both cleared with a power cycle. The APU kept running after a
+    program ended (VP, GP FIFO DMA, AC97 DMA) in memory the next program is given. `apu_vp_init()` now
+    registers a kernel shutdown notification that stops all of it, and checks that the GP keeps counting frames
+    after the start (redoing the start up to three times). Stream, showcase, engine and showcase again, run in
+    a row without a power cycle: all started at once (0 retries) and played normally.
+  * **HRTF without front-end methods:** pointing the HRTF target/current address registers (0x2038/0x203C) at
+    our own arrays and giving voices below 64 a `CFG_HRTF_TARGET` changed nothing (same output with an impulse
+    filter, a zero filter or 0xFFFF; the arrays stayed untouched). The HRTF stage needs something only the front
+    end sets. Not pursued: the project stays clean-room, so the state DirectSound or games leave is not studied.
+  * **PCI:** the APU has a power-management capability at config 0x44 (D3hot -> D0 reset untested: no freeze
+    to recover from occurred in these runs).
 * Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
   from a spherical-head model (Brown-Duda head-shadow shelf per ear as a 31-tap int8 FIR, Woodworth ITD in
   s6.9; 32 azimuths x elevations -30/0/30/60; no measured data, no pinna cues). `apu_vp_init()` uploads it with

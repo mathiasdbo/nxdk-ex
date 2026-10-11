@@ -41,7 +41,7 @@ extern "C" {
 #define APU_VP_HW_HANDLES    128u
 /* BA is 24-bit (16 MiB), but on a real console the VP stops all frame
  * processing for good when it fetches through an SGE entry above 2047
- * (apu_probe round 18; the dashboard leaves 0x2018 = 0x7FF): 2048 entries,
+ * (apu_probe round 18): 2048 entries,
  * an 8 MiB linear space of 4 KiB pages */
 #define APU_VP_SGE_ENTRIES   2048u
 #define APU_VP_OUTPUTS       8

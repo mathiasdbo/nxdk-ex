@@ -65,7 +65,7 @@ the host tests do by hand. On xemu the model register would not report completio
   reference distance, max distance, rolloff, `AL_BUFFER`, `AL_SOURCE_STATE`, `AL_SEC_OFFSET` / `AL_SAMPLE_OFFSET` /
   `AL_BYTE_OFFSET`, buffer queueing (see the limitations), and the `AL_XBOX_source_control` attributes
   (`include/AL/alext.h`); `alSourcePlay`, `alSourcePause`, `alSourceStop`, `alSourceRewind` and their vector
-  forms. At most 256 sources, 64 of them on hardware voices at once.
+  forms. At most 256 sources, 120 of them on hardware voices at once on a console (64 on xemu).
 * **Engine integration:** see `docs/ENGINE_INTEGRATION.md`.
 * **Listener:** position, velocity, orientation, gain.
 * **Global state:** `alDistanceModel` (inverse, linear, exponent, clamped variants, none), `alDopplerFactor`,
@@ -127,8 +127,7 @@ screen. There are no committed measurements.
     silence for the gap.
   * Verified on a retail console with `samples/openal_stream` (48/22.05/11.025 kHz, mono/stereo, 8/16-bit,
     starvation and 1.5 s main-thread stalls).
-* Changing `AL_LOOPING` while a source plays takes effect at its next play on a console (the voice record is
-  not rewritten while the VP may read it). Capture is stubbed. Only mono and stereo 8/16-bit PCM is accepted; **no ADPCM**, no multichannel buffers.
+* `AL_LOOPING` can change while a source plays (its voice's loop markers are rewritten in place). Capture is stubbed. Only mono and stereo 8/16-bit PCM is accepted; **no ADPCM**, no multichannel buffers.
 * **No clock: nothing completes by itself.** The library never observes real voice progress. A source reaches
   `AL_STOPPED` through `alSourceStop`, or when something clears its voice's model ACTIVE bit (the host tests do);
   a source waiting in virtual standby holds only a saved position and does not advance or finish until it is
