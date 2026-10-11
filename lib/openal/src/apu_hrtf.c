@@ -113,3 +113,48 @@ int apu_hrtf_entry_for_local(const float local_pos[3]) {
     }
     return best_e * APU_HRTF_AZIMUTHS + a;
 }
+
+/*
+ * ----------------------------------------------------------------------------
+ * The console's coefficient encoding (apu_hrtf.h)
+ * ----------------------------------------------------------------------------
+ */
+
+int apu_hrtf_hw_value(uint8_t code) {
+    int e = (code >> 4) & 7, m = code & 15;
+    int mag = (e == 0) ? m : ((16 + m) << (e - 1));
+    return (code & 0x80u) ? -mag : mag;
+}
+
+uint8_t apu_hrtf_hw_code(int8_t value) {
+    /* value / 128 of full scale -> magnitude of 2048 */
+    int mag = (value < 0) ? -(int)value * 16 : (int)value * 16;
+    uint8_t sign = (value < 0) ? 0x80u : 0u;
+    int e, best_code = 0, best_err = 1 << 30;
+    if (mag > 1984) {
+        mag = 1984;   /* the largest magnitude (0x7F) */
+    }
+    for (e = 0; e < 8; e++) {
+        int m;
+        for (m = 0; m < 16; m++) {
+            int v = (e == 0) ? m : ((16 + m) << (e - 1));
+            int err = (v > mag) ? v - mag : mag - v;
+            if (err < best_err) {
+                best_err = err;
+                best_code = (e << 4) | m;
+            }
+        }
+    }
+    return (uint8_t)(best_code == 0 ? 0u : (sign | (uint8_t)best_code));
+}
+
+void apu_hrtf_pack_hw_entry(const apu_hrtf_entry_t *e, uint32_t out[APU_HRTF_HW_ENTRY_DWORDS]) {
+    int k;
+    for (k = 0; k < 15; k++) {
+        out[k] = (uint32_t)apu_hrtf_hw_code(e->left[2 * k]) | ((uint32_t)apu_hrtf_hw_code(e->right[2 * k]) << 8) |
+                 ((uint32_t)apu_hrtf_hw_code(e->left[2 * k + 1]) << 16) |
+                 ((uint32_t)apu_hrtf_hw_code(e->right[2 * k + 1]) << 24);
+    }
+    out[15] = (uint32_t)apu_hrtf_hw_code(e->left[30]) | ((uint32_t)apu_hrtf_hw_code(e->right[30]) << 8) |
+              ((uint32_t)(uint16_t)e->itd << 16);
+}

@@ -96,6 +96,48 @@ int main(void) {
     }
     printf("    -> front/right/back/left/up/down map to the nearest entry [PASS]\n");
 
+    /* The console's coefficient code, as measured (apu_hrtf_probe rounds 4-5):
+     * magnitude m (exponent 0) or (16 + m) << (exponent - 1), of 2048 */
+    printf("[5] Hardware coefficient encoding...\n");
+    {
+        static const struct { uint8_t code; int value; } measured[] = {
+            { 0x01, 1 }, { 0x0F, 15 }, { 0x10, 16 }, { 0x11, 17 }, { 0x1F, 31 }, { 0x20, 32 }, { 0x30, 64 },
+            { 0x3F, 124 }, { 0x48, 192 }, { 0x50, 256 }, { 0x60, 512 }, { 0x70, 1024 }, { 0x7F, 1984 },
+            { 0x81, -1 }, { 0xC0, -128 }, { 0xFF, -1984 },
+        };
+        int v;
+        size_t i;
+        for (i = 0; i < sizeof(measured) / sizeof(measured[0]); i++) {
+            assert(apu_hrtf_hw_value(measured[i].code) == measured[i].value);
+        }
+        assert(apu_hrtf_hw_code(0) == 0x00);
+        assert(apu_hrtf_hw_code(127) == 0x7F);    /* 127/128 -> the largest, 1984/2048 */
+        assert(apu_hrtf_hw_code(-128) == 0xFF);
+        assert(apu_hrtf_hw_code(64) == 0x70);     /* 1/2 = 1024/2048 */
+        assert(apu_hrtf_hw_code(-32) == 0xE0);    /* -1/4 = -512/2048 */
+        assert(apu_hrtf_hw_code(1) == 0x10);      /* 1/128 = 16/2048 */
+        /* every int8 value lands within the code's step of its own value */
+        for (v = -128; v <= 127; v++) {
+            int want = v * 16, got = apu_hrtf_hw_value(apu_hrtf_hw_code((int8_t)v));
+            int step = (want < 0 ? -want : want) / 16 + 1;
+            if (want > 1984) want = 1984;
+            if (want < -1984) want = -1984;
+            assert(got - want <= step && want - got <= step);
+        }
+    }
+    {
+        apu_hrtf_entry_t e;
+        uint32_t w[APU_HRTF_HW_ENTRY_DWORDS];
+        memset(&e, 0, sizeof(e));
+        e.left[0] = 127;     /* tap 0 left */
+        e.right[20] = 64;    /* tap 20 right: dword 10, byte 1 */
+        e.left[30] = 1;      /* tap 30 left: dword 15, byte 0 */
+        e.itd = -5120;       /* -10.0 samples */
+        apu_hrtf_pack_hw_entry(&e, w);
+        assert(w[0] == 0x0000007Fu && w[10] == 0x00007000u && w[15] == (0xEC000000u | 0x10u));
+    }
+    printf("    -> codes match the console measurements; entries pack as the probe found [PASS]\n");
+
     printf("=== All HRTF Table Tests Passed Successfully! ===\n");
     return 0;
 }
