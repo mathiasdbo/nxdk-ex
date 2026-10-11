@@ -6,10 +6,12 @@
  * the delay-line layout and the X-memory words that drive dsp/gp_reverb.asm,
  * plus a host reference of the program's arithmetic.
  *
- * Topology (our own, comb/allpass family): mono send (mixbin 2) -> gain ->
- * one-pole lowpass -> pre-delay -> 4 damped feedback combs per ear, summed ->
- * 2 series allpasses per ear -> wet gain, added to bins 0/1. Thirteen delay
- * lines in system RAM, each moved one 32-sample block per frame by DMA.
+ * Topology (the comb/allpass family, with the public-domain Freeverb tuning):
+ * mono send (mixbin 2) -> gain -> one-pole lowpass -> pre-delay -> 8 damped
+ * feedback combs per ear, summed -> 4 series allpasses per ear -> wet gain,
+ * added to bins 0/1. 25 delay lines in system RAM, each moved one 32-sample
+ * block per frame by DMA. (4 combs and 2 allpasses per ear sounded metallic
+ * on a console with a 2.5 s decay.)
  */
 
 #include <stdbool.h>
@@ -19,9 +21,9 @@
 extern "C" {
 #endif
 
-#define APU_REVERB_LINES        13u     /* pre-delay, 8 combs, 4 allpasses */
-#define APU_REVERB_COMBS        8u
-#define APU_REVERB_ALLPASSES    4u
+#define APU_REVERB_LINES        25u     /* pre-delay, 16 combs, 8 allpasses */
+#define APU_REVERB_COMBS        16u
+#define APU_REVERB_ALLPASSES    8u
 #define APU_REVERB_RATE         48000u
 #define APU_REVERB_MIN_PRE      32u     /* samples: a line is at least one frame long */
 #define APU_REVERB_MAX_PRE      4800u   /* 100 ms */
@@ -43,11 +45,11 @@ typedef struct {
     uint32_t value;
 } apu_reverb_word_t;
 
-#define APU_REVERB_MAX_WORDS 320u
+#define APU_REVERB_MAX_WORDS 640u
 
 void apu_reverb_default_params(apu_reverb_params_t *p);
 
-/** Delay of each line in samples (0: pre-delay, 1..8: combs L L L L R R R R, 9..12: allpasses L L R R). */
+/** Delay of each line in samples (0: pre-delay, 1..16: combs, 8 left then 8 right, 17..24: allpasses, 4 left then 4 right). */
 void apu_reverb_line_lengths(const apu_reverb_params_t *p, uint32_t len[APU_REVERB_LINES]);
 
 /** Scratch bytes the lines need after APU_REVERB_SCRATCH_BASE (all lines, largest pre-delay). */
