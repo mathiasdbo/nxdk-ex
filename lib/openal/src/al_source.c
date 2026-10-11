@@ -1834,18 +1834,27 @@ AL_API void AL_APIENTRY alGetBooleanv(ALenum param, ALboolean *values) {
     *values = (ival != 0) ? AL_TRUE : AL_FALSE;
 }
 
+/* AL_XBOX_HRTF (AL_XBOX_hrtf): mono 3D sources through the APU's HRTF stage */
 AL_API void AL_APIENTRY alEnable(ALenum capability) {
-    (void)capability;
+    if (capability == AL_XBOX_HRTF) {
+        apu_voice_set_hrtf_enabled(true);
+        return;
+    }
     alSetError(AL_INVALID_ENUM);
 }
 
 AL_API void AL_APIENTRY alDisable(ALenum capability) {
-    (void)capability;
+    if (capability == AL_XBOX_HRTF) {
+        apu_voice_set_hrtf_enabled(false);
+        return;
+    }
     alSetError(AL_INVALID_ENUM);
 }
 
 AL_API ALboolean AL_APIENTRY alIsEnabled(ALenum capability) {
-    (void)capability;
+    if (capability == AL_XBOX_HRTF) {
+        return apu_voice_hrtf_enabled() ? AL_TRUE : AL_FALSE;
+    }
     alSetError(AL_INVALID_ENUM);
     return AL_FALSE;
 }

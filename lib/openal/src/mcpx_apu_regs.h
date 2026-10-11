@@ -61,6 +61,9 @@
 #define MCPX_APU_TVLMP          0x206Cu
 #define MCPX_APU_GPSADDR        0x2040u         /* GP scratch SGE table, physical */
 #define MCPX_APU_GPFADDR        0x2044u         /* GP FIFO SGE table, physical */
+#define MCPX_APU_VPHTADDR       0x2038u         /* HRTF target array, physical (64-byte entries; apu_hrtf.h) */
+#define MCPX_APU_VPHCADDR       0x203Cu         /* HRTF current array, physical (128 bytes per voice handle) */
+#define MCPX_APU_HRTF_SUBMIXES  0x20ACu         /* HRTF submix slots 0-3 -> mixbins at 4:0, 12:8, 20:16, 28:24 */
 #define MCPX_APU_GPSMAXSGE      0x20D4u         /* highest valid scratch SGE index, inclusive */
 #define MCPX_APU_GPFMAXSGE      0x20D8u         /* highest valid FIFO SGE index, inclusive */
 #define MCPX_APU_GPOFBASE0      0x3024u         /* GP output FIFO 0: base, end (exclusive), current; */

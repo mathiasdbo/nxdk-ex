@@ -36,6 +36,21 @@ extern "C" {
 #define AL_XBOX_FREE_VOICES                      0x7007   /* hardware voices not held by a source */
 #define AL_XBOX_SAMPLE_PAGES_USED                0x7008   /* 4 KiB pages of the APU's sample space in use */
 #define AL_XBOX_SAMPLE_PAGES_TOTAL               0x7009   /* size of that space (2048 pages, 8 MiB) */
+#define AL_XBOX_HRTF_ACTIVE                      0x700A   /* mono 3D sources are playing through the HRTF stage */
+
+/*
+ * ============================================================================
+ * AL_XBOX_hrtf (the APU's HRTF stage)
+ * ============================================================================
+ *
+ * alEnable / alDisable / alIsEnabled(AL_XBOX_HRTF): mono sources positioned in
+ * 3D play through the APU's HRTF filter (a computed spherical-head model, see
+ * src/apu_hrtf.h) instead of volume panning. On by default; a change applies
+ * at each source's next play. Works on a real console and on xemu; sources in
+ * direct mode (AL_XBOX_DIRECT_GAINS) and stereo sources never use it. HRTF is
+ * meant for headphones; on TV speakers volume panning may sound better.
+ */
+#define AL_XBOX_HRTF                             0x7015
 
 /*
  * ============================================================================

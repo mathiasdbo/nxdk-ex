@@ -43,6 +43,10 @@ typedef struct {
 
 static voice_direct_t s_voice_direct[APU_VOICE_MAX_SLOTS];
 
+/* HRTF: the slot plays as an HRTF voice (its last start); AL_XBOX_HRTF (on by default) */
+static bool s_slot_hrtf[APU_VOICE_MAX_SLOTS];
+static bool s_hrtf_enabled = true;
+
 /* Software model: play position of each slot (apu_voice_debug_set_position) */
 static uint32_t s_model_pos[APU_VOICE_MAX_SLOTS];
 
@@ -83,7 +87,24 @@ static void vp_params_from_context(uint32_t index, const NVAPU_VOICE_CONTEXT_3D 
     for (i = 0; i < APU_VP_OUTPUTS; i++) {
         bins[i] = (uint8_t)((i < 6) ? i : 0);
     }
-    if (!apu_vp_hrtf_available()) {
+    if (hrtf && !apu_vp_front_end_ok()) {
+        /* Console HRTF voice: the left ear feeds HRTF submix slot 0 through
+         * output 0, the right ear slot 2 through output 2 (apu_vp.c routes them
+         * to bins 0 and 1); the filter makes the direction, both ears get the
+         * source's level. Outputs 1 and 3 would feed the unused slots. */
+        float fl = ctx->mixbin_gain[0] / 255.0f, fr = ctx->mixbin_gain[1] / 255.0f;
+        float sl = ctx->mixbin_gain[2] / 255.0f, sr = ctx->mixbin_gain[3] / 255.0f;
+        float c = ctx->mixbin_gain[4] / 255.0f;
+        float level = sqrtf(fl * fl + fr * fr + sl * sl + sr * sr + c * c);
+        if (level > 1.0f) level = 1.0f;
+        for (i = 0; i < APU_VP_OUTPUTS; i++) {
+            bins[i] = (uint8_t)(i & 1);
+            vols[i] = 0xFFFu;
+        }
+        vols[0] = vols[2] = apu_vp_atten_from_gain(master * level);
+        return;
+    }
+    if (!apu_vp_front_end_ok()) {
         /* Real console: the GP forwards only bins 0/1 (stereo), so the 5.1 pan
          * is folded on the CPU into two outputs (power sum of FL+SL+C/-3 dB+
          * LFE/-6 dB per side); output 0 plays the left channel of a stereo
@@ -289,10 +310,13 @@ int apu_voice_trigger(uintptr_t apu_base, uint32_t index)
         p.loop_start = vb->loop_start;
         p.loop_end = vb->loop_end;
         p.start_frame = vb->start_frame;
-        /* Mono buffers are 3D sources: HRTF voice (handle = slot, below 64)
-         * with the table entry for the source direction, where the HRTF stage
-         * is usable. Stereo, direct mode, or no HRTF: plain voice panned by volumes. */
-        if (vb->channels == 1 && apu_vp_hrtf_available() && !s_voice_direct[index].on) {
+        /* Mono buffers are 3D sources: an HRTF voice with the table entry for
+         * the source direction, where the HRTF stage is usable (on xemu the
+         * handle is the slot, below 64; on a console any fresh handle). Stereo,
+         * direct mode, AL_XBOX_HRTF off, or no HRTF: plain voice panned by volumes. */
+        bool want_hrtf = vb->channels == 1 && apu_vp_hrtf_available() && !s_voice_direct[index].on && s_hrtf_enabled;
+        s_slot_hrtf[index] = want_hrtf;
+        if (want_hrtf && apu_vp_front_end_ok()) {
             if (owns_handle(index) && vp_handle(index) != index) {
                 apu_vp_voice_off(base, vp_handle(index));   /* its previous plain voice */
             }
@@ -310,7 +334,7 @@ int apu_voice_trigger(uintptr_t apu_base, uint32_t index)
                 return -2;
             }
             s_voice_handle[index] = h;
-            p.hrtf_entry = -1;
+            p.hrtf_entry = want_hrtf ? apu_hrtf_entry_for_local(s_voice_local[index]) : -1;
         }
         s_handle_slot[vp_handle(index)] = (uint16_t)index;
         vp_params_from_context(index, ctx, p.hrtf_entry >= 0, &p.pitch, p.bins, p.vols);
@@ -491,7 +515,7 @@ void apu_voice_commit(uintptr_t apu_base, uint32_t index)
     }
     {
         uint32_t h = vp_handle(index);
-        int entry = (h < APU_VP_HANDLE_BASE) ? apu_hrtf_entry_for_local(s_voice_local[index]) : -1;
+        int entry = s_slot_hrtf[index] ? apu_hrtf_entry_for_local(s_voice_local[index]) : -1;
         /* the bins were set at start and do not change with the pan */
         vp_params_from_context(index, &s_voice_contexts[index], entry >= 0, &pitch, bins, vols);
         apu_vp_voice_update((apu_base != 0) ? apu_base : s_apu_base, h, pitch, vols, entry);
@@ -541,6 +565,21 @@ void apu_voice_debug_set_position(uint32_t index, uint32_t frames)
 uint32_t apu_voice_slot_count(void)
 {
     /* A console (no HRTF stage) plays plain voices on handles 0..127 */
-    return (s_vp_hw && !apu_vp_hrtf_available() && apu_vp_plain_handles() >= APU_VP_HW_HANDLES) ? APU_VOICE_HW_SLOTS
+    return (s_vp_hw && !apu_vp_front_end_ok() && apu_vp_plain_handles() >= APU_VP_HW_HANDLES) ? APU_VOICE_HW_SLOTS
                                                                                          : NV_PAPU_NUM_3D_VOICES;
+}
+
+void apu_voice_set_hrtf_enabled(bool on)
+{
+    s_hrtf_enabled = on;
+}
+
+bool apu_voice_hrtf_enabled(void)
+{
+    return s_hrtf_enabled;
+}
+
+bool apu_voice_hrtf_active(void)
+{
+    return s_vp_hw && s_hrtf_enabled && apu_vp_hrtf_available();
 }
