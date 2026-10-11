@@ -11,7 +11,7 @@ Verified on a retail console (see `XEMU_VERIFICATION.md` 8.1b):
 | Area | State |
 | --- | --- |
 | Output path | VP voices → mixbins 0/1 → GP program → FIFO ring → CPU forwards to the AC97. Stereo, 16-bit, 48 kHz |
-| Voices | 64 hardware voices (handles 64-127). 256 OpenAL sources, virtualized onto them with priority stealing (`apu_voice_mgr.c`) |
+| Voices | 120 hardware voices on a console (handles 0-127). 256 OpenAL sources, virtualized onto them with priority stealing (`apu_voice_mgr.c`) |
 | Formats | `AL_FORMAT_MONO8/16`, `STEREO8/16`, any sample rate (VP pitch is a 4.12 log2 ratio to 48 kHz) |
 | Playback control | play, pause, stop, rewind, `AL_LOOPING`, gain, pitch, position-based pan; target updates are ramped by the VP |
 | One-shots | loop over a 256-byte silent tail that every buffer carries; `alXboxUpdateVoices()` unlinks them (a voice that reaches its end stops the APU on hardware) |
@@ -20,7 +20,7 @@ Verified on a retail console (see `XEMU_VERIFICATION.md` 8.1b):
 | Missing | sample/byte/second offsets, loop points, direct gains, any effect (the GP only copies the mix) |
 
 Hardware limits any design must respect:
-- At most 64 concurrent voices. A handle above 127 freezes the APU until a reboot (the driver refuses it).
+- At most 120 concurrent voices (handles 0-127). A handle above 127 can freeze the APU until a reboot (the driver refuses it).
 - Sample data must be physically contiguous per buffer and lie in an 8 MiB linear SGE space (2048 pages).
   An entry above 2047 also freezes the APU.
 - A voice must never reach its end (silent tail plus driver unlink), and its record must not be rewritten
@@ -37,7 +37,7 @@ Hardware limits any design must respect:
 | Volume and pitch changes on a playing channel (`SND_CHANGE_VOL`, `SND_CHANGE_PITCH`, pitch 1-255 around 100) | gain and pitch updates (exist); pitch range check (F7) |
 | Cue-point loops: play the start once, then loop a section (ambient sounds, machines) | loop points on a buffer (F2) |
 | Engine-computed attenuation and stereo pan (`S_SpatializeChannel`) for a bit-faithful mix | direct per-channel gains that bypass the 3D model (F3) |
-| CHAN_* priority and stealing, up to 128 engine channels | 64 hardware voices, the rest in the CPU mixer (F5) |
+| CHAN_* priority and stealing, up to 128 engine channels | 120 hardware voices, the rest in the CPU mixer (F5) |
 | Music (MP3/OGG), VOX sentences, cinematic audio, voice chat | streamed source (F1) |
 | Pause and resume (menu), restart on level change | pause/stop of all sources (exists), buffer release and reuse (F6) |
 | Room effects (`room_type`: reverb, echo, underwater) | GP reverb (F8), later |
@@ -139,7 +139,6 @@ Every phase ends with host tests green in both builds, a hardware run logged ove
        gains, engine priority and no-virtualize, plus sample-space reclaiming and 2048 buffers. For an
        engine author, see `ENGINE_INTEGRATION.md`.
      - **Still open:**
-       - the probe of an `LBO`/`EBO` write on a playing record (`AL_LOOPING` changes apply at the next play);
        - the comparison against the CPU mixer with real HL sounds, which needs the engine (phase C).
 3. **Phase C - Xash full backend.**
    - **Engine side:** each channel maps to a source, with music/VOX/cinematics and overflow in the CPU
