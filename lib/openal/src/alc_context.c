@@ -696,7 +696,7 @@ AL_API const ALchar * AL_APIENTRY alGetString(ALenum param) {
                        ? "MCPX APU (MMIO backend)"
                        : "MCPX APU (null backend)";
         case AL_EXTENSIONS:
-            return "AL_EXT_OFFSET AL_SOFT_loop_points AL_XBOX_hardware_status AL_XBOX_source_control AL_XBOX_update";
+            return "AL_EXT_OFFSET AL_SOFT_loop_points AL_XBOX_hardware_status AL_XBOX_hrtf AL_XBOX_source_control AL_XBOX_update";
         default:
             alSetError(AL_INVALID_ENUM);
             return NULL;
@@ -711,6 +711,7 @@ AL_API ALboolean AL_APIENTRY alIsExtensionPresent(const ALchar *extname) {
     if (strcmp(extname, "AL_EXT_OFFSET") == 0 ||
         strcmp(extname, "AL_SOFT_loop_points") == 0 ||
         strcmp(extname, "AL_XBOX_hardware_status") == 0 ||
+        strcmp(extname, "AL_XBOX_hrtf") == 0 ||
         strcmp(extname, "AL_XBOX_source_control") == 0 ||
         strcmp(extname, "AL_XBOX_update") == 0) {
         return AL_TRUE;
@@ -802,6 +803,10 @@ AL_API void AL_APIENTRY alXboxGetHardwareStatus(ALenum param, ALint *value) {
 
         case AL_XBOX_SAMPLE_PAGES_TOTAL:
             *value = (ALint)APU_VP_SGE_ENTRIES;
+            break;
+
+        case AL_XBOX_HRTF_ACTIVE:
+            *value = (s_active_device_count > 0 && apu_voice_hrtf_active()) ? 1 : 0;
             break;
 
         default:

@@ -54,6 +54,28 @@ void apu_hrtf_build_entry(float azimuth_deg, float elevation_deg, apu_hrtf_entry
  */
 int apu_hrtf_entry_for_local(const float local_pos[3]);
 
+/*
+ * The console's own encoding (measured with samples/apu_hrtf_probe, rounds
+ * 3-5; xemu's linear int8 model does not match it):
+ *   - a coefficient is an 8-bit float: sign 7, exponent 6:4, mantissa 3:0;
+ *     magnitude m for exponent 0, else (16 + m) << (exponent - 1), of a full
+ *     scale of 2048 (0x7F = 1984/2048, 0x40 = 128/2048, 0xFF = -1984/2048)
+ *   - a 64-byte HRTF target entry is 16 dwords: dword k < 15 holds taps 2k
+ *     and 2k+1 as left | right << 8 | left << 16 | right << 24; dword 15 holds
+ *     tap 30 (left | right << 8) and the ITD in bits 31:16 (s6.9 samples, > 0
+ *     delays the left ear)
+ */
+#define APU_HRTF_HW_ENTRY_DWORDS 16
+
+/** Hardware code of a coefficient value / 128 (the int8 table value), nearest representable. */
+uint8_t apu_hrtf_hw_code(int8_t value);
+
+/** Magnitude of a hardware code, of 2048, signed (the inverse of apu_hrtf_hw_code). */
+int apu_hrtf_hw_value(uint8_t code);
+
+/** Pack an entry into the 16 dwords of a hardware HRTF target entry. */
+void apu_hrtf_pack_hw_entry(const apu_hrtf_entry_t *e, uint32_t out[APU_HRTF_HW_ENTRY_DWORDS]);
+
 #ifdef __cplusplus
 }
 #endif

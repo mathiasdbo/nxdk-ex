@@ -518,21 +518,57 @@ static void register_shutdown(uintptr_t bar0, bool on) {
 }
 #endif
 
+/*
+ * HRTF on a console, without front-end methods (samples/apu_hrtf_probe rounds
+ * 2-5, XEMU_VERIFICATION.md 8.1b): a voice on the 3D list with CFG_HRTF_TARGET
+ * = n runs the HRTF stage with entry n of the target array (register 0x2038,
+ * 64-byte entries in the hardware encoding, apu_hrtf_pack_hw_entry); the VP
+ * keeps each voice's filter state in the current array (0x203C, 128 bytes per
+ * handle); 0x20AC routes the four HRTF submix slots to mixbins. The left ear
+ * feeds slots 0 and 1, the right ear slots 2 and 3, each scaled by the voice
+ * output volume of the same number: the driver sends slot 0 to bin 0 and slot
+ * 2 to bin 1 (slots 1 and 3 to an unused bin), and HRTF voices open outputs 0
+ * and 2 only. Every handle 0..127 can be an HRTF voice; a live change of the
+ * target moves the sound.
+ */
+#define HRTF_TARGET_BYTES   (APU_HRTF_ENTRIES * APU_HRTF_HW_ENTRY_DWORDS * 4u)   /* 8 KiB */
+#define HRTF_CURRENT_BYTES  (APU_VP_MAX_HANDLES * 128u)                          /* 32 KiB */
+#define HRTF_UNUSED_BIN     31u
+#define HRTF_SUBMIX_STEREO  (0u | (HRTF_UNUSED_BIN << 8) | (1u << 16) | (HRTF_UNUSED_BIN << 24))
+
+static uint32_t *s_hrtf_target;  static uint32_t s_hrtf_target_phys;
+static uint8_t *s_hrtf_current;  static uint32_t s_hrtf_current_phys;
+static bool s_hrtf_hw;                              /* console HRTF set up */
+static uint8_t s_voice_hrtf[APU_VP_MAX_HANDLES];    /* the handle plays as an HRTF voice (3D list) */
+
 static void free_tables(void) {
     if (s_voices) apu_mem_free_phys(s_voices);
     if (s_sge) apu_mem_free_phys(s_sge);
     if (s_ssl) apu_mem_free_phys(s_ssl);
     if (s_notify) apu_mem_free_phys(s_notify);
+    if (s_hrtf_target) apu_mem_free_phys(s_hrtf_target);
+    if (s_hrtf_current) apu_mem_free_phys(s_hrtf_current);
     s_voices = NULL;
     s_sge = NULL;
     s_ssl = NULL;
     s_notify = NULL;
+    s_hrtf_target = NULL;
+    s_hrtf_current = NULL;
+    s_hrtf_hw = false;
 }
 
 void apu_vp_load_hrtf(uintptr_t bar0, const apu_hrtf_entry_t table[APU_HRTF_ENTRIES]) {
     uint32_t e, k;
+    if (s_hrtf_hw) {
+        /* Console: write the entries into the target array in the hardware encoding */
+        for (e = 0; e < APU_HRTF_ENTRIES; e++) {
+            apu_hrtf_pack_hw_entry(&table[e], s_hrtf_target + e * APU_HRTF_HW_ENTRY_DWORDS);
+        }
+        wc_flush();
+        return;
+    }
     if (!s_fe_ok) {
-        return;   /* the table can only be loaded through front-end methods */
+        return;
     }
     for (e = 0; e < APU_HRTF_ENTRIES; e++) {
         const apu_hrtf_entry_t *t = &table[e];
@@ -609,12 +645,28 @@ int apu_vp_init(uintptr_t bar0) {
     /* HRTF (step 13), front end only: for handles below 64, outputs 0-3 go to
      * these four submix bins: front left/right (0, 1) and surround left/right
      * (2, 3) in this library's bin order. Then load the spherical-head table. */
+    memset(s_voice_hrtf, 0, sizeof(s_voice_hrtf));
     if (s_fe_ok) {
         static apu_hrtf_entry_t table[APU_HRTF_ENTRIES];
         method(bar0, MCPX_METH_SET_HRTF_HEADROOM, 0);
         method(bar0, MCPX_METH_SET_HRTF_SUBMIXES, 0u | (1u << 8) | (2u << 16) | (3u << 24));
         apu_hrtf_build_table(table);
         apu_vp_load_hrtf(bar0, table);
+    } else if (!(s_dbg & APU_VP_DBG_NO_HRTF)) {
+        /* Console: our own target/current arrays and submix routing (see above) */
+        s_hrtf_target = (uint32_t *)apu_mem_alloc_table(HRTF_TARGET_BYTES, &s_hrtf_target_phys);
+        s_hrtf_current = (uint8_t *)apu_mem_alloc_table(HRTF_CURRENT_BYTES, &s_hrtf_current_phys);
+        if (s_hrtf_target && s_hrtf_current) {
+            static apu_hrtf_entry_t table[APU_HRTF_ENTRIES];
+            memset(s_hrtf_target, 0, HRTF_TARGET_BYTES);
+            memset(s_hrtf_current, 0, HRTF_CURRENT_BYTES);
+            reg_wr(bar0, MCPX_APU_VPHTADDR, s_hrtf_target_phys);
+            reg_wr(bar0, MCPX_APU_VPHCADDR, s_hrtf_current_phys);
+            reg_wr(bar0, MCPX_APU_HRTF_SUBMIXES, HRTF_SUBMIX_STEREO);
+            s_hrtf_hw = true;
+            apu_hrtf_build_table(table);
+            apu_vp_load_hrtf(bar0, table);
+        }
     }
 
     /* GP program that forwards bins 0/1 to output FIFO 0 (steps 8, 14, 15) */
@@ -693,6 +745,10 @@ void apu_vp_get_fe_stats(apu_vp_fe_stats_t *out) {
 }
 
 bool apu_vp_hrtf_available(void) {
+    return s_ready && (s_fe_ok || s_hrtf_hw);
+}
+
+bool apu_vp_front_end_ok(void) {
     return s_ready && s_fe_ok;
 }
 
@@ -748,9 +804,16 @@ int apu_vp_voice_start(uintptr_t bar0, uint32_t h, const apu_vp_voice_params_t *
 
     apu_vp_pack_bins(p->bins, &vbin, &fmt_bins);
     apu_vp_pack_volumes(p->vols, &vola, &volb, &volc);
-    /* Handles below 64 run the HRTF stage; a non-null entry must be latched or the voice is silent */
-    hrtf = (h < 64u && s_fe_ok && p->hrtf_entry >= 0 && p->hrtf_entry < APU_HRTF_ENTRIES) ? (uint32_t)p->hrtf_entry
-                                                                                          : MCPX_HRTF_NONE;
+    /* xemu: handles below 64 run the HRTF stage, and a non-null entry must be
+     * latched or the voice is silent. Console: any handle, on the 3D list. */
+    hrtf = MCPX_HRTF_NONE;
+    if (p->hrtf_entry >= 0 && p->hrtf_entry < APU_HRTF_ENTRIES && ((s_fe_ok && h < 64u) || (!s_fe_ok && s_hrtf_hw))) {
+        hrtf = (uint32_t)p->hrtf_entry;
+    }
+    s_voice_hrtf[h] = (uint8_t)(hrtf != MCPX_HRTF_NONE && !s_fe_ok);
+    if (s_voice_hrtf[h]) {
+        memset(s_hrtf_current + h * 128u, 0, 128u);   /* the filter state starts from silence, not the previous voice's */
+    }
 
     /* What the configuration methods and VOICE_ON leave in the record (xemu vp.c) */
     for (i = 0; i < MCPX_VOICE_SIZE; i += 4u) {
@@ -777,7 +840,7 @@ int apu_vp_voice_start(uintptr_t bar0, uint32_t h, const apu_vp_voice_params_t *
     }
     *voice_dw(h, MCPX_VOICE_PAR_STATE) = MCPX_PAR_STATE_ACTIVE_VOICE;
     trace(bar0, 'S', h, (frames & 0xFFFFFFu) | (soft_end ? 0x80000000u : 0u));   /* a = data frames, bit 31 = silent-tail loop */
-    link_voice(bar0, h, 0);   /* top of the 2D list */
+    link_voice(bar0, h, s_voice_hrtf[h] ? 1u : 0u);   /* top of the 3D list (console HRTF) or the 2D list */
     return 0;
 }
 
@@ -801,6 +864,9 @@ void apu_vp_voice_update(uintptr_t bar0, uint32_t h, int16_t pitch, const uint16
     if (h < 64u && s_fe_ok && hrtf_entry >= 0 && hrtf_entry < APU_HRTF_ENTRIES) {
         *voice_dw(h, MCPX_VOICE_CFG_HRTF_TARGET) = (uint32_t)hrtf_entry;
         latch_hrtf(bar0, h, (uint32_t)hrtf_entry);
+    } else if (s_voice_hrtf[h] && hrtf_entry >= 0 && hrtf_entry < APU_HRTF_ENTRIES) {
+        /* Console: a new target entry takes effect at once (apu_hrtf_probe round 5) */
+        *voice_dw(h, MCPX_VOICE_CFG_HRTF_TARGET) = (uint32_t)hrtf_entry;
     }
     if (s_fe_ok) {
         apu_vp_service(bar0);   /* xemu: release an idle-voice trap promptly */
@@ -896,7 +962,7 @@ void apu_vp_voice_pause(uintptr_t bar0, uint32_t h, bool pause) {
     } else if (s_paused[h]) {
         s_paused[h] = 0;
         if (record_active(h)) {
-            link_voice(bar0, h, 0);
+            link_voice(bar0, h, s_voice_hrtf[h] ? 1u : 0u);
         }
     }
 }
@@ -973,4 +1039,12 @@ uint32_t apu_vp_plain_handles(void) {
         return APU_VP_MAX_HANDLES - APU_VP_HANDLE_BASE;
     }
     return (s_dbg & APU_VP_DBG_HANDLES_HIGH) ? APU_VP_HW_HANDLES - APU_VP_HANDLE_BASE : APU_VP_HW_HANDLES;
+}
+
+bool apu_vp_voice_is_hrtf(uint32_t h) {
+    return h < APU_VP_MAX_HANDLES && s_voice_hrtf[h] != 0;
+}
+
+const uint32_t *apu_vp_debug_hrtf_target(void) {
+    return s_hrtf_hw ? s_hrtf_target : NULL;
 }

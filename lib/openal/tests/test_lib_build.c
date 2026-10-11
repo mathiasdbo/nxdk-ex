@@ -152,6 +152,12 @@ int main(void) {
                 assert(alGetError() == AL_NO_ERROR);
             } else if (strcmp(name, "AL_EXT_MCFORMATS") == 0) {
                 /* checked below: formats must be accepted if (and only if) advertised */
+            } else if (strcmp(name, "AL_XBOX_hrtf") == 0) {
+                assert(alIsEnabled(AL_XBOX_HRTF) == AL_TRUE);          /* on by default */
+                alDisable(AL_XBOX_HRTF);
+                assert(alIsEnabled(AL_XBOX_HRTF) == AL_FALSE);
+                alEnable(AL_XBOX_HRTF);
+                assert(alIsEnabled(AL_XBOX_HRTF) == AL_TRUE && alGetError() == AL_NO_ERROR);
             } else if (strcmp(name, "AL_EXT_OFFSET") == 0 || strcmp(name, "AL_SOFT_loop_points") == 0 ||
                        strcmp(name, "AL_XBOX_source_control") == 0) {
                 /* a stopped source with a 16-frame buffer: the attribute round-trips */
