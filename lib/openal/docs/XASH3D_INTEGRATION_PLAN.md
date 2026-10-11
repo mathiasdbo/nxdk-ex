@@ -15,7 +15,7 @@ Verified on a retail console (see `XEMU_VERIFICATION.md` 8.1b):
 | Formats | `AL_FORMAT_MONO8/16`, `STEREO8/16`, any sample rate (VP pitch is a 4.12 log2 ratio to 48 kHz) |
 | Playback control | play, pause, stop, rewind, `AL_LOOPING`, gain, pitch, position-based pan; target updates are ramped by the VP |
 | One-shots | loop over a 256-byte silent tail that every buffer carries; `alXboxUpdateVoices()` unlinks them (a voice that reaches its end stops the APU on hardware) |
-| 3D | distance and cone model in the library; on a console the pan is folded to stereo volumes (no HRTF: it needs front-end methods, which do not run on hardware) |
+| 3D | distance and cone model in the library; HRTF on the APU for up to 64 mono 3D sources (also on a console, through the HRTF arrays), the rest panned by volume |
 | Streaming | buffer queueing on a looping ring voice, and an AC97 pump thread that keeps the output going while the game is not calling the library (phase A, done) |
 | Missing | sample/byte/second offsets, loop points, direct gains, any effect (the GP only copies the mix) |
 

@@ -136,6 +136,9 @@ screen. There are no committed measurements.
   never exceeds 31), the Q14 biquad "HRTF", the linear 16.16 pitch step, the linear gains and the 64-voice cap
   are the library's own model. xemu's voice processor uses a 31-tap FIR HRTF with an ITD of up to +/-42 samples,
   a signed 4.12 log2 pitch field, 12-bit attenuations (0 = unity, 0xFFF = mute) and up to 256 concurrent voices.
+  With the real APU (`-DOPENAL_APU_REAL_MMIO`), mono 3D sources use the hardware's own 31-tap HRTF stage with the
+  library's spherical-head table, on xemu through front-end methods and on a console through the HRTF arrays
+  (64 such voices at once; `AL_XBOX_HRTF`, `docs/ENGINE_INTEGRATION.md` 3.5).
 * **No Dolby Digital / DTS / TOSLink output.** The library writes configuration bits for a 5.1 topology; it
   contains no AC-3 encoder, and xemu models none. Topology detection depends on the AV pack and the EEPROM
   audio flags, whose optical-pack set and flag values are assumptions.
