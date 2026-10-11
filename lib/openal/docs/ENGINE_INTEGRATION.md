@@ -34,7 +34,8 @@ the AC97 codec. Console verification of each feature is recorded in `XEMU_VERIFI
 | Pitch | playback rate 1/16 to 4 times 48 kHz | `AL_PITCH` times the buffer's rate is clamped to it |
 | Sample space | 2048 pages of 4 KiB (8 MiB) | counts buffers of playing voices only; reclaimed automatically (`AL_XBOX_SAMPLE_PAGES_USED`) |
 | Streaming sources | 32, each with up to 64 queued buffers | ring of 16384 frames, data written up to 8192 frames ahead |
-| Output | stereo, 16-bit, 48 kHz | no 5.1 or Dolby Digital; HRTF only on xemu |
+| Output | stereo, 16-bit, 48 kHz | no 5.1 or Dolby Digital |
+| HRTF voices | 64 at once | mono 3D sources beyond that are panned by volume (`AL_XBOX_HRTF`) |
 
 Buffer memory itself comes from contiguous RAM (`apu_mem.c`), so the console's 64 MiB is the real ceiling.
 
@@ -102,7 +103,17 @@ to the end of the data).
   processed.
 - **Preemption:** a source that loses its voice to a higher priority resumes where it was when it gets one back.
 
-### 3.5 Music
+### 3.5 3D sources and HRTF
+
+A mono source positioned with `AL_POSITION` plays through the APU's HRTF stage: a two-ear filter for its
+direction, computed by the library from a spherical-head model.
+- **Limit:** up to 64 sources at once use it; any more are panned by volume.
+- **Switching it off:** HRTF suits headphones. For TV speakers, or for an engine that pans itself (direct gains,
+  3.2), call `alDisable(AL_XBOX_HRTF)`. The setting applies to each source at its next `alSourcePlay`.
+- **Checking it:** `alXboxGetHardwareStatus(AL_XBOX_HRTF_ACTIVE)` reports whether HRTF is in use.
+- **Not affected:** stereo sources and sources in direct mode never use HRTF.
+
+### 3.6 Music
 
 Decode MP3/OGG on the CPU into a streaming source (3.1), or into the engine's software mix.
 
