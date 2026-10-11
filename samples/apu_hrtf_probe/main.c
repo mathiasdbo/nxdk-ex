@@ -44,7 +44,7 @@
 #define H           1u
 #define ARRAY_BYTES 0x10000u
 #define CAPTURE     7200u         /* 150 ms of stereo frames */
-#define PROGRESS    "E:\\hrtf3_progress.txt"
+#define PROGRESS    "E:\\hrtf4_progress.txt"
 
 static char s_log[32 * 1024];
 static size_t s_log_len, s_saved;
@@ -113,24 +113,38 @@ typedef struct {
     uint32_t w[16];
 } test_t;
 
-#define SUB_01  0x1F1F0100u   /* submix slots 0,1 -> bins 0,1; slots 2,3 -> bin 31 (not forwarded) */
-#define SUB_23  0x01001F1Fu   /* slots 2,3 -> bins 0,1 */
+/*
+ * Round 3 results (console): bytes 0/2 of dword 0 are ear A's taps 0/1, bytes
+ * 1/3 the other ear's (silent on outputs 0/1, which both carried ear A); dword
+ * 15 bits 31:16 are the ITD in s6.9, a positive value delaying ear A; a tap of
+ * 127 settled at 124 in the current array (0x7C0 >> 4) and gave 124/128 of the
+ * direct level. Round 4: all four voice outputs open (round 3 muted 2/3), one
+ * submix slot at a time routed to bin 0, to find where ear B goes; then tap
+ * order and the ITD sign with both ears on bins 0/1.
+ *
+ * SUB(a, b, c, d): submix slots 0..3 -> bins a..d (31: a bin the GP does not forward)
+ */
+#define SUB(a, b, c, d) ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24))
+#define X 31u
+#define EAR_A 0x0000007Fu   /* byte 0: ear A tap 0 */
+#define EAR_B 0x00007F00u   /* byte 1: ear B tap 0 */
 
 static const test_t s_tests[] = {
-    { "direct (2D, no HRTF): reference", SUB_01, true, { 0 } },
-    { "w0=00007F7F (tap0 both), slots 0/1", SUB_01, false, { 0x00007F7Fu } },
-    { "w0=00007F7F, slots 2/3", SUB_23, false, { 0x00007F7Fu } },
-    { "w0=0000007F (byte 0 only)", SUB_01, false, { 0x0000007Fu } },
-    { "w0=00007F00 (byte 1 only)", SUB_01, false, { 0x00007F00u } },
-    { "w0=007F0000 (byte 2 only)", SUB_01, false, { 0x007F0000u } },
-    { "w0=7F000000 (byte 3 only)", SUB_01, false, { 0x7F000000u } },
-    { "w0=0000407F: byte0 127, byte1 64", SUB_01, false, { 0x0000407Fu } },
-    { "byte0 of w0 + byte1 of w10 (R tap 20?)", SUB_01, false, { 0x0000007Fu, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00007F00u } },
-    { "byte0 of w0 + byte1 of w1 (R tap 2?)", SUB_01, false, { 0x0000007Fu, 0x00007F00u } },
-    { "byte0 of w0 + byte1 of w15 (R tap 30?)", SUB_01, false, { 0x0000007Fu, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00007F00u } },
-    { "w0=00007F7F, w15 hi=+10.0 (ITD s6.9?)", SUB_01, false, { 0x00007F7Fu, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x14000000u } },
-    { "w0=00007F7F, w15 hi=-10.0", SUB_01, false, { 0x00007F7Fu, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xEC000000u } },
-    { "w0=00007F7F, w15 hi=+0.5", SUB_01, false, { 0x00007F7Fu, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01000000u } },
+    { "ear A only, slot 0 -> bin 0", SUB(0, X, X, X), false, { EAR_A } },
+    { "ear A only, slot 1 -> bin 0", SUB(X, 0, X, X), false, { EAR_A } },
+    { "ear A only, slot 2 -> bin 0", SUB(X, X, 0, X), false, { EAR_A } },
+    { "ear A only, slot 3 -> bin 0", SUB(X, X, X, 0), false, { EAR_A } },
+    { "ear B only, slot 0 -> bin 0", SUB(0, X, X, X), false, { EAR_B } },
+    { "ear B only, slot 1 -> bin 0", SUB(X, 0, X, X), false, { EAR_B } },
+    { "ear B only, slot 2 -> bin 0", SUB(X, X, 0, X), false, { EAR_B } },
+    { "ear B only, slot 3 -> bin 0", SUB(X, X, X, 0), false, { EAR_B } },
+    { "A tap0 + B tap20, slots 0/1 -> bins 0/1", SUB(0, 1, X, X), false, { EAR_A, 0, 0, 0, 0, 0, 0, 0, 0, 0, EAR_B } },
+    { "A tap0 + B tap20, slots 0/2 -> bins 0/1", SUB(0, X, 1, X), false, { EAR_A, 0, 0, 0, 0, 0, 0, 0, 0, 0, EAR_B } },
+    { "A tap0 + B tap20, slots 0/3 -> bins 0/1", SUB(0, X, X, 1), false, { EAR_A, 0, 0, 0, 0, 0, 0, 0, 0, 0, EAR_B } },
+    { "A+B tap0, ITD -10, slots 0/1", SUB(0, 1, X, X), false, { EAR_A | EAR_B, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xEC000000u } },
+    { "A+B tap0, ITD -10, slots 0/2", SUB(0, X, 1, X), false, { EAR_A | EAR_B, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xEC000000u } },
+    { "A+B tap0, ITD -10, slots 0/3", SUB(0, X, X, 1), false, { EAR_A | EAR_B, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xEC000000u } },
+    { "A tap0 = 64 (scale)", SUB(0, 1, X, X), false, { 0x00000040u } },
 };
 #define N_TESTS ((int)(sizeof(s_tests) / sizeof(s_tests[0])))
 
@@ -186,7 +200,7 @@ static void start_voice(const test_t *t) {
         bins[w] = (uint8_t)(w & 1u);
         vols[w] = 0xFFFu;
     }
-    vols[0] = vols[1] = 0x080u;
+    vols[0] = vols[1] = vols[2] = vols[3] = 0x080u;   /* all four outputs: each feeds one HRTF submix slot? */
     apu_vp_pack_bins(bins, &vbin, &fb);
     apu_vp_pack_volumes(vols, &vola, &volb, &volc);
     for (w = 0; w < 32u; w++) r[w] = 0;
@@ -216,15 +230,15 @@ int main(void) {
     XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
     resume = read_progress();
     if (resume >= N_TESTS) {
-        logf_("\n=== round 3: all %d tests already ran (delete %s to run them again)\n", N_TESTS, PROGRESS);
+        logf_("\n=== round 4: all %d tests already ran (delete %s to run them again)\n", N_TESTS, PROGRESS);
         save_log();
         for (;;) Sleep(1000);
     }
     if (resume < 0) {
-        logf_("\n=== round 3: HRTF entry layout, %d tests (fresh start)\n", N_TESTS);
+        logf_("\n=== round 4: ear routing, tap order, ITD sign, %d tests (fresh start)\n", N_TESTS);
         resume = 0;
     } else {
-        logf_("\n=== round 3: resumed; test %d (%s) did not finish (FROZE?)\n", resume, s_tests[resume].name);
+        logf_("\n=== round 4: resumed; test %d (%s) did not finish (FROZE?)\n", resume, s_tests[resume].name);
         resume++;
     }
     save_log();
