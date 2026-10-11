@@ -127,6 +127,7 @@ void apu_vp_debug_set_map_guard(uint32_t pages);
 #define APU_VP_DBG_NO_END_SCAN      8u   /* apu_vp_service() leaves one-shots in their silent tail listed */
 #define APU_VP_DBG_NO_FE_PROBE     16u   /* apu_vp_init() sends no methods and assumes a real console */
 #define APU_VP_DBG_NO_AC97_THREAD  32u   /* pump the AC97 from apu_vp_service(), no thread (next apu_vp_init()) */
+#define APU_VP_DBG_HANDLES_HIGH    64u   /* a console allocates handles 64..127 only, as before handles 0..63 were used */
 void apu_vp_debug_set_flags(uint32_t flags);
 
 /** Copy up to `max` of the most recent operations, oldest first. @return count. */
@@ -174,6 +175,9 @@ void apu_vp_voice_off(uintptr_t bar0, uint32_t handle);
  * @return the handle, or 0xFFFF if none is free.
  */
 uint32_t apu_vp_alloc_handle(uintptr_t bar0);
+
+/** Handles apu_vp_alloc_handle() can return: 192 on xemu, 128 on a console (64 with APU_VP_DBG_HANDLES_HIGH). */
+uint32_t apu_vp_plain_handles(void);
 
 /** Playing or paused: false once a one-shot ended or the voice was switched off. */
 bool apu_vp_voice_active(uint32_t handle);
