@@ -30,13 +30,14 @@ const uint32_t apu_gp_program[APU_GP_PROGRAM_WORDS] = {
 #define DESC_DSP_STEP(n)  ((uint32_t)(n) << 14)
 
 static uint32_t s_dsp_step = APU_GP_FRAME;   /* apu_gp_debug_set_dsp_step() */
-
 void apu_gp_debug_set_dsp_step(uint32_t words) {
     s_dsp_step = words;
 }
 #define MIXBIN_X_BASE     0x1400u     /* bin n at X:$1400 + 32 n */
 
 #define SCRATCH_BYTES     (0x800u * 4u)   /* bootstrap image: P:0..$7FF */
+#define SCRATCH_MAX_BYTES (512u * 4096u)  /* one 4 KiB SGE table page: 512 entries */
+#define CLEAR_X_END       0x40u           /* X:$10..$3F (counter, program parameters) start at 0 */
 #define FIFO_FRAMES       (APU_GP_FIFO_BYTES / 4u)
 
 static uint32_t *s_scratch;  static uint32_t s_scratch_phys;
@@ -48,6 +49,30 @@ static uint32_t s_frames_read;
 static uint32_t s_resyncs;
 static bool s_ready;
 static bool s_loaded;
+static const uint32_t *s_image = apu_gp_program;     /* apu_gp_debug_set_program() */
+static uint32_t s_image_words = APU_GP_PROGRAM_WORDS;
+static uint32_t s_scratch_bytes = SCRATCH_BYTES;     /* apu_gp_debug_set_scratch_bytes() */
+
+void apu_gp_debug_set_program(const uint32_t *words, uint32_t count) {
+    if (words && count > 0u && count <= SCRATCH_BYTES / 4u) {
+        s_image = words;
+        s_image_words = count;
+    } else {
+        s_image = apu_gp_program;
+        s_image_words = APU_GP_PROGRAM_WORDS;
+    }
+}
+
+void apu_gp_debug_set_scratch_bytes(uint32_t bytes) {
+    bytes = (bytes + 4095u) & ~4095u;
+    if (bytes < SCRATCH_BYTES) bytes = SCRATCH_BYTES;
+    if (bytes > SCRATCH_MAX_BYTES) bytes = SCRATCH_MAX_BYTES;
+    s_scratch_bytes = bytes;
+}
+
+uint32_t apu_gp_scratch_bytes(void) {
+    return s_ready ? s_scratch_bytes : 0;
+}
 
 static inline void reg_wr(uintptr_t bar0, uint32_t off, uint32_t v) {
     *(volatile uint32_t *)(bar0 + off) = v;
@@ -70,8 +95,8 @@ static bool program_loaded(uintptr_t bar0) {
         for (spin = 0; spin < 2000u; spin++) {
             (void)reg_rd(bar0, MCPX_APU_GPRST);      /* ~2 ms for the bootstrap DMA */
         }
-        for (i = 0; i < APU_GP_PROGRAM_WORDS; i++) {
-            if ((reg_rd(bar0, MCPX_APU_GP_PMEM + 4u * i) & 0xFFFFFFu) != apu_gp_program[i]) {
+        for (i = 0; i < s_image_words; i++) {
+            if ((reg_rd(bar0, MCPX_APU_GP_PMEM + 4u * i) & 0xFFFFFFu) != (s_image[i] & 0xFFFFFFu)) {
                 ok = false;
             }
         }
@@ -110,7 +135,7 @@ int apu_gp_init(uintptr_t bar0) {
     if (s_ready) {
         return 0;
     }
-    s_scratch = (uint32_t *)apu_mem_alloc_table(SCRATCH_BYTES, &s_scratch_phys);
+    s_scratch = (uint32_t *)apu_mem_alloc_table(s_scratch_bytes, &s_scratch_phys);
     s_scratch_sge = (uint32_t *)apu_mem_alloc_table(4096, &s_scratch_sge_phys);
     s_fifo = (uint8_t *)apu_mem_alloc_table(APU_GP_FIFO_BYTES, &s_fifo_phys);
     s_fifo_sge = (uint32_t *)apu_mem_alloc_table(4096, &s_fifo_sge_phys);
@@ -121,15 +146,15 @@ int apu_gp_init(uintptr_t bar0) {
 
     /* Bootstrap image: P:0..$7FF as little-endian 32-bit words, top byte 0; the
      * rest stays 0 (NOP), the program never runs into it */
-    memset(s_scratch, 0, SCRATCH_BYTES);
-    for (i = 0; i < sizeof(apu_gp_program) / sizeof(apu_gp_program[0]); i++) {
-        s_scratch[i] = apu_gp_program[i] & 0xFFFFFFu;
+    memset(s_scratch, 0, s_scratch_bytes);
+    for (i = 0; i < s_image_words; i++) {
+        s_scratch[i] = s_image[i] & 0xFFFFFFu;
     }
     memset(s_fifo, 0, APU_GP_FIFO_BYTES);
 
     /* SGE tables: one entry per 4 KiB page (dword 0 = physical page) */
     memset(s_scratch_sge, 0, 4096);
-    pages = SCRATCH_BYTES / 4096u;
+    pages = s_scratch_bytes / 4096u;
     for (i = 0; i < pages; i++) {
         s_scratch_sge[2u * i] = s_scratch_phys + i * 4096u;
     }
@@ -167,7 +192,9 @@ int apu_gp_init(uintptr_t bar0) {
         reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * i,
                (i == 1u) ? ((desc[1] & ~DESC_DSP_STEP(0x3FFu)) | DESC_DSP_STEP(s_dsp_step)) : desc[i]);
     }
-    reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * FRAME_COUNTER_X, 0);
+    for (i = FRAME_COUNTER_X; i < CLEAR_X_END; i++) {
+        reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * i, 0);   /* frame counter and the program's parameters */
+    }
     s_ready = true;
     return 0;
 }

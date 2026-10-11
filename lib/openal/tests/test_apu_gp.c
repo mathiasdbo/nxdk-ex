@@ -7,6 +7,7 @@
 #include "apu_vp.h"
 #include "apu_mem.h"
 #include "mcpx_apu_regs.h"
+#include "../dsp/gp_copy.h"   /* dsp/gp_copy.asm through tools/dsp56asm.py */
 
 /*
  * GP stage (apu_gp.c) against a plain-memory BAR0: the bootstrap image and
@@ -120,6 +121,37 @@ int main(void) {
 
     apu_vp_deinit(base);
     assert(!apu_gp_ready() && reg(MCPX_APU_GPRST) == 0);
+
+    printf("[6] Assembler output and other program images...\n");
+    assert(GP_COPY_WORDS == APU_GP_PROGRAM_WORDS);
+    for (i = 0; i < APU_GP_PROGRAM_WORDS; i++) {
+        assert(gp_copy_words[i] == apu_gp_program[i]);
+    }
+    {
+        static const uint32_t image[5] = { 0x08F484u, 0x000001u, 0x000000u, 0x0C0000u, 0x123456u };
+        const uint32_t *scratch;
+        set_reg(MCPX_APU_GP_XMEM + 4u * 0x11u, 5u);
+        set_reg(MCPX_APU_GP_XMEM + 4u * 0x3Fu, 5u);
+        set_reg(MCPX_APU_GP_XMEM + 4u * 0x40u, 5u);
+        apu_gp_debug_set_program(image, 5);
+        apu_gp_debug_set_scratch_bytes(0x47001u);                    /* rounded up to 0x48000 */
+        assert(apu_vp_init(base) == 0);
+        assert(apu_gp_scratch_bytes() == 0x48000u && reg(MCPX_APU_GPSMAXSGE) == 0x47u);
+        scratch = apu_gp_debug_scratch();
+        for (i = 0; i < 5u; i++) {
+            assert(scratch[i] == image[i]);
+        }
+        assert(scratch[5] == 0 && scratch[0x47FFFu / 4u] == 0);
+        assert(reg(MCPX_APU_GP_XMEM + 4u * 0x11u) == 0 && reg(MCPX_APU_GP_XMEM + 4u * 0x3Fu) == 0);   /* parameters cleared */
+        assert(reg(MCPX_APU_GP_XMEM + 4u * 0x40u) == 5u);
+        apu_vp_deinit(base);
+        apu_gp_debug_set_program(NULL, 0);
+        apu_gp_debug_set_scratch_bytes(0);
+        assert(apu_vp_init(base) == 0);
+        assert(apu_gp_scratch_bytes() == 0x2000u && apu_gp_debug_scratch()[0] == apu_gp_program[0]);
+        apu_vp_deinit(base);
+    }
+    printf("    -> the assembled copy program matches; custom image and scratch size load [PASS]\n");
     apu_mem_shutdown();
     free(s_bar0);
     printf("=== All GP Stage Tests Passed Successfully! ===\n");
