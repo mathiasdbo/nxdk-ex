@@ -541,5 +541,6 @@ void apu_voice_debug_set_position(uint32_t index, uint32_t frames)
 uint32_t apu_voice_slot_count(void)
 {
     /* A console (no HRTF stage) plays plain voices on handles 0..127 */
-    return (s_vp_hw && !apu_vp_hrtf_available()) ? APU_VOICE_HW_SLOTS : NV_PAPU_NUM_3D_VOICES;
+    return (s_vp_hw && !apu_vp_hrtf_available() && apu_vp_plain_handles() >= APU_VP_HW_HANDLES) ? APU_VOICE_HW_SLOTS
+                                                                                         : NV_PAPU_NUM_3D_VOICES;
 }

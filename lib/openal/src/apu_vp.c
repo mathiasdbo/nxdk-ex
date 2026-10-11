@@ -839,7 +839,7 @@ uint32_t apu_vp_alloc_handle(uintptr_t bar0) {
     }
     /* xemu: 64..255 (0..63 are the HRTF voices); a console: every handle 0..127
      * (no HRTF stage there, and handles 0..63 play as plain voices, apu_probe3) */
-    base = s_fe_ok ? APU_VP_HANDLE_BASE : 0u;
+    base = (s_fe_ok || (s_dbg & APU_VP_DBG_HANDLES_HIGH)) ? APU_VP_HANDLE_BASE : 0u;
     span = (s_fe_ok ? APU_VP_MAX_HANDLES : APU_VP_HW_HANDLES) - base;
     now = reg_rd(bar0, MCPX_APU_XGSCNT);
     for (k = 0; k < span; k++) {
@@ -881,4 +881,11 @@ uint8_t *apu_vp_debug_voice_record(uint32_t h) {
 
 const uint32_t *apu_vp_debug_sge(void) {
     return s_sge;
+}
+
+uint32_t apu_vp_plain_handles(void) {
+    if (s_fe_ok) {
+        return APU_VP_MAX_HANDLES - APU_VP_HANDLE_BASE;
+    }
+    return (s_dbg & APU_VP_DBG_HANDLES_HIGH) ? APU_VP_HW_HANDLES - APU_VP_HANDLE_BASE : APU_VP_HW_HANDLES;
 }
