@@ -107,6 +107,8 @@ sounds then need neither queueing nor splitting.
   output, with parameters for HL's `room_type` presets.
 - **Cost and risk:** largest effort, and needs hardware microcode validation like the copy program.
 - **Until then:** room types are a recorded divergence.
+- **Plan:** `GP_REVERB_PLAN.md` (branch `feat/gp-reverb`): send bus on bin 2, DMA-backed delay lines, our own
+  DSP56300 program and assembler, phases 0-5 with the console probes first.
 
 **F9 - Offsets.** `AL_SAMPLE_OFFSET` / `AL_SEC_OFFSET` / `AL_BYTE_OFFSET`. The getters read `CBO`. The setters
 apply at the next play (record written before linking). These are needed for save/restore and for starting a
