@@ -44,7 +44,7 @@
 #define H           1u
 #define ARRAY_BYTES 0x10000u
 #define CAPTURE     7200u         /* 150 ms of stereo frames */
-#define PROGRESS    "E:\\hrtf4_progress.txt"
+#define PROGRESS    "E:\\hrtf5_progress.txt"
 
 static char s_log[32 * 1024];
 static size_t s_log_len, s_saved;
@@ -106,47 +106,6 @@ static void write_progress(int v) {
  *      (dword k = L[2k] | R[2k] << 8 | L[2k+1] << 16 | R[2k+1] << 24 for k < 15,
  *       dword 15 = L[30] | R[30] << 8 | ITD << 16) ---- */
 
-typedef struct {
-    const char *name;
-    uint32_t submix;
-    bool direct;        /* 2D list, no HRTF: the reference */
-    uint32_t w[16];
-} test_t;
-
-/*
- * Round 3 results (console): bytes 0/2 of dword 0 are ear A's taps 0/1, bytes
- * 1/3 the other ear's (silent on outputs 0/1, which both carried ear A); dword
- * 15 bits 31:16 are the ITD in s6.9, a positive value delaying ear A; a tap of
- * 127 settled at 124 in the current array (0x7C0 >> 4) and gave 124/128 of the
- * direct level. Round 4: all four voice outputs open (round 3 muted 2/3), one
- * submix slot at a time routed to bin 0, to find where ear B goes; then tap
- * order and the ITD sign with both ears on bins 0/1.
- *
- * SUB(a, b, c, d): submix slots 0..3 -> bins a..d (31: a bin the GP does not forward)
- */
-#define SUB(a, b, c, d) ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24))
-#define X 31u
-#define EAR_A 0x0000007Fu   /* byte 0: ear A tap 0 */
-#define EAR_B 0x00007F00u   /* byte 1: ear B tap 0 */
-
-static const test_t s_tests[] = {
-    { "ear A only, slot 0 -> bin 0", SUB(0, X, X, X), false, { EAR_A } },
-    { "ear A only, slot 1 -> bin 0", SUB(X, 0, X, X), false, { EAR_A } },
-    { "ear A only, slot 2 -> bin 0", SUB(X, X, 0, X), false, { EAR_A } },
-    { "ear A only, slot 3 -> bin 0", SUB(X, X, X, 0), false, { EAR_A } },
-    { "ear B only, slot 0 -> bin 0", SUB(0, X, X, X), false, { EAR_B } },
-    { "ear B only, slot 1 -> bin 0", SUB(X, 0, X, X), false, { EAR_B } },
-    { "ear B only, slot 2 -> bin 0", SUB(X, X, 0, X), false, { EAR_B } },
-    { "ear B only, slot 3 -> bin 0", SUB(X, X, X, 0), false, { EAR_B } },
-    { "A tap0 + B tap20, slots 0/1 -> bins 0/1", SUB(0, 1, X, X), false, { EAR_A, 0, 0, 0, 0, 0, 0, 0, 0, 0, EAR_B } },
-    { "A tap0 + B tap20, slots 0/2 -> bins 0/1", SUB(0, X, 1, X), false, { EAR_A, 0, 0, 0, 0, 0, 0, 0, 0, 0, EAR_B } },
-    { "A tap0 + B tap20, slots 0/3 -> bins 0/1", SUB(0, X, X, 1), false, { EAR_A, 0, 0, 0, 0, 0, 0, 0, 0, 0, EAR_B } },
-    { "A+B tap0, ITD -10, slots 0/1", SUB(0, 1, X, X), false, { EAR_A | EAR_B, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xEC000000u } },
-    { "A+B tap0, ITD -10, slots 0/2", SUB(0, X, 1, X), false, { EAR_A | EAR_B, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xEC000000u } },
-    { "A+B tap0, ITD -10, slots 0/3", SUB(0, X, X, 1), false, { EAR_A | EAR_B, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xEC000000u } },
-    { "A tap0 = 64 (scale)", SUB(0, 1, X, X), false, { 0x00000040u } },
-};
-#define N_TESTS ((int)(sizeof(s_tests) / sizeof(s_tests[0])))
 
 /* ---- measurement ---- */
 
@@ -191,8 +150,64 @@ static void analyse(uint32_t n, int c, int *peak, int *onset) {
     }
 }
 
-static void start_voice(const test_t *t) {
-    volatile uint32_t *r = (volatile uint32_t *)apu_vp_debug_voice_record(H);
+/*
+ * Round 4 results (console): ear A (bytes 0/2, "left") feeds HRTF submix slots
+ * 0 and 1, ear B (bytes 1/3, "right") slots 2 and 3 (each slot scaled by the
+ * voice output volume of the same number); taps: dword k holds taps 2k, 2k+1
+ * of each ear (ear B tap 20 arrived 20 samples after ear A tap 0); a negative
+ * ITD delays ear B. Coefficients are NOT linear: 0x7F gave 0.969 of the direct
+ * level (current 0x7C0) but 0x40 only 0.0625 (current 0x080). Fits an 8-bit
+ * float: sign 7, exponent 6:4, mantissa 3:0, magnitude (16 + m) << (e - 1),
+ * full scale 2048. Round 5 checks that over many codes (and negative ones),
+ * whether handles 64 and above run HRTF, and a live change of the target.
+ */
+#define SUB(a, b, c, d) ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24))
+#define X 31u
+#define STEREO_SUB SUB(0, X, 1, X)   /* ear A -> bin 0 (left), ear B -> bin 1 (right) */
+
+typedef struct {
+    const char *name;
+    uint32_t code;      /* ear A tap 0 of entry 0 (byte 0 of dword 0) */
+    uint32_t handle;
+    int switch_to;      /* >= 0: after the capture, set CFG_HRTF_TARGET to it and capture again */
+} test_t;
+
+static const test_t s_tests[] = {
+    { "code 01 (e0 m1: 1/2048?)", 0x01u, H, -1 },
+    { "code 0F (e0 m15: 15?)", 0x0Fu, H, -1 },
+    { "code 10 (e1 m0: 16?)", 0x10u, H, -1 },
+    { "code 11 (e1 m1: 17?)", 0x11u, H, -1 },
+    { "code 1F (e1 m15: 31?)", 0x1Fu, H, -1 },
+    { "code 20 (e2 m0: 32?)", 0x20u, H, -1 },
+    { "code 30 (e3 m0: 64?)", 0x30u, H, -1 },
+    { "code 3F (e3 m15: 124?)", 0x3Fu, H, -1 },
+    { "code 48 (e4 m8: 192?)", 0x48u, H, -1 },
+    { "code 50 (e5 m0: 256?)", 0x50u, H, -1 },
+    { "code 60 (e6 m0: 512?)", 0x60u, H, -1 },
+    { "code 70 (e7 m0: 1024?)", 0x70u, H, -1 },
+    { "code 7F (e7 m15: 1984)", 0x7Fu, H, -1 },
+    { "code 81 (negative 1?)", 0x81u, H, -1 },
+    { "code C0 (negative 128?)", 0xC0u, H, -1 },
+    { "code FF (negative 1984?)", 0xFFu, H, -1 },
+    { "handle 70 (>= 64), code 7F", 0x7Fu, 70u, -1 },
+    { "handle 127, code 7F", 0x7Fu, 127u, -1 },
+    { "handle 1: entry 0 (ear A) -> live to entry 1 (ear B)", 0x7Fu, H, 1 },
+};
+#define N_TESTS ((int)(sizeof(s_tests) / sizeof(s_tests[0])))
+
+/* Signed sample of channel c at its peak */
+static int signed_peak(uint32_t n, int c) {
+    uint32_t i;
+    int best = 0;
+    for (i = 0; i < n; i++) {
+        int v = s_cap[2 * i + c];
+        if ((v < 0 ? -v : v) > (best < 0 ? -best : best)) best = v;
+    }
+    return best;
+}
+
+static void start_voice(uint32_t h) {
+    volatile uint32_t *r = (volatile uint32_t *)apu_vp_debug_voice_record(h);
     uint8_t bins[APU_VP_OUTPUTS];
     uint16_t vols[APU_VP_OUTPUTS];
     uint32_t vbin, fb, vola, volb, volc, w;
@@ -200,13 +215,13 @@ static void start_voice(const test_t *t) {
         bins[w] = (uint8_t)(w & 1u);
         vols[w] = 0xFFFu;
     }
-    vols[0] = vols[1] = vols[2] = vols[3] = 0x080u;   /* all four outputs: each feeds one HRTF submix slot? */
+    vols[0] = vols[2] = 0x080u;   /* slot 0 = ear A, slot 2 = ear B */
     apu_vp_pack_bins(bins, &vbin, &fb);
     apu_vp_pack_volumes(vols, &vola, &volb, &volc);
     for (w = 0; w < 32u; w++) r[w] = 0;
     r[MCPX_VOICE_CFG_VBIN / 4] = vbin;
     r[MCPX_VOICE_CFG_FMT / 4] = apu_vp_format(1, 16, true) | fb;
-    r[MCPX_VOICE_CFG_HRTF_TARGET / 4] = t->direct ? 0xFFFFu : 0u;
+    r[MCPX_VOICE_CFG_HRTF_TARGET / 4] = 0;
     r[MCPX_VOICE_CUR_PSL_START / 4] = s_pcm_ba;
     r[MCPX_VOICE_PAR_NEXT / 4] = FRAMES - 1u;
     r[MCPX_VOICE_TAR_VOLA / 4] = vola;
@@ -214,13 +229,23 @@ static void start_voice(const test_t *t) {
     r[MCPX_VOICE_TAR_VOLC / 4] = volc;
     r[MCPX_VOICE_TAR_PITCH_LINK / 4] = MCPX_APU_LIST_END;
     r[MCPX_VOICE_PAR_STATE / 4] = MCPX_PAR_STATE_ACTIVE_VOICE;
-    REG(t->direct ? MCPX_APU_TVL2D : MCPX_APU_TVL3D) = H;
+    REG(MCPX_APU_TVL3D) = h;
 }
 
 static void stop_voice(void) {
     REG(MCPX_APU_TVL2D) = MCPX_APU_LIST_END;
     REG(MCPX_APU_TVL3D) = MCPX_APU_LIST_END;
     Sleep(3);
+}
+
+static void measure(const char *tag, uint32_t h) {
+    uint32_t n = capture();
+    int pl, ol, pr, orr;
+    const uint32_t *c = s_hc + h * 32u;   /* the voice's 128-byte current record */
+    analyse(n, 0, &pl, &ol);
+    analyse(n, 1, &pr, &orr);
+    logf_("   %-6s L %5d (signed %6d) R %5d (signed %6d)  current %08lx %08lx\n", tag, pl, signed_peak(n, 0), pr,
+          signed_peak(n, 1), (unsigned long)c[0], (unsigned long)c[1]);
 }
 
 int main(void) {
@@ -230,15 +255,15 @@ int main(void) {
     XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
     resume = read_progress();
     if (resume >= N_TESTS) {
-        logf_("\n=== round 4: all %d tests already ran (delete %s to run them again)\n", N_TESTS, PROGRESS);
+        logf_("\n=== round 5: all %d tests already ran (delete %s to run them again)\n", N_TESTS, PROGRESS);
         save_log();
         for (;;) Sleep(1000);
     }
     if (resume < 0) {
-        logf_("\n=== round 4: ear routing, tap order, ITD sign, %d tests (fresh start)\n", N_TESTS);
+        logf_("\n=== round 5: coefficient code, handles >= 64, live target change; %d tests (fresh start)\n", N_TESTS);
         resume = 0;
     } else {
-        logf_("\n=== round 4: resumed; test %d (%s) did not finish (FROZE?)\n", resume, s_tests[resume].name);
+        logf_("\n=== round 5: resumed; test %d (%s) did not finish (FROZE?)\n", resume, s_tests[resume].name);
         resume++;
     }
     save_log();
@@ -273,30 +298,28 @@ int main(void) {
     s_hc = (uint32_t *)apu_mem_alloc_table(ARRAY_BYTES, &hc_phys);
     REG(0x2038) = ht_phys;
     REG(0x203C) = hc_phys;
-    logf_("frames %s; columns: L peak / onset, R peak / onset, R-L onset difference (samples)\n",
+    REG(0x20ACu) = STEREO_SUB;
+    logf_("frames %s; direct click level 15883 (round 3); expect peak = 15883 * magnitude / 2048\n",
           gp_delta(20) ? "running" : "STOPPED");
     save_log();
 
     for (k = resume; k < N_TESTS; k++) {
         const test_t *t = &s_tests[k];
-        uint32_t n, i;
-        int pl, ol, pr, orr;
         write_progress(k);
         memset(s_ht, 0, ARRAY_BYTES);
         memset(s_hc, 0, ARRAY_BYTES);
-        for (i = 0; i < 16u; i++) s_ht[i] = t->w[i];
-        REG(0x20ACu) = t->submix;
-        start_voice(t);
-        Sleep(60);   /* the current filter state follows the target */
-        n = capture();
+        s_ht[0] = t->code;          /* entry 0: ear A tap 0 */
+        s_ht[16] = 0x00007F00u;     /* entry 1: ear B tap 0 = 0x7F */
+        logf_("%2d %s\n", k, t->name);
+        start_voice(t->handle);
+        Sleep(60);
+        measure("", t->handle);
+        if (t->switch_to >= 0) {
+            ((volatile uint32_t *)apu_vp_debug_voice_record(t->handle))[MCPX_VOICE_CFG_HRTF_TARGET / 4] = (uint32_t)t->switch_to;
+            Sleep(60);
+            measure("after", t->handle);
+        }
         stop_voice();
-        analyse(n, 0, &pl, &ol);
-        analyse(n, 1, &pr, &orr);
-        logf_("%2d %-40s L %5d @%5d  R %5d @%5d  R-L %5d  (%lu frames)\n", k, t->name, pl, ol, pr, orr,
-              (ol >= 0 && orr >= 0) ? orr - ol : 99999, (unsigned long)n);
-        logf_("      current +80: %08lx %08lx %08lx %08lx  %08lx %08lx %08lx %08lx\n", (unsigned long)s_hc[32],
-              (unsigned long)s_hc[33], (unsigned long)s_hc[34], (unsigned long)s_hc[35], (unsigned long)s_hc[36],
-              (unsigned long)s_hc[37], (unsigned long)s_hc[38], (unsigned long)s_hc[39]);
         if (!gp_delta(20)) {
             logf_("   frames STOPPED after test %d: power-cycle and run again to continue\n", k);
             save_log();
