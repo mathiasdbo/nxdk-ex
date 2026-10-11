@@ -2,13 +2,13 @@
 ;
 ; With bit 0 of X:FLAGS clear it is the copy program: the FIFO descriptor at
 ; X:0 sends mixbins 0/1 to GP output FIFO 0. With it set, every frame:
-;   chain R (X:RCHAIN) reads one 32-word block of each of the 13 delay lines
+;   chain R (X:RCHAIN) reads one 32-word block of each of the 25 delay lines
 ;   (system RAM, circular scratch buffers) into its IN block, then
 ;     pre:     PRE_OUT = lowpass(bin 2 * INGAIN)          -> pre-delay line
 ;     combs:   y = CIN; ACC += y; lp = y + damp (lp - y); COUT = PRE_IN + g lp
-;              (4 per ear, table CTAB: CIN, COUT, ACC, g, damp, lp)
+;              (8 per ear, table CTAB: CIN, COUT, ACC, g, damp, lp)
 ;     allpass: v = AIN; w = s + apg v; AOUT = w; s = v - apg w
-;              (2 per ear in series on ACC L / ACC R, table ATAB: AIN, AOUT, ACC)
+;              (4 per ear in series on ACC L / ACC R, table ATAB: AIN, AOUT, ACC)
 ;     out:     OUT L/R = bins 0/1 + WET * ACC L/R
 ;   chain W (X:WCHAIN) writes each line's OUT block and ends with the FIFO
 ;   descriptor at X:8, which sends OUT L/R.
@@ -25,13 +25,13 @@ INLP    equ     $21
 INST    equ     $22
 WET     equ     $23
 APG     equ     $24
-CTAB    equ     $28             ; 8 x 6 words
-ATAB    equ     $58             ; 4 x 3 words
+CTAB    equ     $28             ; 16 x 6 words
+ATAB    equ     $88             ; 8 x 3 words
 FIFO2   equ     $08             ; FIFO descriptor that sends OUT L/R
-RCHAIN  equ     $100            ; line k: read descriptor at $100 + 16k, write at $108 + 16k
-WCHAIN  equ     $108
-OUTL    equ     $200            ; OUT R at $220 (FIFO stride 32)
-ACCL    equ     $240            ; ACC R at $260
+RCHAIN  equ     $120            ; line k: read descriptor at $120 + 16k, write at $128 + 16k
+WCHAIN  equ     $128
+OUTL    equ     $A0             ; OUT R at $C0 (FIFO stride 32)
+ACCL    equ     $E0             ; ACC R at $100
 PRE_IN  equ     $300            ; line k: IN block $300 + 64k, OUT block $320 + 64k
 PRE_OUT equ     $320
 BIN0    equ     $1400           ; bin 1 follows at $1420
@@ -78,14 +78,14 @@ pre_end
         move    a,x:(r3)+
 
         move    #CTAB,r5
-        do      #8,combs_end
+        do      #16,combs_end
         jsr     comb
         nop
 combs_end
 
         move    #ATAB,r5
         move    x:APG,y0
-        do      #4,aps_end
+        do      #8,aps_end
         jsr     allpass
         nop
 aps_end

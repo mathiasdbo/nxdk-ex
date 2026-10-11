@@ -10,12 +10,12 @@
 #define X_WET      0x23u
 #define X_APG      0x24u
 #define X_CTAB     0x28u
-#define X_ATAB     0x58u
+#define X_ATAB     0x88u
 #define X_FIFO2    0x08u
-#define X_RCHAIN   0x100u
-#define X_OUTL     0x200u
-#define X_ACCL     0x240u
-#define X_ACCR     0x260u
+#define X_RCHAIN   0x120u
+#define X_OUTL     0xA0u
+#define X_ACCL     0xE0u
+#define X_ACCR     0x100u
 #define X_IN(k)    (0x300u + 64u * (k))
 #define X_OUT(k)   (0x320u + 64u * (k))
 
@@ -26,10 +26,12 @@
 #define CTL_FIFO   (1u | 2u | (1u << 10) | (32u << 14))   /* interleaved, to FIFO 0, 16-bit, channel stride 32 */
 
 /* Delays in samples at 48 kHz: combs left then right, allpasses left then right.
- * Mutually prime-ish lengths in the usual Schroeder/Moorer range (25-37 ms
- * combs, 5-13 ms allpasses), the right ear offset from the left. */
-static const uint16_t k_comb_len[APU_REVERB_COMBS] = { 1215, 1390, 1548, 1695, 1293, 1476, 1623, 1760 };
-static const uint16_t k_ap_len[APU_REVERB_ALLPASSES] = { 605, 371, 480, 245 };
+ * The public-domain Freeverb tuning (Jezar, 2000) scaled from 44.1 kHz, the
+ * right ear 25 samples longer (its stereo spread). */
+static const uint16_t k_comb_len[APU_REVERB_COMBS] = {
+    1215, 1293, 1390, 1476, 1548, 1623, 1695, 1760,
+    1240, 1318, 1415, 1501, 1573, 1648, 1720, 1785 };
+static const uint16_t k_ap_len[APU_REVERB_ALLPASSES] = { 605, 480, 371, 245, 630, 505, 396, 270 };
 
 static float clampf(float v, float lo, float hi) {
     return v < lo ? lo : (v > hi ? hi : v);
@@ -48,7 +50,7 @@ void apu_reverb_default_params(apu_reverb_params_t *p) {
     p->gain = 0.5f;
     p->pre_delay = 0.02f;
     p->diffusion = 0.6f;
-    p->input_gain = 0.12f;
+    p->input_gain = 0.06f;
     p->input_lowpass = 0.3f;
 }
 

@@ -212,7 +212,7 @@ int main(void) {
     uint32_t round = 0;
 
     XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
-    logf_("\n=== apu_gp_reverb round 1 (phase 3)\n");
+    logf_("\n=== apu_gp_reverb round 2 (8 combs and 4 allpasses per ear)\n");
     save_log();
     apu_gp_debug_set_program(gp_reverb_words, GP_REVERB_WORDS);
     apu_gp_debug_set_scratch_bytes(APU_REVERB_SCRATCH_BASE + apu_reverb_scratch_bytes());
@@ -229,9 +229,10 @@ int main(void) {
         uint32_t i, seed = 12345u;
         memset(c, 0, CLICK_FRAMES * 2u + APU_VP_SILENT_TAIL_BYTES);
         memset(b, 0, BURST_FRAMES * 2u + APU_VP_SILENT_TAIL_BYTES);
-        c[0] = 20000;
-        c[1] = 26000;
-        c[2] = 20000;
+        /* 100 ms in: a new voice ramps its volume up from 0 and swallowed a click at the start */
+        c[4800] = 20000;
+        c[4801] = 26000;
+        c[4802] = 20000;
         for (i = 0; i < 7200u; i++) {   /* 150 ms of noise, fading out */
             int v;
             seed = seed * 1664525u + 1013904223u;

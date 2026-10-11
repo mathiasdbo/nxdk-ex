@@ -66,7 +66,7 @@ int main(void) {
     apu_reverb_line_lengths(&p, len);
     assert(len[0] == 960u);                                   /* 20 ms pre-delay */
     for (k = 0; k < APU_REVERB_LINES; k++) {
-        uint32_t r = 0x100u + 16u * k, wd = r + 8u, off, size, off2, size2;
+        uint32_t r = 0x120u + 16u * k, wd = r + 8u, off, size, off2, size2;
         apu_reverb_line_buffer(k, &off, &size);
         assert(len[k] >= APU_REVERB_MIN_PRE);                 /* never reads the frame it writes */
         assert(size % 4096u == 0 && size >= 4u * (len[k] + 64u));
@@ -85,19 +85,22 @@ int main(void) {
         assert(find(w, n, wd + 4u) - find(w, n, r + 4u) == 4u * len[k]);   /* the delay, in bytes */
         assert(find(w, n, r + 5u) == off && find(w, n, wd + 6u) == size - 1u);
     }
-    assert(find(w, n, 0x08u) == 0x4000u && find(w, n, 0x0Bu) == 0x200u);
+    assert(find(w, n, 0x08u) == 0x4000u && find(w, n, 0x0Bu) == 0xA0u);
     assert(find(w, n, 0x0Au) == ((32u << 4) | 1u));
     assert(apu_reverb_scratch_bytes() + APU_REVERB_SCRATCH_BASE <= 2u * 1024u * 1024u);
     assert(GP_REVERB_WORDS <= 0x800u);
-    assert(GP_REVERB_CTAB == 0x28u && GP_REVERB_ATAB == 0x58u && GP_REVERB_RCHAIN == 0x100u);
+    assert(GP_REVERB_CTAB == 0x28u && GP_REVERB_ATAB == 0x88u && GP_REVERB_RCHAIN == 0x120u);
+    assert(GP_REVERB_OUTL == 0xA0u && GP_REVERB_ACCL == 0xE0u && GP_REVERB_PRE_IN == 0x300u);
+    assert(0x320u + 64u * (APU_REVERB_LINES - 1u) + 32u <= 0xC00u);   /* line blocks below the mixbin mirror */
+    assert(0x128u + 16u * (APU_REVERB_LINES - 1u) + 7u <= 0x300u);    /* descriptors below the blocks */
     assert(GP_REVERB_FLAGS == 0x11u && GP_REVERB_CNT == 0x10u);
-    printf("    -> 13 lines, chains end at EOL and at the FIFO descriptor, buffers apart [PASS]\n");
+    printf("    -> 25 lines, chains end at EOL and at the FIFO descriptor, buffers apart [PASS]\n");
 
     printf("[2] Coefficients...\n");
     assert(apu_reverb_q23(0.5f) == 0x400000u && apu_reverb_q23(-1.0f) == 0x800000u);
     assert(apu_reverb_q23(1.0f) == 0x7FFFFFu && apu_reverb_q23(-2.0f) == 0x800000u);
     {
-        uint32_t g_short = find(w, n, 0x28u + 3u), g_long = find(w, n, 0x28u + 6u * 7u + 3u);
+        uint32_t g_short = find(w, n, 0x28u + 3u), g_long = find(w, n, 0x28u + 6u * 15u + 3u);
         assert(g_short > g_long && g_short < 0x7FFFFFu);      /* a longer comb decays more per pass */
         p.decay_time = 3.0f;
         n = apu_reverb_coefficients(&p, w);
