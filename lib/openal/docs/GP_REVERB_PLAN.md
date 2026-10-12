@@ -1,7 +1,9 @@
 # Reverb on the GP DSP (F8): implementation plan
 
-Branch `feat/gp-reverb`. Status: phases 0 and 2 done on a console (`samples/apu_gp_probe` rounds 1-2), the
-assembler of phase 1 done; the reverb program (phase 3) next. Facts marked *measured* come from our probes
+Branch `feat/gp-reverb`. Status: phases 0-3 done on a console (`samples/apu_gp_probe` rounds 1-2,
+`samples/apu_gp_reverb` rounds 1-2: decay within 0.2 dB of the reference, 0 underruns); phase 4 (library API,
+showcase section) next. The reverb uses 8 combs and 4 allpasses per ear (Freeverb tuning, public domain) rather
+than the 4 + 2 of section 3.2, which sounded metallic. Facts marked *measured* come from our probes
 (`XEMU_VERIFICATION.md` 8.1b).
 
 **Phase 0/2 results, in short:** on-chip RAM is X 3072 + Y 2048 words (as in xemu), so the delay lines go to

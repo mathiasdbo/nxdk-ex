@@ -1506,6 +1506,12 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
     area sent to the FIFO and wrote bin 2 + feedback x line back. With wet and feedback 0.5 a click came out
     with echoes at exactly +12000/+24000/+36000 samples at 1/2, 1/4, 1/8 of its level, and at +12007/+24014 for a
     delay that is not a whole number of frames; 0 AC97 underruns and 0 padded buffers over 32 s.
+  * **Reverb (phase 3, `samples/apu_gp_reverb`):** `dsp/gp_reverb.asm` with the layout of `apu_reverb.c`, 8
+    damped combs and 4 allpasses per ear on 25 DMA delay lines (4 + 2 per ear sounded metallic with a 2.5 s
+    decay). A click into the send decayed 29.8 dB in 0.5 s at T60 1 s and 9.9 dB at 3 s (the reference: 30.0 and
+    10.1), its onset where the pre-delay and the shortest comb put it; full frame rate, about 800 polls of DMA
+    wait per frame, no timeouts, 0 underruns and 0 padded buffers over 64 s of listening. A new voice ramps its
+    volume up from 0, so a click in its first samples is not heard.
 * Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
   from a spherical-head model (Brown-Duda head-shadow shelf per ear as a 31-tap int8 FIR, Woodworth ITD in
   s6.9; 32 azimuths x elevations -30/0/30/60; no measured data, no pinna cues). `apu_vp_init()` uploads it with
