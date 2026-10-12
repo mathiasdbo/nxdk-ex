@@ -1,8 +1,10 @@
 # Reverb on the GP DSP (F8): implementation plan
 
-Branch `feat/gp-reverb`. Status: phases 0-3 done on a console (`samples/apu_gp_probe` rounds 1-2,
-`samples/apu_gp_reverb` rounds 1-2: decay within 0.2 dB of the reference, 0 underruns); phase 4 (library API,
-showcase section) next. The reverb uses 8 combs and 4 allpasses per ear (Freeverb tuning, public domain) rather
+Branch `feat/gp-reverb`. Status: phases 0-4 done on a console (`samples/apu_gp_probe` rounds 1-2,
+`samples/apu_gp_reverb` rounds 1-2: decay within 0.2 dB of the reference, 0 underruns; the library API
+`AL_XBOX_reverb` and mode 6 of the showcase, `ENGINE_INTEGRATION.md` 3.7). Phase 5 (the Xash mapping) is a
+suggested table in 3.7, to tune in the port. Beyond the plan: an output lowpass on the whole mix, because the
+underwater preset did not sound underwater with only the reverb darkened. The reverb uses 8 combs and 4 allpasses per ear (Freeverb tuning, public domain) rather
 than the 4 + 2 of section 3.2, which sounded metallic. Facts marked *measured* come from our probes
 (`XEMU_VERIFICATION.md` 8.1b).
 
