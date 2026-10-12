@@ -9,7 +9,8 @@
 ;              (8 per ear, table CTAB: CIN, COUT, ACC, g, damp, lp)
 ;     allpass: v = AIN; w = s + apg v; AOUT = w; s = v - apg w
 ;              (4 per ear in series on ACC L / ACC R, table ATAB: AIN, AOUT, ACC)
-;     out:     OUT L/R = bins 0/1 + WET * ACC L/R
+;     out:     OUT L/R = bins 0/1 + WET * ACC L/R, then two one-pole lowpasses
+;              per channel (OUTLP; 0 passes the mix unchanged: underwater)
 ;   chain W (X:WCHAIN) writes each line's OUT block and ends with the FIFO
 ;   descriptor at X:8, which sends OUT L/R.
 ; The CPU writes the descriptors, tables and coefficients (apu_reverb.c).
@@ -25,13 +26,16 @@ INLP    equ     $21
 INST    equ     $22
 WET     equ     $23
 APG     equ     $24
-CTAB    equ     $28             ; 16 x 6 words
-ATAB    equ     $88             ; 8 x 3 words
+OUTLP   equ     $25             ; output lowpass coefficient
+OUTST   equ     $2C             ; its 4 states: L stage 1, L stage 2, R stage 1, R stage 2
+CTAB    equ     $30             ; 16 x 6 words
+ATAB    equ     $90             ; 8 x 3 words
 FIFO2   equ     $08             ; FIFO descriptor that sends OUT L/R
-RCHAIN  equ     $120            ; line k: read descriptor at $120 + 16k, write at $128 + 16k
-WCHAIN  equ     $128
-OUTL    equ     $A0             ; OUT R at $C0 (FIFO stride 32)
-ACCL    equ     $E0             ; ACC R at $100
+RCHAIN  equ     $130            ; line k: read descriptor at $130 + 16k, write at $138 + 16k
+WCHAIN  equ     $138
+OUTL    equ     $A8             ; OUT R at $C8 (FIFO stride 32)
+OUTR    equ     $C8
+ACCL    equ     $E8             ; ACC R at $108
 PRE_IN  equ     $300            ; line k: IN block $300 + 64k, OUT block $320 + 64k
 PRE_OUT equ     $320
 BIN0    equ     $1400           ; bin 1 follows at $1420
@@ -102,6 +106,18 @@ aps_end
         move    a,x:(r2)+
 out_end
 
+; output lowpass: OUT L twice, then OUT R twice (r2 walks the blocks, r5 the states)
+        move    x:OUTLP,y1
+        move    #OUTST,r5
+        move    #OUTL,r2
+        jsr     lowpass
+        move    #OUTL,r2
+        jsr     lowpass
+        move    #OUTR,r2
+        jsr     lowpass
+        move    #OUTR,r2
+        jsr     lowpass
+
         movep   #$80,x:$FFFFC5
         movep   #WCHAIN,x:$FFFFD4       ; write every line, then send OUT L/R
         movep   #1,x:$FFFFD6
@@ -152,6 +168,20 @@ allpass move    x:(r5)+,r0              ; AIN
         mac     -x1,y0,a                ; s = v - g w
         move    a,x:(r3)+
 ap_end
+        rts
+
+; One-pole lowpass in place on 32 words at r2, state at x:(r5), r5 advanced; y1 = coefficient
+lowpass move    x:(r5),b
+        do      #32,lp_end
+        move    x:(r2),x1               ; s
+        tfr     b,a
+        sub     x1,a                    ; lp - s
+        move    a,x0
+        tfr     x1,b
+        mac     x0,y1,b                 ; lp = s + p (lp - s)
+        move    b,x:(r2)+
+lp_end
+        move    b,x:(r5)+
         rts
 
 ; Wait for the chain's end-of-list flag (uses b, x0).

@@ -37,6 +37,7 @@ typedef struct apu_reverb_params_s {
     float diffusion;        /* 0 .. 1 */
     float input_gain;       /* send scaling before the combs, 0 .. 1 (headroom) */
     float input_lowpass;    /* one-pole coefficient on the send, 0 (off) .. 0.95 */
+    float output_lowpass;   /* two one-pole stages on the whole output, 0 (off) .. 0.98: underwater */
 } apu_reverb_params_t;
 
 /* One X-memory word the program needs (address in DSP words, 24-bit value) */
@@ -86,7 +87,7 @@ typedef struct {
     uint32_t size[APU_REVERB_LINES];   /* samples */
     uint32_t wpos[APU_REVERB_LINES];
     uint32_t len[APU_REVERB_LINES];
-    int32_t ingain, inlp, inst, wet, apg;
+    int32_t ingain, inlp, inst, wet, apg, outlp, outst[4];
     int32_t g[APU_REVERB_COMBS], damp[APU_REVERB_COMBS], lp[APU_REVERB_COMBS];
 } apu_reverb_ref_t;
 
