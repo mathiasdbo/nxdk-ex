@@ -560,6 +560,14 @@ void showcase_app_update(showcase_app_t *app, const showcase_input_t *input) {
     }
 }
 
+const char *showcase_app_reverb_room_name(int room) {
+    return (room >= 0 && room <= AL_XBOX_REVERB_PRESET_COUNT) ? k_reverb_rooms[room] : "";
+}
+
+const char *showcase_app_reverb_sound_name(int sound) {
+    return (sound >= 0 && sound < REVERB_SOUNDS) ? k_reverb_sounds[sound] : "";
+}
+
 const char *showcase_app_mode_title(int mode) {
     static const char *const mode_titles[] = {
         "",
@@ -623,14 +631,18 @@ int showcase_app_get_legend(const showcase_app_t *app, showcase_legend_entry_t *
             legend_add(out, max, &n, SHOWCASE_BTN_Y, SHOWCASE_BTN_A,
                        "Play / pause 2D music", false, false, false);
             break;
-        case MODE_REVERB_ROOMS:
-            legend_add(out, max, &n, SHOWCASE_BTN_A, SHOWCASE_BTN_NONE,
-                       "Next sound", false, false, false);
-            legend_add(out, max, &n, SHOWCASE_BTN_Y, SHOWCASE_BTN_NONE,
-                       "Next room (reverb preset)", false, false, false);
-            legend_add(out, max, &n, SHOWCASE_BTN_DPAD_UP_DOWN, SHOWCASE_BTN_NONE,
-                       "Reverb send", false, false, false);
+        case MODE_REVERB_ROOMS: {
+            /* The actions name what is playing now */
+            static char sound_line[48], room_line[48], send_line[32];
+            snprintf(sound_line, sizeof(sound_line), "Sound: %s", k_reverb_sounds[app->reverb_sound % REVERB_SOUNDS]);
+            snprintf(room_line, sizeof(room_line), "Room: %s",
+                     showcase_app_reverb_room_name(app->reverb_room));
+            snprintf(send_line, sizeof(send_line), "Reverb send %s", showcase_fx(app->reverb_send, 1, false, 0));
+            legend_add(out, max, &n, SHOWCASE_BTN_A, SHOWCASE_BTN_NONE, sound_line, false, false, false);
+            legend_add(out, max, &n, SHOWCASE_BTN_Y, SHOWCASE_BTN_NONE, room_line, false, false, false);
+            legend_add(out, max, &n, SHOWCASE_BTN_DPAD_UP_DOWN, SHOWCASE_BTN_NONE, send_line, false, false, false);
             break;
+        }
         default:
             break;
     }
