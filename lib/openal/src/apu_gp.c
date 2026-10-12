@@ -1,4 +1,6 @@
 #include "apu_gp.h"
+#include "apu_gp_reverb.h"
+#include "apu_reverb.h"
 #include "apu_mem.h"
 #include "apu_platform.h"
 #include "mcpx_apu_regs.h"
@@ -49,25 +51,33 @@ static uint32_t s_frames_read;
 static uint32_t s_resyncs;
 static bool s_ready;
 static bool s_loaded;
-static const uint32_t *s_image = apu_gp_program;     /* apu_gp_debug_set_program() */
-static uint32_t s_image_words = APU_GP_PROGRAM_WORDS;
-static uint32_t s_scratch_bytes = SCRATCH_BYTES;     /* apu_gp_debug_set_scratch_bytes() */
+/* The program: dsp/gp_reverb.asm, the copy program until its reverb is switched on */
+static const uint32_t *s_image = gp_reverb_words;    /* apu_gp_debug_set_program() */
+static uint32_t s_image_words = GP_REVERB_WORDS;
+static uint32_t s_scratch_req;                       /* apu_gp_debug_set_scratch_bytes(); 0 = what the image needs */
+static uint32_t s_scratch_bytes = SCRATCH_BYTES;     /* in use */
+static bool s_reverb_on;
+static uint32_t s_reverb_pre;                        /* pre-delay line length laid out */
 
 void apu_gp_debug_set_program(const uint32_t *words, uint32_t count) {
     if (words && count > 0u && count <= SCRATCH_BYTES / 4u) {
         s_image = words;
         s_image_words = count;
     } else {
-        s_image = apu_gp_program;
-        s_image_words = APU_GP_PROGRAM_WORDS;
+        s_image = gp_reverb_words;
+        s_image_words = GP_REVERB_WORDS;
     }
 }
 
 void apu_gp_debug_set_scratch_bytes(uint32_t bytes) {
+    if (bytes == 0u) {
+        s_scratch_req = 0;
+        return;
+    }
     bytes = (bytes + 4095u) & ~4095u;
     if (bytes < SCRATCH_BYTES) bytes = SCRATCH_BYTES;
     if (bytes > SCRATCH_MAX_BYTES) bytes = SCRATCH_MAX_BYTES;
-    s_scratch_bytes = bytes;
+    s_scratch_req = bytes;
 }
 
 uint32_t apu_gp_scratch_bytes(void) {
@@ -135,6 +145,10 @@ int apu_gp_init(uintptr_t bar0) {
     if (s_ready) {
         return 0;
     }
+    s_scratch_bytes = s_scratch_req ? s_scratch_req
+                    : (s_image == gp_reverb_words ? (APU_REVERB_SCRATCH_BASE + apu_reverb_scratch_bytes() + 4095u) & ~4095u
+                                                  : SCRATCH_BYTES);
+    s_reverb_on = false;
     s_scratch = (uint32_t *)apu_mem_alloc_table(s_scratch_bytes, &s_scratch_phys);
     s_scratch_sge = (uint32_t *)apu_mem_alloc_table(4096, &s_scratch_sge_phys);
     s_fifo = (uint8_t *)apu_mem_alloc_table(APU_GP_FIFO_BYTES, &s_fifo_phys);
@@ -205,7 +219,73 @@ void apu_gp_deinit(uintptr_t bar0) {
     }
     reg_wr(bar0, MCPX_APU_GPRST, 0);
     s_ready = false;
+    s_reverb_on = false;
     free_all();
+}
+
+/* ---------------------------------------------------------------- reverb */
+
+#define REVERB_FLAGS_X  0x11u   /* gp_reverb.asm FLAGS, bit 0 */
+
+/* Let the frame in progress finish its DMA chains (on the host nothing runs) */
+static void wait_frames(uintptr_t bar0, uint32_t n) {
+#if defined(OPENAL_TARGET_XBOX)
+    uint32_t f0 = apu_gp_frames(bar0), spin;
+    for (spin = 0; spin < 40000u; spin++) {   /* about 20 ms of register reads */
+        if (((apu_gp_frames(bar0) - f0) & 0xFFFFFFu) >= n) {
+            return;
+        }
+    }
+#else
+    (void)bar0;
+    (void)n;
+#endif
+}
+
+static void write_words(uintptr_t bar0, const apu_reverb_word_t *w, uint32_t n) {
+    uint32_t i;
+    for (i = 0; i < n && i < APU_REVERB_MAX_WORDS; i++) {
+        reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * w[i].addr, w[i].value);
+    }
+}
+
+int apu_gp_reverb_set(uintptr_t bar0, const apu_reverb_params_t *p, bool on) {
+    static apu_reverb_word_t words[APU_REVERB_MAX_WORDS];
+    uint32_t len[APU_REVERB_LINES], n;
+
+    if (!s_ready || s_image != gp_reverb_words || !p) {
+        return -1;
+    }
+    if (!on) {
+        if (s_reverb_on) {
+            reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * REVERB_FLAGS_X, 0);
+            s_reverb_on = false;
+        }
+        return 0;
+    }
+    apu_reverb_line_lengths(p, len);
+    if (s_reverb_on && len[0] == s_reverb_pre) {
+        /* Same delay lines: only the gains change, word by word while it runs */
+        write_words(bar0, words, apu_reverb_coefficients(p, words));
+        return 0;
+    }
+    if (s_reverb_on) {
+        reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * REVERB_FLAGS_X, 0);
+        s_reverb_on = false;
+    }
+    /* Off for a frame so no chain is in flight, then the layout, empty lines, on */
+    wait_frames(bar0, 2u);
+    n = apu_reverb_layout(p, words);
+    write_words(bar0, words, n);
+    memset((uint8_t *)s_scratch + APU_REVERB_SCRATCH_BASE, 0, apu_reverb_scratch_bytes());
+    reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * REVERB_FLAGS_X, 1u);
+    s_reverb_on = true;
+    s_reverb_pre = len[0];
+    return 0;
+}
+
+bool apu_gp_reverb_on(void) {
+    return s_ready && s_reverb_on;
 }
 
 bool apu_gp_ready(void) {

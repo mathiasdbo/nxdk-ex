@@ -37,6 +37,7 @@ extern "C" {
 #define AL_XBOX_SAMPLE_PAGES_USED                0x7008   /* 4 KiB pages of the APU's sample space in use */
 #define AL_XBOX_SAMPLE_PAGES_TOTAL               0x7009   /* size of that space (2048 pages, 8 MiB) */
 #define AL_XBOX_HRTF_ACTIVE                      0x700A   /* mono 3D sources are playing through the HRTF stage */
+#define AL_XBOX_REVERB_ACTIVE                    0x700B   /* the GP reverb is running (AL_XBOX_reverb) */
 
 /*
  * ============================================================================
@@ -51,6 +52,60 @@ extern "C" {
  * meant for headphones; on TV speakers volume panning may sound better.
  */
 #define AL_XBOX_HRTF                             0x7015
+
+/*
+ * ============================================================================
+ * AL_XBOX_reverb (a reverb on the APU's GP DSP)
+ * ============================================================================
+ *
+ * alEnable / alDisable / alIsEnabled(AL_XBOX_REVERB): one room reverb for the
+ * whole mix, computed by the APU's GP DSP (no CPU time). Off by default. Each
+ * source sends part of its sound to it:
+ *   alSourcef(src, AL_XBOX_REVERB_SEND, 0..1)   default 0 (dry only)
+ * The send follows the source's gain (AL_GAIN, distance, direct gains), is
+ * taken before panning and HRTF, and works for every source kind.
+ *
+ * The room: alXboxReverbPreset(AL_XBOX_REVERB_PRESET_*), then optionally
+ * alXboxReverbf(param, value) with
+ *   AL_XBOX_REVERB_DECAY_TIME     0.1 .. 20 s     time to fall by 60 dB
+ *   AL_XBOX_REVERB_HF_RATIO       0.1 .. 1        high-frequency decay (1: as bright as the low end)
+ *   AL_XBOX_REVERB_GAIN           0 .. 1          reverb level in the output
+ *   AL_XBOX_REVERB_PRE_DELAY      0 .. 0.1 s      gap before the reverb starts (at least 0.67 ms)
+ *   AL_XBOX_REVERB_DIFFUSION      0 .. 1          echo density of the tail
+ *   AL_XBOX_REVERB_INPUT_GAIN     0 .. 1          headroom of the reverb's input
+ *   AL_XBOX_REVERB_INPUT_LOWPASS  0 .. 0.95       muffles what goes into the reverb
+ * Gains change at once; a new pre-delay restarts the reverb (its tail is cut).
+ * alXboxGetReverbf reads a value back. Out-of-range values: AL_INVALID_VALUE.
+ * Runs on a real console (AL_XBOX_REVERB_ACTIVE says when); the settings are
+ * kept when no device is open and applied when one is.
+ */
+#define AL_XBOX_REVERB                           0x7016
+#define AL_XBOX_REVERB_SEND                      0x7017
+
+#define AL_XBOX_REVERB_DECAY_TIME                0x7020
+#define AL_XBOX_REVERB_HF_RATIO                  0x7021
+#define AL_XBOX_REVERB_GAIN                      0x7022
+#define AL_XBOX_REVERB_PRE_DELAY                 0x7023
+#define AL_XBOX_REVERB_DIFFUSION                 0x7024
+#define AL_XBOX_REVERB_INPUT_GAIN                0x7025
+#define AL_XBOX_REVERB_INPUT_LOWPASS             0x7026
+
+#define AL_XBOX_REVERB_PRESET_GENERIC            0
+#define AL_XBOX_REVERB_PRESET_ROOM               1
+#define AL_XBOX_REVERB_PRESET_BATHROOM           2
+#define AL_XBOX_REVERB_PRESET_HALL               3
+#define AL_XBOX_REVERB_PRESET_CAVE               4
+#define AL_XBOX_REVERB_PRESET_ARENA              5
+#define AL_XBOX_REVERB_PRESET_SEWER_PIPE         6
+#define AL_XBOX_REVERB_PRESET_UNDERWATER         7
+#define AL_XBOX_REVERB_PRESET_COUNT              8
+
+AL_API void AL_APIENTRY alXboxReverbPreset(ALint preset);
+AL_API void AL_APIENTRY alXboxReverbf(ALenum param, ALfloat value);
+AL_API void AL_APIENTRY alXboxGetReverbf(ALenum param, ALfloat *value);
+typedef void (AL_APIENTRY *LPALXBOXREVERBPRESET)(ALint preset);
+typedef void (AL_APIENTRY *LPALXBOXREVERBF)(ALenum param, ALfloat value);
+typedef void (AL_APIENTRY *LPALXBOXGETREVERBF)(ALenum param, ALfloat *value);
 
 /*
  * ============================================================================

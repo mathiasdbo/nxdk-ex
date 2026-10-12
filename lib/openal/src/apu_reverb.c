@@ -54,6 +54,31 @@ void apu_reverb_default_params(apu_reverb_params_t *p) {
     p->input_lowpass = 0.3f;
 }
 
+int apu_reverb_preset(int n, apu_reverb_params_t *p) {
+    /* decay s, HF ratio, wet gain, pre-delay s, diffusion, input lowpass */
+    static const float k[APU_REVERB_PRESETS][6] = {
+        { 1.5f, 0.6f, 0.40f, 0.020f, 0.6f, 0.3f },   /* generic */
+        { 0.6f, 0.7f, 0.35f, 0.005f, 0.7f, 0.3f },   /* room */
+        { 1.4f, 0.9f, 0.50f, 0.007f, 0.8f, 0.0f },   /* bathroom: hard, bright walls */
+        { 2.5f, 0.6f, 0.50f, 0.025f, 0.6f, 0.3f },   /* hall */
+        { 5.0f, 0.4f, 0.60f, 0.050f, 0.5f, 0.3f },   /* cave */
+        { 7.0f, 0.4f, 0.50f, 0.080f, 0.5f, 0.3f },   /* arena */
+        { 2.5f, 0.3f, 0.45f, 0.015f, 0.7f, 0.5f },   /* sewer pipe */
+        { 1.5f, 0.1f, 0.60f, 0.010f, 0.9f, 0.9f },   /* underwater: dark and muffled */
+    };
+    if (!p || n < 0 || n >= APU_REVERB_PRESETS) {
+        return -1;
+    }
+    apu_reverb_default_params(p);
+    p->decay_time = k[n][0];
+    p->hf_ratio = k[n][1];
+    p->gain = k[n][2];
+    p->pre_delay = k[n][3];
+    p->diffusion = k[n][4];
+    p->input_lowpass = k[n][5];
+    return 0;
+}
+
 static uint32_t pre_samples(const apu_reverb_params_t *p) {
     uint32_t n = (uint32_t)(clampf(p->pre_delay, 0.0f, 0.1f) * (float)APU_REVERB_RATE + 0.5f);
     if (n < APU_REVERB_MIN_PRE) n = APU_REVERB_MIN_PRE;
