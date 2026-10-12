@@ -74,6 +74,8 @@ extern "C" {
  *   AL_XBOX_REVERB_DIFFUSION      0 .. 1          echo density of the tail
  *   AL_XBOX_REVERB_INPUT_GAIN     0 .. 1          headroom of the reverb's input
  *   AL_XBOX_REVERB_INPUT_LOWPASS  0 .. 0.95       muffles what goes into the reverb
+ *   AL_XBOX_REVERB_OUTPUT_LOWPASS 0 .. 0.98       muffles the whole mix, dry sound included
+ *                                                 (underwater; 0 leaves the mix untouched)
  * Gains change at once; a new pre-delay restarts the reverb (its tail is cut).
  * alXboxGetReverbf reads a value back. Out-of-range values: AL_INVALID_VALUE.
  * Runs on a real console (AL_XBOX_REVERB_ACTIVE says when); the settings are
@@ -89,6 +91,7 @@ extern "C" {
 #define AL_XBOX_REVERB_DIFFUSION                 0x7024
 #define AL_XBOX_REVERB_INPUT_GAIN                0x7025
 #define AL_XBOX_REVERB_INPUT_LOWPASS             0x7026
+#define AL_XBOX_REVERB_OUTPUT_LOWPASS            0x7027
 
 #define AL_XBOX_REVERB_PRESET_GENERIC            0
 #define AL_XBOX_REVERB_PRESET_ROOM               1

@@ -9,13 +9,15 @@
 #define X_INST     0x22u
 #define X_WET      0x23u
 #define X_APG      0x24u
-#define X_CTAB     0x28u
-#define X_ATAB     0x88u
+#define X_OUTLP    0x25u
+#define X_OUTST    0x2Cu   /* 4 words */
+#define X_CTAB     0x30u
+#define X_ATAB     0x90u
 #define X_FIFO2    0x08u
-#define X_RCHAIN   0x120u
-#define X_OUTL     0xA0u
-#define X_ACCL     0xE0u
-#define X_ACCR     0x100u
+#define X_RCHAIN   0x130u
+#define X_OUTL     0xA8u
+#define X_ACCL     0xE8u
+#define X_ACCR     0x108u
 #define X_IN(k)    (0x300u + 64u * (k))
 #define X_OUT(k)   (0x320u + 64u * (k))
 
@@ -52,19 +54,20 @@ void apu_reverb_default_params(apu_reverb_params_t *p) {
     p->diffusion = 0.6f;
     p->input_gain = 0.06f;
     p->input_lowpass = 0.3f;
+    p->output_lowpass = 0.0f;
 }
 
 int apu_reverb_preset(int n, apu_reverb_params_t *p) {
-    /* decay s, HF ratio, wet gain, pre-delay s, diffusion, input lowpass */
-    static const float k[APU_REVERB_PRESETS][6] = {
-        { 1.5f, 0.6f, 0.40f, 0.020f, 0.6f, 0.3f },   /* generic */
-        { 0.6f, 0.7f, 0.35f, 0.005f, 0.7f, 0.3f },   /* room */
-        { 1.4f, 0.9f, 0.50f, 0.007f, 0.8f, 0.0f },   /* bathroom: hard, bright walls */
-        { 2.5f, 0.6f, 0.50f, 0.025f, 0.6f, 0.3f },   /* hall */
-        { 5.0f, 0.4f, 0.60f, 0.050f, 0.5f, 0.3f },   /* cave */
-        { 7.0f, 0.4f, 0.50f, 0.080f, 0.5f, 0.3f },   /* arena */
-        { 2.5f, 0.3f, 0.45f, 0.015f, 0.7f, 0.5f },   /* sewer pipe */
-        { 1.5f, 0.1f, 0.60f, 0.010f, 0.9f, 0.9f },   /* underwater: dark and muffled */
+    /* decay s, HF ratio, wet gain, pre-delay s, diffusion, input lowpass, output lowpass */
+    static const float k[APU_REVERB_PRESETS][7] = {
+        { 1.5f, 0.6f, 0.40f, 0.020f, 0.6f, 0.3f, 0.0f },    /* generic */
+        { 0.6f, 0.7f, 0.35f, 0.005f, 0.7f, 0.3f, 0.0f },    /* room */
+        { 1.4f, 0.9f, 0.50f, 0.007f, 0.8f, 0.0f, 0.0f },    /* bathroom: hard, bright walls */
+        { 2.5f, 0.6f, 0.50f, 0.025f, 0.6f, 0.3f, 0.0f },    /* hall */
+        { 5.0f, 0.4f, 0.60f, 0.050f, 0.5f, 0.3f, 0.0f },    /* cave */
+        { 7.0f, 0.4f, 0.50f, 0.080f, 0.5f, 0.3f, 0.0f },    /* arena */
+        { 2.5f, 0.3f, 0.45f, 0.015f, 0.7f, 0.5f, 0.0f },    /* sewer pipe */
+        { 1.2f, 0.1f, 0.50f, 0.010f, 0.9f, 0.6f, 0.93f },   /* underwater: the whole mix muffled */
     };
     if (!p || n < 0 || n >= APU_REVERB_PRESETS) {
         return -1;
@@ -76,6 +79,7 @@ int apu_reverb_preset(int n, apu_reverb_params_t *p) {
     p->pre_delay = k[n][3];
     p->diffusion = k[n][4];
     p->input_lowpass = k[n][5];
+    p->output_lowpass = k[n][6];
     return 0;
 }
 
@@ -133,6 +137,7 @@ uint32_t apu_reverb_coefficients(const apu_reverb_params_t *p, apu_reverb_word_t
     put(out, &n, X_INLP, apu_reverb_q23(clampf(p->input_lowpass, 0.0f, 0.95f)));
     put(out, &n, X_WET, apu_reverb_q23(clampf(p->gain, 0.0f, 1.0f)));
     put(out, &n, X_APG, apu_reverb_q23(0.3f + 0.4f * clampf(p->diffusion, 0.0f, 1.0f)));
+    put(out, &n, X_OUTLP, apu_reverb_q23(clampf(p->output_lowpass, 0.0f, 0.98f)));
     for (c = 0; c < APU_REVERB_COMBS; c++) {
         put(out, &n, X_CTAB + 6u * c + 3u, apu_reverb_q23(comb_gain(p, k_comb_len[c])));
         put(out, &n, X_CTAB + 6u * c + 4u, apu_reverb_q23(damp));
@@ -145,6 +150,7 @@ uint32_t apu_reverb_layout(const apu_reverb_params_t *p, apu_reverb_word_t *out)
     apu_reverb_line_lengths(p, len);
     n = apu_reverb_coefficients(p, out);
     put(out, &n, X_INST, 0);
+    for (k = 0; k < 4u; k++) put(out, &n, X_OUTST + k, 0);
     /* Line k: the read descriptor trails the write one by the delay */
     for (k = 0; k < APU_REVERB_LINES; k++) {
         uint32_t off, size, r = X_RCHAIN + 16u * k, w = r + 8u;
@@ -235,6 +241,7 @@ int apu_reverb_ref_init(apu_reverb_ref_t *r, const apu_reverb_params_t *p) {
         else if (w[i].addr == X_INLP) r->inlp = v;
         else if (w[i].addr == X_WET) r->wet = v;
         else if (w[i].addr == X_APG) r->apg = v;
+        else if (w[i].addr == X_OUTLP) r->outlp = v;
         else if (w[i].addr >= X_CTAB && w[i].addr < X_CTAB + 6u * APU_REVERB_COMBS) {
             uint32_t c = (w[i].addr - X_CTAB) / 6u, f = (w[i].addr - X_CTAB) % 6u;
             if (f == 3u) r->g[c] = v;
@@ -310,6 +317,18 @@ void apu_reverb_ref_frame(apu_reverb_ref_t *r, int32_t bins[3][32], int32_t out[
     for (i = 0; i < 32u; i++) {
         out[0][i] = lim(ld(bins[0][i]) + prod(acc[0][i], r->wet));
         out[1][i] = lim(ld(bins[1][i]) + prod(acc[1][i], r->wet));
+    }
+
+    /* output lowpass: two one-pole stages per channel, in place */
+    for (k = 0; k < 4u; k++) {
+        int32_t *blk = out[k / 2u];
+        b = ld(r->outst[k]);
+        for (i = 0; i < 32u; i++) {
+            int32_t s = blk[i], d = lim(b - ld(s));
+            b = ld(s) + prod(d, r->outlp);
+            blk[i] = lim(b);
+        }
+        r->outst[k] = lim(b);
     }
 
     for (k = 0; k < APU_REVERB_LINES; k++) write_block(r, k, wr[k]);

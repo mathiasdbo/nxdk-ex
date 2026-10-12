@@ -1917,6 +1917,7 @@ AL_API void AL_APIENTRY alXboxReverbf(ALenum param, ALfloat value) {
         case AL_XBOX_REVERB_DIFFUSION:     field = &s_reverb.diffusion;     lo = 0.0f; hi = 1.0f;  break;
         case AL_XBOX_REVERB_INPUT_GAIN:    field = &s_reverb.input_gain;    lo = 0.0f; hi = 1.0f;  break;
         case AL_XBOX_REVERB_INPUT_LOWPASS: field = &s_reverb.input_lowpass; lo = 0.0f; hi = 0.95f; break;
+        case AL_XBOX_REVERB_OUTPUT_LOWPASS: field = &s_reverb.output_lowpass; lo = 0.0f; hi = 0.98f; break;
         default:
             alSetError(AL_INVALID_ENUM);
             return;
@@ -1945,6 +1946,7 @@ AL_API void AL_APIENTRY alXboxGetReverbf(ALenum param, ALfloat *value) {
         case AL_XBOX_REVERB_DIFFUSION:     *value = s_reverb.diffusion;     break;
         case AL_XBOX_REVERB_INPUT_GAIN:    *value = s_reverb.input_gain;    break;
         case AL_XBOX_REVERB_INPUT_LOWPASS: *value = s_reverb.input_lowpass; break;
+        case AL_XBOX_REVERB_OUTPUT_LOWPASS: *value = s_reverb.output_lowpass; break;
         default:
             alSetError(AL_INVALID_ENUM);
             break;
