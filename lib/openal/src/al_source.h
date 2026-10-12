@@ -59,6 +59,7 @@ typedef struct ALsource {
     uint32_t offset_frames;          /* AL_*_OFFSET set while not playing, or a preempted voice's position */
     bool direct;                     /* AL_XBOX_DIRECT_MODE: engine gains, no 3D model */
     ALfloat direct_gain[2];          /* AL_XBOX_DIRECT_GAINS: left, right */
+    ALfloat reverb_send;             /* AL_XBOX_REVERB_SEND: 0..1 */
     ALfloat xbox_priority;           /* AL_XBOX_PRIORITY: >= 0 engine priority, < 0 the library's */
     ALboolean virtualize;            /* AL_XBOX_VIRTUALIZE */
 } ALsource;
@@ -221,6 +222,9 @@ AL_API void AL_APIENTRY alSourceRewindv(ALsizei n, const ALuint *sources);
 
 AL_API void AL_APIENTRY alSourceQueueBuffers(ALuint source, ALsizei nb, const ALuint *buffers);
 AL_API void AL_APIENTRY alSourceUnqueueBuffers(ALuint source, ALsizei nb, ALuint *buffers);
+
+/* AL_XBOX_reverb: the reverb is enabled and running on the GP */
+bool al_reverb_active(void);
 
 #ifdef __cplusplus
 }

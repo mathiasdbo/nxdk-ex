@@ -2,6 +2,9 @@
 #include "al_listener.h"
 #include "apu_voice_mgr.h"
 #include "apu_ac97.h"
+#include "apu_gp.h"
+#include "apu_reverb.h"
+#include "apu_vp.h"
 #include <string.h>
 #include <math.h>
 #include <float.h>
@@ -92,6 +95,7 @@ static void source_reset_defaults(ALsource *src, ALuint id) {
     src->offset_frames = 0;
     src->direct = false;
     src->direct_gain[0] = src->direct_gain[1] = 1.0f;
+    src->reverb_send = 0.0f;
     src->xbox_priority = -1.0f;
     src->virtualize = AL_TRUE;
 }
@@ -400,6 +404,7 @@ static void source_update_hw(const ALsource *src, unsigned fields) {
     }
     apu_voice_set_direction((uint32_t)src->hw_voice_idx, calc.local_pos);
     apu_voice_set_direct((uint32_t)src->hw_voice_idx, src->direct, src->direct_gain[0], src->direct_gain[1]);
+    apu_voice_set_send((uint32_t)src->hw_voice_idx, src->reverb_send);
     /* Hardware backend: apply the new pitch and volumes to the running voice */
     apu_voice_commit(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx);
 }
@@ -498,6 +503,7 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
     }
     src->has_offset = false;
     apu_voice_set_direct(hw_voice_idx, src->direct, src->direct_gain[0], src->direct_gain[1]);
+    apu_voice_set_send(hw_voice_idx, src->reverb_send);
     apu_voice_setup(hw_voice_idx, &ctx);
     if (src->stream) {
         /* The voice starts at ring index 0 from the stream's read position */
@@ -632,6 +638,8 @@ static void source_update_stream(ALsource *src) {
     }
 }
 
+static void reverb_sync(void);
+
 void al_source_update_frame(void) {
     ensure_subsystem_initialized();
     for (size_t i = 0; i < AL_MAX_SOURCES; i++) {
@@ -640,6 +648,7 @@ void al_source_update_frame(void) {
         }
     }
     apu_voice_mgr_update(al_source_get_apu_base());
+    reverb_sync();
 }
 
 
@@ -876,6 +885,15 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
             src->xbox_priority = value;
             break;
 
+        case AL_XBOX_REVERB_SEND:
+            if (!(value >= 0.0f && value <= 1.0f)) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->reverb_send = value;
+            source_update_hw(src, SRC_HW_SPATIAL);
+            break;
+
         default:
             alSetError(AL_INVALID_ENUM);
             break;
@@ -947,6 +965,7 @@ AL_API void AL_APIENTRY alSourcefv(ALuint source, ALenum param, const ALfloat *v
         case AL_SAMPLE_OFFSET:
         case AL_BYTE_OFFSET:
         case AL_XBOX_PRIORITY:
+        case AL_XBOX_REVERB_SEND:
             alSourcef(source, param, values[0]);
             break;
 
@@ -1185,6 +1204,10 @@ AL_API void AL_APIENTRY alGetSourcef(ALuint source, ALenum param, ALfloat *value
 
         case AL_XBOX_PRIORITY:
             *value = src->xbox_priority;
+            break;
+
+        case AL_XBOX_REVERB_SEND:
+            *value = src->reverb_send;
             break;
 
         default:
@@ -1834,10 +1857,111 @@ AL_API void AL_APIENTRY alGetBooleanv(ALenum param, ALboolean *values) {
     *values = (ival != 0) ? AL_TRUE : AL_FALSE;
 }
 
+/*
+ * AL_XBOX_reverb: one reverb for the mix on the GP DSP. The settings live here;
+ * reverb_apply() hands them to the GP program when a device is up and the
+ * console route is in use (on xemu's front-end route bin 2 is a surround bin).
+ * alXboxUpdateVoices() re-applies them after a device (re)open.
+ */
+static apu_reverb_params_t s_reverb;
+static bool s_reverb_init;
+static bool s_reverb_enabled;
+
+static void reverb_params(void) {
+    if (!s_reverb_init) {
+        (void)apu_reverb_preset(AL_XBOX_REVERB_PRESET_GENERIC, &s_reverb);
+        s_reverb_init = true;
+    }
+}
+
+static void reverb_apply(void) {
+    reverb_params();
+    if (!apu_gp_ready() || apu_vp_front_end_ok()) {
+        return;
+    }
+    (void)apu_gp_reverb_set(al_source_get_apu_base(), &s_reverb, s_reverb_enabled);
+}
+
+static void reverb_sync(void) {
+    if (s_reverb_enabled && !apu_gp_reverb_on()) {
+        reverb_apply();
+    }
+}
+
+bool al_reverb_active(void) {
+    return s_reverb_enabled && apu_gp_reverb_on();
+}
+
+AL_API void AL_APIENTRY alXboxReverbPreset(ALint preset) {
+    apu_reverb_params_t p;
+    if (apu_reverb_preset((int)preset, &p) != 0) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    s_reverb = p;
+    s_reverb_init = true;
+    if (s_reverb_enabled) {
+        reverb_apply();
+    }
+}
+
+AL_API void AL_APIENTRY alXboxReverbf(ALenum param, ALfloat value) {
+    float *field;
+    float lo, hi;
+    reverb_params();
+    switch (param) {
+        case AL_XBOX_REVERB_DECAY_TIME:    field = &s_reverb.decay_time;    lo = 0.1f; hi = 20.0f; break;
+        case AL_XBOX_REVERB_HF_RATIO:      field = &s_reverb.hf_ratio;      lo = 0.1f; hi = 1.0f;  break;
+        case AL_XBOX_REVERB_GAIN:          field = &s_reverb.gain;          lo = 0.0f; hi = 1.0f;  break;
+        case AL_XBOX_REVERB_PRE_DELAY:     field = &s_reverb.pre_delay;     lo = 0.0f; hi = 0.1f;  break;
+        case AL_XBOX_REVERB_DIFFUSION:     field = &s_reverb.diffusion;     lo = 0.0f; hi = 1.0f;  break;
+        case AL_XBOX_REVERB_INPUT_GAIN:    field = &s_reverb.input_gain;    lo = 0.0f; hi = 1.0f;  break;
+        case AL_XBOX_REVERB_INPUT_LOWPASS: field = &s_reverb.input_lowpass; lo = 0.0f; hi = 0.95f; break;
+        case AL_XBOX_REVERB_OUTPUT_LOWPASS: field = &s_reverb.output_lowpass; lo = 0.0f; hi = 0.98f; break;
+        default:
+            alSetError(AL_INVALID_ENUM);
+            return;
+    }
+    if (!(value >= lo && value <= hi)) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    *field = value;
+    if (s_reverb_enabled) {
+        reverb_apply();
+    }
+}
+
+AL_API void AL_APIENTRY alXboxGetReverbf(ALenum param, ALfloat *value) {
+    reverb_params();
+    if (!value) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    switch (param) {
+        case AL_XBOX_REVERB_DECAY_TIME:    *value = s_reverb.decay_time;    break;
+        case AL_XBOX_REVERB_HF_RATIO:      *value = s_reverb.hf_ratio;      break;
+        case AL_XBOX_REVERB_GAIN:          *value = s_reverb.gain;          break;
+        case AL_XBOX_REVERB_PRE_DELAY:     *value = s_reverb.pre_delay;     break;
+        case AL_XBOX_REVERB_DIFFUSION:     *value = s_reverb.diffusion;     break;
+        case AL_XBOX_REVERB_INPUT_GAIN:    *value = s_reverb.input_gain;    break;
+        case AL_XBOX_REVERB_INPUT_LOWPASS: *value = s_reverb.input_lowpass; break;
+        case AL_XBOX_REVERB_OUTPUT_LOWPASS: *value = s_reverb.output_lowpass; break;
+        default:
+            alSetError(AL_INVALID_ENUM);
+            break;
+    }
+}
+
 /* AL_XBOX_HRTF (AL_XBOX_hrtf): mono 3D sources through the APU's HRTF stage */
 AL_API void AL_APIENTRY alEnable(ALenum capability) {
     if (capability == AL_XBOX_HRTF) {
         apu_voice_set_hrtf_enabled(true);
+        return;
+    }
+    if (capability == AL_XBOX_REVERB) {
+        s_reverb_enabled = true;
+        reverb_apply();
         return;
     }
     alSetError(AL_INVALID_ENUM);
@@ -1848,12 +1972,20 @@ AL_API void AL_APIENTRY alDisable(ALenum capability) {
         apu_voice_set_hrtf_enabled(false);
         return;
     }
+    if (capability == AL_XBOX_REVERB) {
+        s_reverb_enabled = false;
+        reverb_apply();
+        return;
+    }
     alSetError(AL_INVALID_ENUM);
 }
 
 AL_API ALboolean AL_APIENTRY alIsEnabled(ALenum capability) {
     if (capability == AL_XBOX_HRTF) {
         return apu_voice_hrtf_enabled() ? AL_TRUE : AL_FALSE;
+    }
+    if (capability == AL_XBOX_REVERB) {
+        return s_reverb_enabled ? AL_TRUE : AL_FALSE;
     }
     alSetError(AL_INVALID_ENUM);
     return AL_FALSE;

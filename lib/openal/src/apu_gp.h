@@ -86,6 +86,38 @@ uint32_t apu_gp_frames(uintptr_t bar0);
 /** Channel stride of the output DMA from the next apu_gp_init() on (diagnostics; default 32). */
 void apu_gp_debug_set_dsp_step(uint32_t words);
 
+/**
+ * Program image for the next apu_gp_init() (diagnostics and alternative
+ * programs): `count` DSP words loaded at P:0, at most 0x800. NULL restores the
+ * default, dsp/gp_reverb.asm (the copy program while its reverb is off). The program must end each frame like the copy program and
+ * keep the frame counter at X:$10 (apu_vp_init checks it).
+ */
+void apu_gp_debug_set_program(const uint32_t *words, uint32_t count);
+
+/**
+ * Size of the GP scratch space from the next apu_gp_init(), in bytes (rounded up
+ * to 4 KiB, at least 0x2000, at most 2 MiB; 0 = what the program needs: the
+ * reverb's delay lines for the default program). Offsets 0..$1FFF hold the
+ * bootstrap image; the rest is free for the program's DMA (zeroed at init).
+ */
+void apu_gp_debug_set_scratch_bytes(uint32_t bytes);
+
+/** Size of the scratch space in use (0 before apu_gp_init()). */
+uint32_t apu_gp_scratch_bytes(void);
+
+struct apu_reverb_params_s;
+
+/**
+ * The reverb of the GP program (dsp/gp_reverb.asm, apu_reverb.h). `on` with new
+ * parameters: if only gains change they are written live; a new pre-delay (or
+ * switching on) stops the reverb for a frame, lays the delay lines out again and
+ * empties them. Returns -1 if the GP runs another program.
+ */
+int apu_gp_reverb_set(uintptr_t bar0, const struct apu_reverb_params_s *p, bool on);
+
+/** The reverb is running. */
+bool apu_gp_reverb_on(void);
+
 /** Output ring and bootstrap scratch image (host tests). */
 uint8_t *apu_gp_debug_fifo(void);
 const uint32_t *apu_gp_debug_scratch(void);
