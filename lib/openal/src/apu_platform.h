@@ -19,4 +19,17 @@
 #define OPENAL_TARGET_XBOX 1
 #endif
 
+#include <stdint.h>
+
+/* CPU time-stamp counter (the console's CPU clock); 0 where there is none */
+static inline uint64_t apu_platform_cycles(void) {
+#if defined(__i386__) || defined(__x86_64__)
+    uint32_t lo, hi;
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+#else
+    return 0;
+#endif
+}
+
 #endif /* APU_PLATFORM_H */

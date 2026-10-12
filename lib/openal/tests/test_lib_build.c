@@ -19,6 +19,13 @@ static ANY_FN ptr_to_fn(void *p) {
     return fn;
 }
 
+/* AL_XBOX_output_callback check: never called on the host (no codec) */
+static void AL_APIENTRY test_output_cb(ALshort *samples, ALsizei frames, ALvoid *user) {
+    (void)samples;
+    (void)frames;
+    (void)user;
+}
+
 /* True if name is a whole space-separated token of list */
 static int token_in_list(const char *list, const char *name) {
     size_t n = strlen(name);
@@ -152,6 +159,34 @@ int main(void) {
                 assert(alGetError() == AL_NO_ERROR);
             } else if (strcmp(name, "AL_EXT_MCFORMATS") == 0) {
                 /* checked below: formats must be accepted if (and only if) advertised */
+            } else if (strcmp(name, "AL_XBOX_stats") == 0) {
+                LPALXBOXGETSTATS get_stats = (LPALXBOXGETSTATS)ptr_to_fn(alGetProcAddress("alXboxGetStats"));
+                ALXBOXSTATS a, b;
+                assert(get_stats != NULL);
+                memset(&a, 0, sizeof(a));
+                a.size = sizeof(a);
+                get_stats(&a);
+                alXboxUpdateVoices();
+                memset(&b, 0, sizeof(b));
+                b.size = sizeof(b);
+                get_stats(&b);
+                assert(b.size == sizeof(b) && b.update_calls == a.update_calls + 1u);   /* the tick is counted */
+                assert(b.update_cycles >= a.update_cycles && b.ac97_underruns == 0u);
+                {
+                    /* an older, shorter structure: only its fields are written */
+                    ALuint small[3] = { 2u * sizeof(ALuint), 0u, 0xDEADu };
+                    get_stats((ALXBOXSTATS *)(void *)small);
+                    assert(small[0] == 2u * sizeof(ALuint) && small[2] == 0xDEADu);
+                }
+                get_stats(NULL);
+                assert(alGetError() == AL_INVALID_VALUE);
+            } else if (strcmp(name, "AL_XBOX_output_callback") == 0) {
+                LPALXBOXOUTPUTCALLBACK set_cb =
+                    (LPALXBOXOUTPUTCALLBACK)ptr_to_fn(alGetProcAddress("alXboxOutputCallback"));
+                assert(set_cb != NULL);
+                set_cb(test_output_cb, NULL);
+                set_cb(NULL, NULL);
+                assert(alGetError() == AL_NO_ERROR);
             } else if (strcmp(name, "AL_XBOX_reverb") == 0) {
                 LPALXBOXREVERBPRESET preset = (LPALXBOXREVERBPRESET)ptr_to_fn(alGetProcAddress("alXboxReverbPreset"));
                 LPALXBOXREVERBF set = (LPALXBOXREVERBF)ptr_to_fn(alGetProcAddress("alXboxReverbf"));

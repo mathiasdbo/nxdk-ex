@@ -8,6 +8,14 @@ static bool s_use_thread = true;
 static apu_ac97_stats_t s_stats;
 
 static void (*volatile s_hook)(void);
+static volatile apu_ac97_output_fn s_out_fn;
+static void *volatile s_out_user;
+
+void apu_ac97_set_output_hook(apu_ac97_output_fn fn, void *user) {
+    s_out_fn = NULL;   /* never call the new function with the old argument */
+    s_out_user = user;
+    s_out_fn = fn;
+}
 
 void apu_ac97_set_thread(bool on) {
     s_use_thread = on;
@@ -32,10 +40,13 @@ void apu_ac97_set_thread_hook(void (*fn)(void)) {
 #define AC97_SR_DCH   0x01u    /* DMA controller halted */
 #define AC97_PO_CR    0x11Bu   /* PCM out: control (bit 0 run, bit 1 reset registers) */
 
-static int16_t *s_slot[SLOTS];
-static uint32_t s_next;     /* slot being filled */
-static uint32_t s_fill;     /* frames in it */
+static int16_t *s_slot[SLOTS];   /* AC97 buffers (write-combining) */
+static int16_t s_stage[2u * APU_AC97_CHUNK_FRAMES];   /* the block being gathered (cached) */
+static uint32_t s_next;     /* slot the next block goes to */
+static uint32_t s_fill;     /* frames gathered */
 static DWORD s_last_pump;   /* GetTickCount() of the previous pass */
+static uint64_t s_tsc0;     /* cycle counter and performance counter at the start */
+static LARGE_INTEGER s_qpc0;
 
 /* Pump thread */
 static HANDLE s_thread;
@@ -57,6 +68,22 @@ static void free_slots(void) {
     }
 }
 
+/* A gathered block: the output hook, then into the next AC97 buffer */
+static void queue_block(void) {
+    apu_ac97_output_fn fn = s_out_fn;
+    int16_t *dst = s_slot[s_next % SLOTS];
+    if (fn) {
+        uint64_t t0 = apu_platform_cycles();
+        fn(s_stage, APU_AC97_CHUNK_FRAMES, s_out_user);
+        s_stats.hook_cycles += apu_platform_cycles() - t0;
+    }
+    memcpy(dst, s_stage, CHUNK_BYTES);
+    XAudioProvideSamples((unsigned char *)dst, (unsigned short)CHUNK_BYTES, 0);
+    s_next++;
+    s_fill = 0;
+    s_stats.chunks++;
+}
+
 /* One pass: queue what the GP has written, pad if the codec is about to run dry */
 static void pump_once(uintptr_t bar0) {
     volatile uint8_t *pb = ac97_regs();
@@ -71,29 +98,21 @@ static void pump_once(uintptr_t bar0) {
     s_stats.pumps++;
 
     for (guard = 0; guard < SLOTS; guard++) {
-        int16_t *dst = s_slot[s_next % SLOTS];
         if (((pb[AC97_PO_LVI] - pb[AC97_PO_CIV]) & 31u) >= APU_AC97_AHEAD && !halted) {
             break;   /* enough queued: leave the rest in the GP ring */
         }
-        s_fill += apu_gp_fifo_read(bar0, dst + 2u * s_fill, APU_AC97_CHUNK_FRAMES - s_fill);
+        s_fill += apu_gp_fifo_read(bar0, s_stage + 2u * s_fill, APU_AC97_CHUNK_FRAMES - s_fill);
         if (s_fill < APU_AC97_CHUNK_FRAMES) {
             break;   /* the GP has not written a whole buffer yet */
         }
-        XAudioProvideSamples((unsigned char *)dst, (unsigned short)CHUNK_BYTES, 0);
-        s_next++;
-        s_fill = 0;
-        s_stats.chunks++;
+        queue_block();
     }
     /* The GP is not delivering (stalled, or the pump ran too rarely) and the
      * codec is on its last buffer: top the queue up with the partial buffer
      * padded with silence, rather than let it run dry and replay old buffers */
     if (((pb[AC97_PO_LVI] - pb[AC97_PO_CIV]) & 31u) == 0u) {
-        int16_t *dst = s_slot[s_next % SLOTS];
-        memset(dst + 2u * s_fill, 0, (APU_AC97_CHUNK_FRAMES - s_fill) * 4u);
-        XAudioProvideSamples((unsigned char *)dst, (unsigned short)CHUNK_BYTES, 0);
-        s_next++;
-        s_fill = 0;
-        s_stats.chunks++;
+        memset(s_stage + 2u * s_fill, 0, (APU_AC97_CHUNK_FRAMES - s_fill) * 4u);
+        queue_block();
         s_stats.padded++;
     }
     if (halted) {
@@ -102,14 +121,24 @@ static void pump_once(uintptr_t bar0) {
     }
 }
 
+/* One pass with its CPU time counted */
+static void timed_pass(uintptr_t bar0, void (*hook)(void)) {
+    uint64_t t0 = apu_platform_cycles(), dt;
+    pump_once(bar0);
+    if (hook) {
+        hook();
+    }
+    dt = apu_platform_cycles() - t0;
+    s_stats.cycles += dt;
+    if (dt > s_stats.max_cycles) {
+        s_stats.max_cycles = (dt > 0xFFFFFFFFu) ? 0xFFFFFFFFu : (uint32_t)dt;
+    }
+}
+
 static DWORD WINAPI pump_thread(LPVOID arg) {
     (void)arg;
     while (!s_quit) {
-        void (*hook)(void) = s_hook;
-        pump_once(s_thread_bar0);
-        if (hook) {
-            hook();
-        }
+        timed_pass(s_thread_bar0, s_hook);
         Sleep(APU_AC97_PUMP_MS);
     }
     return 0;
@@ -131,6 +160,8 @@ int apu_ac97_start(uintptr_t bar0) {
         memset(s_slot[i], 0, CHUNK_BYTES);
     }
     memset(&s_stats, 0, sizeof(s_stats));
+    s_tsc0 = apu_platform_cycles();
+    QueryPerformanceCounter(&s_qpc0);
     XAudioInit(16, 2, NULL, NULL);
     /* Silence first: this is the lead the GP output keeps over the codec, and
      * it must outlast the longest gap between two pumps (a 60 Hz frame is
@@ -162,7 +193,19 @@ void apu_ac97_pump(uintptr_t bar0) {
     if (!s_active || s_thread) {
         return;   /* the thread owns the AC97 and the FIFO read position */
     }
-    pump_once(bar0);
+    timed_pass(bar0, NULL);
+}
+
+static uint32_t cycle_hz(void) {
+    LARGE_INTEGER now, freq;
+    uint64_t dq;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    dq = (uint64_t)(now.QuadPart - s_qpc0.QuadPart);
+    if (!s_active || freq.QuadPart <= 0 || dq < (uint64_t)freq.QuadPart / 100u) {
+        return 0;
+    }
+    return (uint32_t)((double)(apu_platform_cycles() - s_tsc0) * (double)freq.QuadPart / (double)dq);
 }
 
 void apu_ac97_stop(void) {
@@ -192,6 +235,10 @@ void apu_ac97_halt_dma(void) {
 
 #else /* host: no codec */
 
+static uint32_t cycle_hz(void) {
+    return 0;
+}
+
 void apu_ac97_halt_dma(void) {
 }
 
@@ -216,5 +263,6 @@ bool apu_ac97_active(void) {
 void apu_ac97_get_stats(apu_ac97_stats_t *out) {
     if (out) {
         *out = s_stats;
+        out->cycle_hz = cycle_hz();
     }
 }
