@@ -28,3 +28,30 @@ Credits (not required by CC0):
 Regenerate (the original downloads are not stored in the repository):
 
   python make_sfx_assets.py <dir with the Freesound downloads>
+
+
+Dry recordings for the reverb mode (mode 6)
+===========================================
+
+Converted by make_reverb_assets.py (same helpers) to 16-bit mono PCM WAV at 48 kHz, peak-normalised to
+-1 dBFS, with silence appended so each loop leaves room for the reverb tail, and embedded in
+../../sound_assets_reverb.h. Downloaded from freesound.org; every sound is CC0, checked on each page.
+
+File                      Source (Freesound id, author)                        License  Edits
+------------------------  ---------------------------------------------------  -------  -----------------------------------------------
+rv_footsteps_48k.wav      813622 "Footsteps - Stone, Rock, Concrete, Cement",     CC0      foley-pit recording; tail trimmed, 50 ms fade-out,
+                          SecureSubset                                                     +0.6 s silence
+rv_clap_48k.wav           154399 "hand clap.wav", semccab                         CC0      24-bit -> 16-bit; tail trimmed, +1 s silence
+rv_drop_48k.wav           165206 "Water Drop Sound.wav", metaepitome              CC0      stereo 44.1 kHz -> mono 48 kHz; +1.4 s silence
+rv_guitar_48k.wav         97773 "acoustic guitar with non_standard tuning         CC0      stereo 44.1 kHz -> mono 48 kHz; first 8 s,
+                          phrase 5.wav", timcam                                            400 ms fade-out, +1 s silence
+
+Credits (not required by CC0):
+  https://freesound.org/people/SecureSubset/sounds/813622/
+  https://freesound.org/people/semccab/sounds/154399/
+  https://freesound.org/people/metaepitome/sounds/165206/
+  https://freesound.org/people/timcam/sounds/97773/
+
+Regenerate:
+
+  python make_reverb_assets.py <dir with the Freesound downloads>

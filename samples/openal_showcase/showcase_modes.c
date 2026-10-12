@@ -2,6 +2,7 @@
 #include "wav_loader.h"
 #include "sound_assets.h"
 #include "sound_assets_sfx.h"
+#include "sound_assets_reverb.h"
 #include "showcase_fmt.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,7 +21,32 @@ extern void al_source_update_frame(void);
 extern uint32_t apu_voice_mgr_get_active_hw_count(void);
 extern uint32_t apu_voice_mgr_get_virtual_standby_count(void);
 
+static const char *const k_reverb_sounds[REVERB_SOUNDS] = {
+    "Footsteps on concrete", "Hand claps", "Water drops", "Acoustic guitar"
+};
+static const char *const k_reverb_rooms[1 + AL_XBOX_REVERB_PRESET_COUNT] = {
+    "OFF (dry)", "Generic", "Room", "Bathroom", "Concert hall", "Cave", "Arena", "Sewer pipe", "Underwater"
+};
+
+/* Mode 6: the selected room on the GP reverb (or off), the source's send */
+static void reverb_apply(showcase_app_t *app) {
+    if (app->reverb_room == 0) {
+        alDisable(AL_XBOX_REVERB);
+    } else {
+        alXboxReverbPreset(app->reverb_room - 1);
+        alEnable(AL_XBOX_REVERB);
+    }
+    alSourcef(app->src_reverb, AL_XBOX_REVERB_SEND, app->reverb_send);
+}
+
+static void reverb_play_sound(showcase_app_t *app) {
+    alSourceStop(app->src_reverb);
+    alSourcei(app->src_reverb, AL_BUFFER, (ALint)app->buf_reverb[app->reverb_sound]);
+    alSourcePlay(app->src_reverb);
+}
+
 static void stop_all_demo_sources(showcase_app_t *app) {
+    alSourceStop(app->src_reverb);
     alSourceStop(app->src_orbit);
     alSourceStop(app->src_doppler);
     alSourceStop(app->src_sat_51);
@@ -96,8 +122,15 @@ static void on_mode_changed(showcase_app_t *app, int new_mode) {
                 alSourcePlay(app->src_bgm);
             }
             break;
+        case MODE_REVERB_ROOMS:
+            reverb_apply(app);
+            reverb_play_sound(app);
+            break;
         default:
             break;
+    }
+    if (new_mode != MODE_REVERB_ROOMS) {
+        alDisable(AL_XBOX_REVERB);   /* the other modes stay dry */
     }
 }
 
@@ -183,6 +216,17 @@ int showcase_app_init(showcase_app_t *app) {
     alSourcei(app->src_bgm, AL_LOOPING, AL_TRUE);
     alSourcef(app->src_bgm, AL_GAIN, 0.40f);
 
+    /* Mode 6: dry recordings (sound_assets_reverb.h), one source in front of the listener */
+    alGenBuffers(REVERB_SOUNDS, app->buf_reverb);
+    wav_load_to_buffer(app->buf_reverb[0], g_rv_footsteps_wav, sizeof(g_rv_footsteps_wav));
+    wav_load_to_buffer(app->buf_reverb[1], g_rv_clap_wav, sizeof(g_rv_clap_wav));
+    wav_load_to_buffer(app->buf_reverb[2], g_rv_drop_wav, sizeof(g_rv_drop_wav));
+    wav_load_to_buffer(app->buf_reverb[3], g_rv_guitar_wav, sizeof(g_rv_guitar_wav));
+    alGenSources(1, &app->src_reverb);
+    alSourcei(app->src_reverb, AL_LOOPING, AL_TRUE);
+    alSourcei(app->src_reverb, AL_SOURCE_RELATIVE, AL_TRUE);
+    alSource3f(app->src_reverb, AL_POSITION, 0.0f, 0.0f, -1.5f);
+
     alGenSources(MAX_STRESS_SOURCES, app->src_stress);
     for (int i = 0; i < MAX_STRESS_SOURCES; i++) {
         /* Mostly short lasers, with a rifle shot and breaking glass in every six */
@@ -204,6 +248,9 @@ int showcase_app_init(showcase_app_t *app) {
     app->camera_pitch = 0.0f;
     app->surround_channel_idx = 0;
     app->bgm_playing = true;
+    app->reverb_sound = 1;                                   /* hand claps */
+    app->reverb_room = AL_XBOX_REVERB_PRESET_HALL + 1;
+    app->reverb_send = 0.6f;
 
     /* Start Mode 1 playback */
     alSourcePlay(app->src_orbit);
@@ -461,6 +508,53 @@ void showcase_app_update(showcase_app_t *app, const showcase_input_t *input) {
             break;
         }
 
+        case MODE_REVERB_ROOMS: {
+            ALint active = 0;
+            ALfloat decay = 0.0f, hf = 0.0f, gain = 0.0f, pre = 0.0f;
+            if (input->pressed_a) {
+                app->reverb_sound = (app->reverb_sound + 1) % REVERB_SOUNDS;
+                reverb_play_sound(app);
+            }
+            if (input->pressed_y) {
+                app->reverb_room = (app->reverb_room + 1) % (1 + AL_XBOX_REVERB_PRESET_COUNT);
+                reverb_apply(app);
+            }
+            if (input->pressed_dpad_up || input->pressed_dpad_down) {
+                app->reverb_send += input->pressed_dpad_up ? 0.1f : -0.1f;
+                app->reverb_send = (app->reverb_send < 0.0f) ? 0.0f : ((app->reverb_send > 1.0f) ? 1.0f : app->reverb_send);
+                alSourcef(app->src_reverb, AL_XBOX_REVERB_SEND, app->reverb_send);
+            }
+            al_source_update_frame();
+
+            alXboxGetHardwareStatus(AL_XBOX_REVERB_ACTIVE, &active);
+            alXboxGetReverbf(AL_XBOX_REVERB_DECAY_TIME, &decay);
+            alXboxGetReverbf(AL_XBOX_REVERB_HF_RATIO, &hf);
+            alXboxGetReverbf(AL_XBOX_REVERB_GAIN, &gain);
+            alXboxGetReverbf(AL_XBOX_REVERB_PRE_DELAY, &pre);
+            if (app->reverb_room == 0) {
+                snprintf(app->telemetry_buf, sizeof(app->telemetry_buf),
+                         " [Reverb on the APU's GP DSP: 8 combs + 4 allpasses per ear]\n"
+                         " Sound:   %s (dry recording)\n"
+                         " Room:    %s\n"
+                         " Send:    %s\n",
+                         k_reverb_sounds[app->reverb_sound], k_reverb_rooms[0], showcase_fx(app->reverb_send, 1, false, 0));
+            } else {
+                snprintf(app->telemetry_buf, sizeof(app->telemetry_buf),
+                         " [Reverb on the APU's GP DSP: 8 combs + 4 allpasses per ear]\n"
+                         " Sound:   %s (dry recording)\n"
+                         " Room:    %s   (reverb %s)\n"
+                         " Decay:   %s s   HF ratio %s   level %s   pre-delay %s ms\n"
+                         " Send:    %s\n",
+                         k_reverb_sounds[app->reverb_sound], k_reverb_rooms[app->reverb_room],
+                         active ? "running" : "NOT RUNNING", showcase_fx(decay, 1, false, 0), showcase_fx(hf, 1, false, 0),
+                         showcase_fx(gain, 2, false, 0), showcase_fx(pre * 1000.0f, 0, false, 0),
+                         showcase_fx(app->reverb_send, 1, false, 0));
+            }
+            snprintf(app->footer_buf, sizeof(app->footer_buf),
+                     "[A] Next sound   [Y] Next room   [D-Pad Up/Down] Reverb send");
+            break;
+        }
+
         default:
             break;
     }
@@ -473,7 +567,8 @@ const char *showcase_app_mode_title(int mode) {
         "Doppler Fly-By Pitch Shifter",
         "5.1 Surround & LFE Channels",
         "64-Voice Polyphony Stress",
-        "2D Stereo Music Concurrent"
+        "2D Stereo Music Concurrent",
+        "Reverb Rooms (GP DSP)"
     };
 
     if (mode < 1 || mode > SHOWCASE_NUM_MODES) {
@@ -527,6 +622,14 @@ int showcase_app_get_legend(const showcase_app_t *app, showcase_legend_entry_t *
         case MODE_BGM_2D_CONCURRENT:
             legend_add(out, max, &n, SHOWCASE_BTN_Y, SHOWCASE_BTN_A,
                        "Play / pause 2D music", false, false, false);
+            break;
+        case MODE_REVERB_ROOMS:
+            legend_add(out, max, &n, SHOWCASE_BTN_A, SHOWCASE_BTN_NONE,
+                       "Next sound", false, false, false);
+            legend_add(out, max, &n, SHOWCASE_BTN_Y, SHOWCASE_BTN_NONE,
+                       "Next room (reverb preset)", false, false, false);
+            legend_add(out, max, &n, SHOWCASE_BTN_DPAD_UP_DOWN, SHOWCASE_BTN_NONE,
+                       "Reverb send", false, false, false);
             break;
         default:
             break;
@@ -586,6 +689,9 @@ void showcase_app_shutdown(showcase_app_t *app) {
     alDeleteSources(1, &app->src_lfe_51);
     alDeleteSources(1, &app->src_bgm);
     alDeleteSources(MAX_STRESS_SOURCES, app->src_stress);
+    alDeleteSources(1, &app->src_reverb);
+    alDeleteBuffers(REVERB_SOUNDS, app->buf_reverb);
+    alDisable(AL_XBOX_REVERB);
 
     ALuint bufs[8] = {
         app->buf_orbit, app->buf_siren, app->buf_explosion,
