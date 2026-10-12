@@ -29,7 +29,7 @@ extern "C" {
 #define APU_REVERB_MAX_PRE      4800u   /* 100 ms */
 #define APU_REVERB_SCRATCH_BASE 0x2000u /* scratch bytes below hold the program image */
 
-typedef struct {
+typedef struct apu_reverb_params_s {
     float decay_time;       /* seconds to -60 dB, 0.1 .. 20 */
     float hf_ratio;         /* high-frequency decay relative to low, 0.1 .. 1 (1 = no damping) */
     float gain;             /* wet level, 0 .. 1 */
@@ -48,6 +48,11 @@ typedef struct {
 #define APU_REVERB_MAX_WORDS 640u
 
 void apu_reverb_default_params(apu_reverb_params_t *p);
+
+/* Presets (AL_XBOX_REVERB_PRESET_*): our own settings for common spaces */
+#define APU_REVERB_PRESETS 8
+/** Fill `p` with preset `n` (0..APU_REVERB_PRESETS-1). Returns -1 for an unknown preset. */
+int apu_reverb_preset(int n, apu_reverb_params_t *p);
 
 /** Delay of each line in samples (0: pre-delay, 1..16: combs, 8 left then 8 right, 17..24: allpasses, 4 left then 4 right). */
 void apu_reverb_line_lengths(const apu_reverb_params_t *p, uint32_t len[APU_REVERB_LINES]);
