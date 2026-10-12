@@ -294,6 +294,14 @@ void apu_voice_bind_loop(uint32_t index, uint32_t loop_start, uint32_t loop_end,
 void apu_voice_set_direct(uint32_t index, bool on, float left, float right);
 
 /**
+ * Reverb send (AL_XBOX_REVERB_SEND, 0..1): on a console, outputs 4 and 5 carry
+ * the slot's sound (mono, or the two channels of a stereo voice) to mixbin 2,
+ * the GP reverb's input, at send times the master volume. Takes effect at the
+ * next trigger or commit.
+ */
+void apu_voice_set_send(uint32_t index, float send);
+
+/**
  * Switch looping of a running voice (AL_LOOPING while playing or paused): the
  * hardware backend rewrites its loop markers in place (apu_vp_voice_set_loop);
  * the software model updates the context's loop mode.

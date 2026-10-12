@@ -40,7 +40,7 @@ Hardware limits any design must respect:
 | CHAN_* priority and stealing, up to 128 engine channels | 120 hardware voices, the rest in the CPU mixer (F5) |
 | Music (MP3/OGG), VOX sentences, cinematic audio, voice chat | streamed source (F1) |
 | Pause and resume (menu), restart on level change | pause/stop of all sources (exists), buffer release and reuse (F6) |
-| Room effects (`room_type`: reverb, echo, underwater) | GP reverb (F8), later |
+| Room effects (`room_type`: reverb, echo, underwater) | GP reverb (F8): done, `AL_XBOX_reverb` (`ENGINE_INTEGRATION.md` 3.7) |
 | Sound continues during loading screens | output pump independent of the frame loop (F4) |
 
 ## 3. Feature set (library side)
@@ -107,6 +107,8 @@ sounds then need neither queueing nor splitting.
   output, with parameters for HL's `room_type` presets.
 - **Cost and risk:** largest effort, and needs hardware microcode validation like the copy program.
 - **Until then:** room types are a recorded divergence.
+- **Plan:** `GP_REVERB_PLAN.md` (branch `feat/gp-reverb`): send bus on bin 2, DMA-backed delay lines, our own
+  DSP56300 program and assembler, phases 0-5 with the console probes first.
 
 **F9 - Offsets.** `AL_SAMPLE_OFFSET` / `AL_SEC_OFFSET` / `AL_BYTE_OFFSET`. The getters read `CBO`. The setters
 apply at the next play (record written before linking). These are needed for save/restore and for starting a

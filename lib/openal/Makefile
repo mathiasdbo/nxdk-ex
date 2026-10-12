@@ -10,6 +10,7 @@ OPENAL_SRCS := \
 	$(OPENAL_DIR)/src/apu_vp.c \
 	$(OPENAL_DIR)/src/apu_hrtf.c \
 	$(OPENAL_DIR)/src/apu_gp.c \
+	$(OPENAL_DIR)/src/apu_reverb.c \
 	$(OPENAL_DIR)/src/apu_ac97.c \
 	$(OPENAL_DIR)/src/apu_spatial.c \
 	$(OPENAL_DIR)/src/apu_eeprom.c \

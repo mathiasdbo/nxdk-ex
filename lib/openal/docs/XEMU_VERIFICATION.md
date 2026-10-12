@@ -1485,6 +1485,33 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
     then ran at full speed with 0 padded buffers.
   * **PCI:** the APU has a power-management capability at config 0x44 (D3hot -> D0 reset untested: no freeze
     to recover from occurred in these runs).
+* **GP DSP for effects** (`samples/apu_gp_probe`, rounds 1-2; plan in `GP_REVERB_PLAN.md`; our own program
+  `gp_probe.asm`, assembled with `tools/dsp56asm.py` and run in xemu's interpreter before the console):
+  * **Memory:** X RAM `$000-$BFF` (3072 words; `$C00-$FFF` mirror the mixbins, `$1000-$13FF` read 0 through
+    the window), Y RAM `$000-$7FF` (2048 words), P RAM `$000-$FFF`. The core sees the same words as the
+    windows. This matches xemu's model.
+  * **Scratch DMA:** circular scratch buffers (buffer 0xE) work in both directions, with byte offsets and size,
+    and the offset write-back advances 128 bytes per 32-word block. A linear block steps through DSP memory by
+    the descriptor's `dsp_step` (control bits 23:14): with 0 all 32 items use one DSP word, so blocks need 1
+    (xemu ignores the field). Format 2 keeps a sample in bits 31:8 of the memory word, format 6 in bits 23:0;
+    both round-trip exactly. Chained as a delay line (write a block, read it back K blocks later) the read
+    returned exactly K frames' delay for K = 0, 1 and 4, in either chain order.
+  * **Completion:** bit 7 of `$FFFFC5` sets at the end of a chain and clears when written; waiting for it took
+    about 20 polls for the output descriptor alone and about 21 more per extra 32-word descriptor.
+  * **Budget:** a `rep` of 64000 NOPs per frame kept 1500 frames/s, 96000 did not (1385); 64 descriptors per
+    frame (writes, or writes and reads) kept full rate.
+  * **Send bus:** voice output 4 routed to mixbin 2 carries the voice at full level, on a plain voice and on an
+    HRTF voice (3D list); the HRTF output on bins 0/1 is unchanged.
+  * **Echo (reverb plan phase 2):** the GP read a DMA delay line, added wet x line to bins 0/1 in a staging
+    area sent to the FIFO and wrote bin 2 + feedback x line back. With wet and feedback 0.5 a click came out
+    with echoes at exactly +12000/+24000/+36000 samples at 1/2, 1/4, 1/8 of its level, and at +12007/+24014 for a
+    delay that is not a whole number of frames; 0 AC97 underruns and 0 padded buffers over 32 s.
+  * **Reverb (phase 3, `samples/apu_gp_reverb`):** `dsp/gp_reverb.asm` with the layout of `apu_reverb.c`, 8
+    damped combs and 4 allpasses per ear on 25 DMA delay lines (4 + 2 per ear sounded metallic with a 2.5 s
+    decay). A click into the send decayed 29.8 dB in 0.5 s at T60 1 s and 9.9 dB at 3 s (the reference: 30.0 and
+    10.1), its onset where the pre-delay and the shortest comb put it; full frame rate, about 800 polls of DMA
+    wait per frame, no timeouts, 0 underruns and 0 padded buffers over 64 s of listening. A new voice ramps its
+    volume up from 0, so a click in its first samples is not heard.
 * Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
   from a spherical-head model (Brown-Duda head-shadow shelf per ear as a 31-tap int8 FIR, Woodworth ITD in
   s6.9; 32 azimuths x elevations -30/0/30/60; no measured data, no pinna cues). `apu_vp_init()` uploads it with

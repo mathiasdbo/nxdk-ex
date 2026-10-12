@@ -36,6 +36,7 @@ the AC97 codec. Console verification of each feature is recorded in `XEMU_VERIFI
 | Streaming sources | 32, each with up to 64 queued buffers | ring of 16384 frames, data written up to 8192 frames ahead |
 | Output | stereo, 16-bit, 48 kHz | no 5.1 or Dolby Digital |
 | HRTF voices | 64 at once | mono 3D sources beyond that are panned by volume (`AL_XBOX_HRTF`) |
+| Reverb | one room for the whole mix | on the GP DSP, no CPU time; each source chooses how much it sends (`AL_XBOX_reverb`, 3.7) |
 
 Buffer memory itself comes from contiguous RAM (`apu_mem.c`), so the console's 64 MiB is the real ceiling.
 
@@ -117,6 +118,49 @@ direction, computed by the library from a spherical-head model.
 
 Decode MP3/OGG on the CPU into a streaming source (3.1), or into the engine's software mix.
 
+### 3.7 Room reverb (AL_XBOX_reverb)
+
+The APU's GP DSP runs a reverb on the whole mix: 8 damped feedback combs and 4 allpasses per ear (the
+public-domain Freeverb tuning) on 25 delay lines in system RAM. It costs no CPU time. Each source decides how
+much of its sound goes into the reverb; the dry sound is not affected, except by the output lowpass below.
+
+```c
+alXboxReverbPreset(AL_XBOX_REVERB_PRESET_HALL);        /* pick the room */
+alEnable(AL_XBOX_REVERB);                              /* off by default */
+alSourcef(src, AL_XBOX_REVERB_SEND, 0.5f);             /* per source, 0..1, default 0 */
+```
+
+- **The send** follows the source's gain (`AL_GAIN`, distance attenuation, direct gains) and is taken before
+  panning and HRTF, so a far source sounds farther: its dry sound drops while the room stays. Stereo sources
+  send both channels mixed. It works in direct mode (3.2) too.
+- **Presets** (`AL_XBOX_REVERB_PRESET_*`, our own settings): `GENERIC`, `ROOM`, `BATHROOM`, `HALL`, `CAVE`,
+  `ARENA`, `SEWER_PIPE`, `UNDERWATER`.
+- **Parameters** (`alXboxReverbf` / `alXboxGetReverbf`):
+
+  | Parameter | Range | Effect |
+  | --- | --- | --- |
+  | `AL_XBOX_REVERB_DECAY_TIME` | 0.1 - 20 s | time for the tail to fall by 60 dB (measured on a console to 0.2 dB) |
+  | `AL_XBOX_REVERB_HF_RATIO` | 0.1 - 1 | how much faster the highs die (1: not at all) |
+  | `AL_XBOX_REVERB_GAIN` | 0 - 1 | reverb level in the output |
+  | `AL_XBOX_REVERB_PRE_DELAY` | 0 - 0.1 s | gap before the reverb starts (at least 0.67 ms) |
+  | `AL_XBOX_REVERB_DIFFUSION` | 0 - 1 | echo density of the tail |
+  | `AL_XBOX_REVERB_INPUT_GAIN` | 0 - 1 | headroom before the combs (lower it if loud scenes clip) |
+  | `AL_XBOX_REVERB_INPUT_LOWPASS` | 0 - 0.95 | darkens what enters the reverb |
+  | `AL_XBOX_REVERB_OUTPUT_LOWPASS` | 0 - 0.98 | muffles the whole mix, dry sound included (underwater) |
+
+- **Changing rooms:** a preset with the same pre-delay changes the gains at once, with the tail running on; a
+  different pre-delay restarts the reverb (its tail is cut). Changing rooms a few times a second is fine.
+- **Where it runs:** on a console, `alXboxGetHardwareStatus(AL_XBOX_REVERB_ACTIVE)` reports 1 while it runs.
+  On xemu's front-end route it stays off (bin 2 is a surround bin there). The settings are kept while no
+  device is open and applied when one is.
+- **Half-Life** (`room_type` 0-28 from `env_sound`, in the SDK's groups: generic, metallic, tunnel, chamber,
+  bright, water, concrete, outside, cavern, weirdo, three sizes each): one possible mapping, to tune by ear in
+  the port. 0 (normal): reverb off. 1 (generic): `GENERIC`. 2-4 (metallic) and 17-19 (concrete): `ROOM` /
+  `HALL` / `ARENA` by size. 5-7 (tunnel): `SEWER_PIPE`. 8-10 (chamber): `HALL`. 11-13 (bright):
+  `BATHROOM`. 14-16 (water, used while the player is under water): `UNDERWATER`. 20-22 (outside): reverb off
+  or `GENERIC` with a low gain. 23-25 (cavern): `CAVE`. 26-28 (weirdo): `CAVE` with a long pre-delay. Send
+  about 0.3-0.6 for world sounds, 0 for HUD sounds and music.
+
 ## 4. Things to know
 
 - **A one-shot ends a little late.** On a console a voice must never reach the end of its data: that stops the
@@ -135,4 +179,5 @@ Decode MP3/OGG on the CPU into a streaming source (3.1), or into the engine's so
 
 `samples/openal_engine` exercises loop points, direct gains, offsets, the pitch range, the voice budget and
 buffer churn, and logs to `E:\openal_engine_N.txt` (a new file each run). `samples/openal_stream` covers streaming and the output
-thread.
+thread. Mode 6 of `samples/openal_showcase` plays dry recordings through every reverb preset;
+`samples/apu_gp_reverb` measures the reverb's decay on the console.

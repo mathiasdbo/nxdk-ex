@@ -13,13 +13,16 @@
 extern "C" {
 #endif
 
-#define SHOWCASE_NUM_MODES 5
+#define SHOWCASE_NUM_MODES 6
 
 #define MODE_ORBIT_3D        1
 #define MODE_DOPPLER_FLYBY   2
 #define MODE_SURROUND_51     3
 #define MODE_POLYPHONY_STRESS 4
 #define MODE_BGM_2D_CONCURRENT 5
+#define MODE_REVERB_ROOMS    6
+
+#define REVERB_SOUNDS        4
 
 #define MAX_STRESS_SOURCES   128
 
@@ -118,6 +121,13 @@ typedef struct {
     /* Mode 5: 2D BGM State */
     bool  bgm_playing;
 
+    /* Mode 6: reverb rooms (AL_XBOX_reverb on the GP DSP) */
+    ALuint buf_reverb[REVERB_SOUNDS];
+    ALuint src_reverb;
+    int    reverb_sound;    /* index into buf_reverb */
+    int    reverb_room;     /* 0 = off, 1.. = AL_XBOX_REVERB_PRESET_* + 1 */
+    float  reverb_send;
+
     /* Telemetry buffer */
     char telemetry_buf[1024];
     char footer_buf[256];
@@ -142,6 +152,10 @@ void showcase_app_update(showcase_app_t *app, const showcase_input_t *input);
  * @param app Pointer to showcase_app_t structure.
  */
 void showcase_app_render_ui(showcase_app_t *app);
+
+/** Mode 6: name of a room (0 = off, 1.. = reverb preset + 1) and of a sound; "" when out of range. */
+const char *showcase_app_reverb_room_name(int room);
+const char *showcase_app_reverb_sound_name(int sound);
 
 /**
  * Short title of a mode (1..SHOWCASE_NUM_MODES), "" for anything else.

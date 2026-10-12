@@ -152,6 +152,35 @@ int main(void) {
                 assert(alGetError() == AL_NO_ERROR);
             } else if (strcmp(name, "AL_EXT_MCFORMATS") == 0) {
                 /* checked below: formats must be accepted if (and only if) advertised */
+            } else if (strcmp(name, "AL_XBOX_reverb") == 0) {
+                LPALXBOXREVERBPRESET preset = (LPALXBOXREVERBPRESET)ptr_to_fn(alGetProcAddress("alXboxReverbPreset"));
+                LPALXBOXREVERBF set = (LPALXBOXREVERBF)ptr_to_fn(alGetProcAddress("alXboxReverbf"));
+                LPALXBOXGETREVERBF get = (LPALXBOXGETREVERBF)ptr_to_fn(alGetProcAddress("alXboxGetReverbf"));
+                ALfloat f = 0.0f;
+                ALuint s = 0;
+                assert(preset && set && get);
+                assert(alIsEnabled(AL_XBOX_REVERB) == AL_FALSE);       /* off by default */
+                preset(AL_XBOX_REVERB_PRESET_HALL);
+                get(AL_XBOX_REVERB_DECAY_TIME, &f);
+                assert(f == 2.5f && alGetError() == AL_NO_ERROR);
+                set(AL_XBOX_REVERB_GAIN, 2.0f);
+                assert(alGetError() == AL_INVALID_VALUE);
+                preset(AL_XBOX_REVERB_PRESET_COUNT);
+                assert(alGetError() == AL_INVALID_VALUE);
+                set(AL_XBOX_REVERB_DECAY_TIME, 3.0f);
+                get(AL_XBOX_REVERB_DECAY_TIME, &f);
+                assert(f == 3.0f);
+                alEnable(AL_XBOX_REVERB);
+                assert(alIsEnabled(AL_XBOX_REVERB) == AL_TRUE && alGetError() == AL_NO_ERROR);
+                alGenSources(1, &s);
+                alSourcef(s, AL_XBOX_REVERB_SEND, 0.5f);
+                alGetSourcef(s, AL_XBOX_REVERB_SEND, &f);
+                assert(f == 0.5f && alGetError() == AL_NO_ERROR);
+                alSourcef(s, AL_XBOX_REVERB_SEND, 1.5f);
+                assert(alGetError() == AL_INVALID_VALUE);
+                alDeleteSources(1, &s);
+                alDisable(AL_XBOX_REVERB);
+                assert(alIsEnabled(AL_XBOX_REVERB) == AL_FALSE);
             } else if (strcmp(name, "AL_XBOX_hrtf") == 0) {
                 assert(alIsEnabled(AL_XBOX_HRTF) == AL_TRUE);          /* on by default */
                 alDisable(AL_XBOX_HRTF);
