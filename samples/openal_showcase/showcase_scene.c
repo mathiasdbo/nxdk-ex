@@ -1148,6 +1148,20 @@ static void hud_status(const showcase_app_t *app, const scene_focus_t *f) {
             snprintf(line, sizeof(line), "2D MUSIC %s (direct FL/FR)  +  3D HELICOPTER at 5 m",
                      app->bgm_playing ? "PLAYING" : "PAUSED");
             break;
+        case MODE_REVERB_ROOMS:
+            if (app->reverb_room == 0) {
+                snprintf(line, sizeof(line), "REVERB OFF (dry)   %s", showcase_app_reverb_sound_name(app->reverb_sound));
+            } else {
+                ALint active = 0;
+                ALfloat decay = 0.0f;
+                alXboxGetHardwareStatus(AL_XBOX_REVERB_ACTIVE, &active);
+                alXboxGetReverbf(AL_XBOX_REVERB_DECAY_TIME, &decay);
+                snprintf(line, sizeof(line), "ROOM %d/%d: %s  decay %s s  send %s%s", app->reverb_room,
+                         AL_XBOX_REVERB_PRESET_COUNT, showcase_app_reverb_room_name(app->reverb_room),
+                         showcase_fx(decay, 1, false, 0), showcase_fx(app->reverb_send, 1, false, 0),
+                         active ? "" : "  (NOT RUNNING)");
+            }
+            break;
         default:
             line[0] = '\0';
             break;

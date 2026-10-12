@@ -153,6 +153,10 @@ void showcase_app_update(showcase_app_t *app, const showcase_input_t *input);
  */
 void showcase_app_render_ui(showcase_app_t *app);
 
+/** Mode 6: name of a room (0 = off, 1.. = reverb preset + 1) and of a sound; "" when out of range. */
+const char *showcase_app_reverb_room_name(int room);
+const char *showcase_app_reverb_sound_name(int sound);
+
 /**
  * Short title of a mode (1..SHOWCASE_NUM_MODES), "" for anything else.
  */
