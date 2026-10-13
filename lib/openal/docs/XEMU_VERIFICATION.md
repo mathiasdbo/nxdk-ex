@@ -1521,6 +1521,13 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
     writes are seen by the CPU cache. The library zeroes the ring uncached, then maps it cached and only reads it.
   * The voice tick (`alXboxUpdateVoices`) cost about 19 us per call with a few voices playing. An output
     callback that reads and halves every sample cost 7.3 ms per second; one that only reads them, 2.7.
+* **Static buffers** (`samples/openal_engine` phase 8, `alBufferDataStatic`): the VP plays a page list
+  (one SGE entry per 4 KiB page) as well as a contiguous range. A 480 Hz tone in malloc'd memory, 24 pages with
+  8 breaks in physical contiguity, played identically to a copied buffer (same loud-sample count, peak and
+  frequency, no gaps or jumps). Memory written just before `alBufferDataStatic` without a cache write-back
+  played correctly (the APU's reads see the CPU's latest writes); the library writes the cache back anyway.
+  Five consecutive 0.2 s pieces of a tone queued on one streaming source played without a gap. A one-shot's
+  state query reported `AL_STOPPED` 252 ms after the start of 250 ms of data.
 * Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
   from a spherical-head model (Brown-Duda head-shadow shelf per ear as a 31-tap int8 FIR, Woodworth ITD in
   s6.9; 32 azimuths x elevations -30/0/30/60; no measured data, no pinna cues). `apu_vp_init()` uploads it with
