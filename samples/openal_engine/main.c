@@ -783,6 +783,68 @@ static void phase_adpcm(void) {
     check_apu("adpcm");
 }
 
+/* 10: Xbox ADPCM streamed: a 480 Hz tone in 192-block chunks (12288 samples,
+ * 256 ms), four queued and refilled as they finish, like a music player */
+static void phase_adpcm_stream(void) {
+    enum { CHUNK_BLOCKS = 192, CHUNKS = 16, NQ = 4 };
+    const uint32_t blocks = CHUNK_BLOCKS * CHUNKS;          /* about 4 s */
+    int16_t *pcm = (int16_t *)malloc((blocks * 64u + 1u) * sizeof(int16_t));
+    uint8_t *adpcm = (uint8_t *)malloc(blocks * 36u);
+    ALuint bufs[NQ], s;
+    ALint st = 0, starved_state = 0;
+    uint32_t i, next = 0, requeued = 0;
+    DWORD t0;
+
+    logf_("-- 10 Xbox ADPCM streaming: 256 ms chunks, 4 queued, refilled for 3 s\n");
+    if (!pcm || !adpcm) {
+        logf_("   malloc failed\n");
+        return;
+    }
+    for (i = 0; i < blocks * 64u + 1u; i++) pcm[i] = (int16_t)(8000.0f * sinf(TWO_PI * 480.0f * (float)(i % 48000u) / 48000.0f));
+    xbox_adpcm_encode(adpcm, pcm, blocks, 1);
+    alGenBuffers(NQ, bufs);
+    for (i = 0; i < NQ; i++, next++) {
+        alBufferData(bufs[i], AL_FORMAT_MONO_XBOX_ADPCM, adpcm + next * CHUNK_BLOCKS * 36u, CHUNK_BLOCKS * 36, 48000);
+    }
+    alGenSources(1, &s);
+    alSourcei(s, AL_SOURCE_RELATIVE, AL_TRUE);
+    alSourceQueueBuffers(s, NQ, bufs);
+    logf_("   queued %d ADPCM chunks, AL error 0x%x\n", NQ, alGetError());
+    alXboxOutputCallback(scan_cb, NULL);
+    alSourcePlay(s);
+    Sleep(100);
+    scan_start();
+    t0 = GetTickCount();
+    while (GetTickCount() - t0 < 3000u) {
+        ALint done = 0;
+        alGetSourcei(s, AL_BUFFERS_PROCESSED, &done);
+        while (done-- > 0) {
+            ALuint b;
+            alSourceUnqueueBuffers(s, 1, &b);
+            alBufferData(b, AL_FORMAT_MONO_XBOX_ADPCM, adpcm + (next % CHUNKS) * CHUNK_BLOCKS * 36u, CHUNK_BLOCKS * 36,
+                         48000);
+            alSourceQueueBuffers(s, 1, &b);
+            next++;
+            requeued++;
+        }
+        alGetSourcei(s, AL_SOURCE_STATE, &st);
+        if (st != AL_PLAYING) starved_state++;
+        alXboxUpdateVoices();
+        Sleep(16);
+    }
+    scan_log("ADPCM stream 480 Hz");
+    logf_("   %lu chunks refilled, source not playing in %ld checks, AL error 0x%x\n", (unsigned long)requeued,
+          (long)starved_state, alGetError());
+    alXboxOutputCallback(NULL, NULL);
+    alSourceStop(s);
+    alSourcei(s, AL_BUFFER, 0);
+    alDeleteSources(1, &s);
+    alDeleteBuffers(NQ, bufs);
+    free(pcm);
+    free(adpcm);
+    check_apu("adpcm stream");
+}
+
 int main(void) {
     ALCdevice *dev;
     ALCcontext *ctx;
@@ -826,6 +888,7 @@ int main(void) {
     phase_stats();
     phase_static();
     phase_adpcm();
+    phase_adpcm_stream();
     logf_("done\n");
     save_log();
     for (;;) {
