@@ -168,6 +168,14 @@ int apu_gp_init(uintptr_t bar0) {
         s_scratch[i] = s_image[i] & 0xFFFFFFu;
     }
     memset(s_fifo, 0, APU_GP_FIFO_BYTES);
+#if defined(OPENAL_TARGET_XBOX)
+    /* Read the ring through the CPU cache: the APU's DMA writes are seen by the
+     * cache (openal_engine phase 7: no stale data over 3 s, against 8.3 ms of
+     * CPU per second for 64-bit uncached reads, 5.0 ms cached). Zeroed while
+     * still uncached, so no dirty line can later be written back over the
+     * GP's output; after this the CPU only reads it. */
+    MmSetAddressProtect(s_fifo, APU_GP_FIFO_BYTES, PAGE_READWRITE);
+#endif
 
     /* SGE tables: one entry per 4 KiB page (dword 0 = physical page) */
     memset(s_scratch_sge, 0, 4096);
@@ -310,10 +318,10 @@ uint32_t apu_gp_fifo_available(uintptr_t bar0) {
     return ((fifo_cur(bar0) + APU_GP_FIFO_BYTES - s_read) % APU_GP_FIFO_BYTES) / 4u;
 }
 
-/* 64-bit reads by default: on a console the output thread spent 23.6 ms of CPU
- * per second with 16-bit reads, 13.4 with 32-bit and 8.3 with 64-bit ones
- * (openal_engine phase 7) */
-static uint32_t s_fifo_read_mode = 2u;   /* apu_gp_debug_set_fifo_read() */
+/* How the ring is read. Uncached, a console's output thread spent 23.6 ms of
+ * CPU per second with 16-bit reads, 13.4 with 32-bit and 8.3 with 64-bit ones;
+ * the ring is now cached (apu_gp_init), where plain 32-bit reads are enough */
+static uint32_t s_fifo_read_mode = 0u;   /* apu_gp_debug_set_fifo_read() */
 
 void apu_gp_debug_set_fifo_read(uint32_t mode) {
     s_fifo_read_mode = mode;
