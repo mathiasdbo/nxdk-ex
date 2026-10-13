@@ -1528,6 +1528,18 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
   played correctly (the APU's reads see the CPU's latest writes); the library writes the cache back anyway.
   Five consecutive 0.2 s pieces of a tone queued on one streaming source played without a gap. A one-shot's
   state query reported `AL_STOPPED` 252 ms after the start of 250 ms of data.
+* **ADPCM and the pitch range** (`samples/apu_adpcm_probe` round 1, our own IMA encoder checked against xemu's
+  decoder; `samples/openal_engine` phase 9):
+  * A voice with `CFG_FMT` container size 2 decodes Xbox ADPCM: 36-byte blocks per channel, CBO/EBO/LBO in
+    samples, 64 samples per block. A 480 Hz tone encoded with 64 samples per block (header = first sample, the
+    next header repeating the last) played at 480.0 Hz without discontinuities, one encoded with 65 per block at
+    487.0 Hz (65/64). Stereo (`SAMPLES_PER_BLOCK` 1, headers then alternating 4-byte chunks) gave 480 Hz left
+    and 960 Hz right. All-zero blocks decode to silence (the library's ADPCM silent tail).
+  * The pitch field plays exactly down to -32768 (1/256 of 48 kHz: 188 samples/s); at +8192, +12288 and
+    +16384 (4, 8, 16 times) the voice ran at 183366 samples/s each: 3.82 times is the VP's maximum. Frames kept
+    their rate throughout.
+  * Through OpenAL: ADPCM mono (copied), stereo (static) and a one-shot (`AL_STOPPED` after 1002 ms for 1 s)
+    played at the expected rates with no gaps; a 4800 Hz PCM tone at `AL_PITCH` 1/64 came out at 75 Hz.
 * Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
   from a spherical-head model (Brown-Duda head-shadow shelf per ear as a 31-tap int8 FIR, Woodworth ITD in
   s6.9; 32 azimuths x elevations -30/0/30/60; no measured data, no pinna cues). `apu_vp_init()` uploads it with

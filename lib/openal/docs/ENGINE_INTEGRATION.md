@@ -30,8 +30,8 @@ the AC97 codec. Console verification of each feature is recorded in `XEMU_VERIFI
 | Hardware voices | 120 (64 on xemu) | handles 0-127; the APU can stop for good on a higher handle, and the driver refuses one |
 | Sources | 256 | the rest wait in virtual standby, or stop (`AL_XBOX_VIRTUALIZE`) |
 | Buffers | 2048 | copied (`alBufferData`) or played in place from the engine's memory (`alBufferDataStatic`, 3.10) |
-| Formats | mono/stereo, 8-bit unsigned or 16-bit signed PCM | any sample rate; no ADPCM, no multichannel |
-| Pitch | playback rate 1/16 to 4 times 48 kHz | `AL_PITCH` times the buffer's rate is clamped to it |
+| Formats | mono/stereo, 8-bit unsigned or 16-bit signed PCM, Xbox ADPCM | any sample rate; ADPCM decoded by the APU (3.11); no multichannel |
+| Pitch | playback rate 1/256 to 3.8 times 48 kHz | `AL_PITCH` times the buffer's rate is clamped to it (a console plays exactly down to 1/256 and tops out at 3.82) |
 | Sample space | 2048 pages of 4 KiB (8 MiB) | counts buffers of playing voices only; reclaimed automatically (`AL_XBOX_SAMPLE_PAGES_USED`) |
 | Streaming sources | 32, each with up to 64 queued buffers | ring of 16384 frames, data written up to 8192 frames ahead |
 | Output | stereo, 16-bit, 48 kHz | no 5.1 or Dolby Digital |
@@ -72,7 +72,8 @@ the mix must stay faithful to it:
   - The library's distance, cone, Doppler and pan are bypassed.
   - The output gain is left/right times `AL_GAIN` times the listener gain.
   - Update it whenever the engine re-spatializes; the APU ramps volume changes.
-- **Pitch.** Set `AL_PITCH` from the engine's pitch (Half-Life: `pitch / 100`).
+- **Pitch.** Set `AL_PITCH` from the engine's pitch (Half-Life: `pitch / 100`). The playback rate may go from
+  1/256 to 3.8 times 48 kHz, so an 11 kHz sound plays down to `AL_PITCH` 0.017.
 - **Priority.** `alSourcef(src, AL_XBOX_PRIORITY, p)` lets the engine rank its channels. A higher value takes a
   voice from a lower one when all 64 are busy.
 - **No standby.** `alSourcei(src, AL_XBOX_VIRTUALIZE, AL_FALSE)` makes a source that gets no voice, or loses
@@ -239,6 +240,28 @@ alSourcePlay(src);
 
 When a sound has ended, `alGetSourcei(src, AL_SOURCE_STATE)` says so at once: it reads the voice's position (a
 250 ms one-shot reported `AL_STOPPED` after 252 ms on a console). The only delay is how often the engine asks.
+
+### 3.11 Xbox ADPCM (AL_XBOX_adpcm)
+
+The APU decodes Xbox ADPCM itself, so ADPCM music or speech costs no CPU to decode:
+
+```c
+alBufferDataStatic(buf, AL_FORMAT_STEREO_XBOX_ADPCM, xwav_data, xwav_bytes, 44100);   /* or alBufferData */
+```
+
+- **Layout:** the one of `.xwav` files (`WAVE_FORMAT_XBOX_ADPCM`, 0x0069).
+  - 36-byte IMA ADPCM blocks per channel, 64 samples each.
+  - The block header holds the first sample and the step index.
+  - The 64th 4-bit code is not played; the next header carries that sample.
+  - Stereo puts both headers first, then 4-byte chunks alternating left and right.
+  - The size must be whole blocks (`AL_INVALID_VALUE` otherwise).
+- **Positions:** frames (64 per block) for `AL_SAMPLE_OFFSET`, `AL_SEC_OFFSET` and loop points.
+  `AL_BYTE_OFFSET` reads and sets a block's start. `AL_BITS` reports 4.
+- **Streaming:** queues don't take ADPCM buffers (`AL_INVALID_VALUE`), because the stream ring holds PCM. Play a
+  song as one buffer. A static one costs no memory beyond the file; it can be up to the 8 MiB the APU maps at
+  once, about 3 minutes of 44.1 kHz stereo.
+- **Measured on a console:** 480 Hz and 960 Hz tones played at the exact rate, mono, stereo, copied and static,
+  and a one-shot reported `AL_STOPPED` 2 ms after its last sample.
 
 ## 4. Things to know
 

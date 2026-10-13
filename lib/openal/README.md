@@ -67,6 +67,7 @@ screens.
 | Extension | What it adds |
 |---|---|
 | `AL_EXT_OFFSET` | `AL_SEC_OFFSET` / `AL_SAMPLE_OFFSET` / `AL_BYTE_OFFSET`, read and set (also while playing) |
+| `AL_XBOX_adpcm` | `AL_FORMAT_MONO_XBOX_ADPCM` / `AL_FORMAT_STEREO_XBOX_ADPCM`: `.xwav` data decoded by the APU (3.11) |
 | `AL_EXT_STATIC_BUFFER` | `alBufferDataStatic`: a buffer plays the application's memory in place, any range of it (3.10) |
 | `AL_SOFT_loop_points` | a buffer's loop section: play the intro once, then repeat `[start, end)` in hardware |
 | `AL_XBOX_hardware_status` | `alXboxGetHardwareStatus`: voices, free voices, sample memory, backend, AV pack, HRTF / reverb running |
@@ -82,8 +83,9 @@ screens.
 See the table in `docs/ENGINE_INTEGRATION.md` section 2. In short:
 - **Output:** stereo 16-bit 48 kHz only. No 5.1 or Dolby Digital; the 5.1 panning and topology code is model
   state only.
-- **Formats:** no ADPCM, no multichannel buffers.
-- **Pitch:** playback rate 1/16 to 4 times 48 kHz.
+- **Formats:** mono/stereo PCM and Xbox ADPCM (decoded by the APU); no multichannel buffers. ADPCM plays from
+  whole buffers, not from streaming queues.
+- **Pitch:** playback rate 1/256 to 3.8 times 48 kHz (measured: exact down to 1/256, at most 3.82).
 - **Threads:** use the library from one thread. Its own output thread touches only the output path and
   already-played stream data.
 - **Old model microcode:** `src/apu_gp_ucode.h` holds the original model's GP microcode, which is not valid
