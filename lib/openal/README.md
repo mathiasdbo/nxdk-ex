@@ -51,7 +51,7 @@ screens.
   `alcGetContextsDevice`, `alcGetError`, `alcGetString`, `alcGetIntegerv`, `alcProcessContext` (the voice tick).
   `alcSuspendContext` and capture are stubs.
 - **Buffers:** `alGenBuffers`, `alDeleteBuffers`, `alIsBuffer`, `alBufferData` (mono/stereo, 8-bit unsigned or
-  16-bit signed PCM, any rate), `alGetBufferi`, `alBufferiv`/`alGetBufferiv` for `AL_LOOP_POINTS_SOFT`.
+  16-bit signed PCM, any rate), `alBufferDataStatic` (the same, without the copy), `alGetBufferi`, `alBufferiv`/`alGetBufferiv` for `AL_LOOP_POINTS_SOFT`.
   2048 buffers.
 - **Sources:** the OpenAL 1.1 attributes (position, velocity, direction, gain and limits, pitch, looping, relative,
   cones, distances, rolloff, `AL_BUFFER`, state, the three offsets), buffer queueing, play/pause/stop/rewind and
@@ -67,6 +67,7 @@ screens.
 | Extension | What it adds |
 |---|---|
 | `AL_EXT_OFFSET` | `AL_SEC_OFFSET` / `AL_SAMPLE_OFFSET` / `AL_BYTE_OFFSET`, read and set (also while playing) |
+| `AL_EXT_STATIC_BUFFER` | `alBufferDataStatic`: a buffer plays the application's memory in place, any range of it (3.10) |
 | `AL_SOFT_loop_points` | a buffer's loop section: play the intro once, then repeat `[start, end)` in hardware |
 | `AL_XBOX_hardware_status` | `alXboxGetHardwareStatus`: voices, free voices, sample memory, backend, AV pack, HRTF / reverb running |
 | `AL_XBOX_source_control` | engine control of voices: direct left/right gains, priority, no-standby, has-voice |

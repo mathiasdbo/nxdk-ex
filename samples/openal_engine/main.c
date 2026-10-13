@@ -30,6 +30,7 @@
 #include <AL/alc.h>
 #include <AL/alext.h>
 
+#include "al_buffer.h"
 #include "apu_ac97.h"
 #include "apu_gp.h"
 #include "apu_hardware.h"
@@ -467,6 +468,182 @@ static void phase_stats(void) {
     check_apu("stats");
 }
 
+/* 8: AL_EXT_STATIC_BUFFER. An output callback measures the left channel of
+ * the final mix: loud samples, peak, rising zero crossings (frequency), jumps
+ * (a sine's second difference is small) and silent gaps between loud parts. */
+typedef struct {
+    uint32_t frames, loud, peak, crossings, jumps, gaps, quiet_run;
+    int prev1, prev2;
+    bool seen_loud;
+} mix_scan_t;
+
+static mix_scan_t s_scan;
+static volatile int s_scan_on;
+
+static void AL_APIENTRY scan_cb(ALshort *samples, ALsizei frames, ALvoid *user) {
+    ALsizei i;
+    mix_scan_t *m = &s_scan;
+    (void)user;
+    if (!s_scan_on) return;
+    for (i = 0; i < frames; i++) {
+        int x = samples[2 * i], a = x < 0 ? -x : x, d = x - 2 * m->prev1 + m->prev2;
+        if (a > 300) {
+            if (m->seen_loud && m->quiet_run >= 48u) m->gaps++;   /* 1 ms of silence inside the sound */
+            m->seen_loud = true;
+            m->quiet_run = 0;
+            m->loud++;
+        } else {
+            m->quiet_run++;
+        }
+        if ((uint32_t)a > m->peak) m->peak = (uint32_t)a;
+        if (m->prev1 < 0 && x >= 0) m->crossings++;
+        if (m->seen_loud && a > 300 && (d > 400 || d < -400)) m->jumps++;
+        m->prev2 = m->prev1;
+        m->prev1 = x;
+    }
+    m->frames += (uint32_t)frames;
+}
+
+static void scan_start(void) {
+    s_scan_on = 0;
+    memset(&s_scan, 0, sizeof(s_scan));
+    s_scan_on = 1;
+}
+
+static void scan_log(const char *what) {
+    s_scan_on = 0;
+    logf_("   %s: %lu frames, %lu loud, peak %lu, %lu Hz, %lu jumps, %lu gaps\n", what, (unsigned long)s_scan.frames,
+          (unsigned long)s_scan.loud, (unsigned long)s_scan.peak,
+          (unsigned long)(s_scan.frames ? (uint64_t)s_scan.crossings * 48000u / s_scan.frames : 0),
+          (unsigned long)s_scan.jumps, (unsigned long)s_scan.gaps);
+}
+
+/* A sine of `hz` with a whole number of cycles per `frames` (exact phase from the index) */
+static void fill_tone(int16_t *dst, uint32_t frames, float hz) {
+    uint32_t i;
+    for (i = 0; i < frames; i++) {
+        dst[i] = (int16_t)(8000.0f * sinf(TWO_PI * hz * (float)(i % 48000u) / 48000.0f));
+    }
+}
+
+/* Breaks in the physical pages of a static buffer's list (0 = contiguous) */
+static uint32_t page_breaks(ALuint b) {
+    const ALbuffer *pb = al_buffer_get(b);
+    uint32_t i, n = 0;
+    for (i = 1; pb && i + 1u < pb->page_count; i++) {
+        if (pb->pages[i] != pb->pages[i - 1u] + 4096u) n++;
+    }
+    return n;
+}
+
+static void phase_static(void) {
+    const uint32_t frames = 48000u;
+    uint8_t *raw = (uint8_t *)malloc(frames * 2u + 4096u);
+    int16_t *tone = (int16_t *)(void *)(raw + 0x2A6);      /* any offset */
+    uint8_t *raw2 = NULL;
+    ALuint b, b2, s, q[5];
+    ALint st = 0, held = 0, ref = 0;
+    uint32_t i;
+
+    logf_("-- 8 static buffers (AL_EXT_STATIC_BUFFER): the application's memory played in place\n");
+    if (!raw) {
+        logf_("   malloc failed\n");
+        return;
+    }
+    fill_tone(tone, frames, 480.0f);
+    alXboxOutputCallback(scan_cb, NULL);
+
+    /* a: the same 1 s tone copied and static, looping 2 s each */
+    b = make_buffer(tone, frames, 48000);
+    s = make_source(b);
+    alSourcei(s, AL_LOOPING, AL_TRUE);
+    alSourcePlay(s);
+    run_for(200);
+    scan_start();
+    run_for(2000);
+    scan_log("copied 480 Hz ");
+    free_source(s, b);
+    alGenBuffers(1, &b2);
+    alBufferDataStatic(b2, AL_FORMAT_MONO16, tone, (ALsizei)(frames * 2u), 48000);
+    alXboxGetHardwareStatus(AL_XBOX_BUFFER_BYTES, &held);
+    alXboxGetHardwareStatus(AL_XBOX_STATIC_BUFFER_BYTES, &ref);
+    logf_("   static buffer: %lu pages (%lu breaks in physical contiguity), library holds %ld bytes, references %ld; "
+          "AL error 0x%x\n", (unsigned long)al_buffer_get(b2)->page_count, (unsigned long)page_breaks(b2), (long)held,
+          (long)ref, alGetError());
+    s = make_source(b2);
+    alSourcei(s, AL_LOOPING, AL_TRUE);
+    alSourcePlay(s);
+    run_for(200);
+    scan_start();
+    run_for(2000);
+    scan_log("static 480 Hz ");
+    alSourceStop(s);
+    alSourcei(s, AL_BUFFER, 0);
+
+    /* b: fresh memory written just before, no cache write-back: does the APU see it? */
+    raw2 = (uint8_t *)malloc(frames * 2u + 4096u);
+    if (raw2) {
+        int16_t *t2 = (int16_t *)(void *)(raw2 + 0x100);
+        al_buffer_debug_set_static_flush(false);
+        fill_tone(t2, frames, 960.0f);
+        alBufferDataStatic(b2, AL_FORMAT_MONO16, t2, (ALsizei)(frames * 2u), 48000);
+        al_buffer_debug_set_static_flush(true);
+        alSourcei(s, AL_BUFFER, (ALint)b2);
+        alSourcePlay(s);
+        run_for(200);
+        scan_start();
+        run_for(2000);
+        scan_log("no flush 960Hz");
+        alSourceStop(s);
+        alSourcei(s, AL_BUFFER, 0);
+    }
+
+    /* c: a word's middle: 0.25 s to 0.5 s of the tone, one-shot */
+    alBufferDataStatic(b2, AL_FORMAT_MONO16, tone + 12000, 24000, 48000);
+    alSourcei(s, AL_LOOPING, AL_FALSE);
+    alSourcei(s, AL_BUFFER, (ALint)b2);
+    scan_start();
+    alSourcePlay(s);
+    {
+        DWORD t0 = GetTickCount(), t_stop = 0;
+        while (GetTickCount() - t0 < 600u) {
+            alGetSourcei(s, AL_SOURCE_STATE, &st);
+            if (st != AL_PLAYING && t_stop == 0) t_stop = GetTickCount() - t0;
+            alXboxUpdateVoices();
+            Sleep(1);
+        }
+        scan_log("sub-range 0.25 s (12000 frames expected loud)");
+        logf_("   AL_STOPPED reported after %lu ms (250 ms of data)\n", (unsigned long)t_stop);
+    }
+    alSourcei(s, AL_BUFFER, 0);
+    alDeleteSources(1, &s);
+    alDeleteBuffers(1, &b2);
+
+    /* d: a sentence: five consecutive 0.2 s pieces of the tone queued on one source */
+    alGenBuffers(5, q);
+    for (i = 0; i < 5u; i++) {
+        alBufferDataStatic(q[i], AL_FORMAT_MONO16, tone + 9600u * i, 9600 * 2, 48000);
+    }
+    alGenSources(1, &s);
+    alSourcei(s, AL_SOURCE_RELATIVE, AL_TRUE);
+    alSourceQueueBuffers(s, 5, q);
+    scan_start();
+    alSourcePlay(s);
+    run_for(1300);
+    scan_log("5 queued pieces (48000 loud, 0 gaps expected)");
+    alGetSourcei(s, AL_SOURCE_STATE, &st);
+    logf_("   queue state after 1.3 s: %s\n", st == AL_STOPPED ? "AL_STOPPED" : "still playing");
+    alSourceStop(s);
+    alSourcei(s, AL_BUFFER, 0);
+    alDeleteSources(1, &s);
+    alDeleteBuffers(5, q);
+
+    alXboxOutputCallback(NULL, NULL);
+    free(raw);
+    free(raw2);
+    check_apu("static");
+}
+
 int main(void) {
     ALCdevice *dev;
     ALCcontext *ctx;
@@ -508,6 +685,7 @@ int main(void) {
     phase_budget();
     phase_churn();
     phase_stats();
+    phase_static();
     logf_("done\n");
     save_log();
     for (;;) {

@@ -38,6 +38,8 @@ extern "C" {
 #define AL_XBOX_SAMPLE_PAGES_TOTAL               0x7009   /* size of that space (2048 pages, 8 MiB) */
 #define AL_XBOX_HRTF_ACTIVE                      0x700A   /* mono 3D sources are playing through the HRTF stage */
 #define AL_XBOX_REVERB_ACTIVE                    0x700B   /* the GP reverb is running (AL_XBOX_reverb) */
+#define AL_XBOX_BUFFER_BYTES                     0x700C   /* library memory held for buffer data (copies, tails) */
+#define AL_XBOX_STATIC_BUFFER_BYTES              0x700D   /* application memory the static buffers play */
 
 /*
  * ============================================================================
@@ -52,6 +54,30 @@ extern "C" {
  * meant for headphones; on TV speakers volume panning may sound better.
  */
 #define AL_XBOX_HRTF                             0x7015
+
+/*
+ * ============================================================================
+ * AL_EXT_STATIC_BUFFER (same entry point as Apple's and OpenAL Soft's)
+ * ============================================================================
+ *
+ * alBufferDataStatic(buffer, format, data, size, freq): like alBufferData, but
+ * the buffer plays `data` where it is instead of copying it. The memory:
+ *   - is ordinary RAM (malloc, a sound pool, part of a larger file in memory);
+ *     no alignment or physical contiguity needed, any byte offset works, so a
+ *     buffer can point into the middle of a sound (a word's start and end);
+ *   - must stay allocated, unmoved and unchanged until the buffer is deleted or
+ *     given other data (AL_INVALID_OPERATION protects buffers in use as usual).
+ *     After changing the bytes, call alBufferDataStatic again.
+ * The library copies only the last partial 4 KiB page (it needs a silent tail
+ * behind the data) and writes the CPU cache back to RAM so the APU reads the
+ * application's latest data. alXboxGetHardwareStatus(AL_XBOX_BUFFER_BYTES)
+ * reports the library's own buffer memory, AL_XBOX_STATIC_BUFFER_BYTES the
+ * application memory referenced.
+ */
+AL_API void AL_APIENTRY alBufferDataStatic(ALuint buffer, ALenum format, const ALvoid *data, ALsizei size,
+                                           ALsizei freq);
+typedef void (AL_APIENTRY *LPALBUFFERDATASTATIC)(ALuint buffer, ALenum format, const ALvoid *data, ALsizei size,
+                                                 ALsizei freq);
 
 /*
  * ============================================================================

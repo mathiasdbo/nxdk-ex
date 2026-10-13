@@ -56,7 +56,12 @@ extern "C" {
 #define APU_VP_SILENT_TAIL_BYTES 256u
 
 typedef struct {
-    uint32_t phys;          /* physical address of the sample data (contiguous) */
+    uint32_t phys;          /* physical address of the sample data (contiguous); with `pages`: the offset
+                               of the first byte in pages[0] */
+    const uint32_t *pages;  /* NULL, or the physical address of each 4 KiB page of the data, in order
+                               (data that is not physically contiguous: alBufferDataStatic) */
+    uint32_t page_count;
+    uint32_t map_key;       /* with `pages`: non-zero, unique per page list (the mapping is cached by it) */
     uint32_t bytes;
     int channels;           /* 1 or 2 (interleaved) */
     int bits;               /* 8 (unsigned) or 16 (signed) */
