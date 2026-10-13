@@ -1,6 +1,7 @@
 #include "al_stream.h"
 #include "apu_mem.h"
 #include "apu_voice.h"
+#include "apu_vp.h"
 #include <string.h>
 
 #define RING_MASK      (AL_STREAM_RING_FRAMES - 1u)
@@ -14,8 +15,10 @@ struct al_stream {
     uint32_t ring_phys;
     bool has_format;
     ALbuffer ring_buf;           /* the ring, described as a buffer for the voice layer */
-    uint32_t frame_bytes;
-    uint8_t silence;             /* 0 for 16-bit, 0x80 for unsigned 8-bit */
+    int channels;
+    int bits;                    /* 8, 16, or 4 (Xbox ADPCM) */
+    uint32_t unit;               /* frames moved at a time: 1, or a 64-frame ADPCM block */
+    uint8_t silence;             /* 0 for 16-bit and ADPCM, 0x80 for unsigned 8-bit */
     ALbuffer *q[AL_STREAM_MAX_QUEUE];
     uint32_t q_frames[AL_STREAM_MAX_QUEUE];
     uint32_t q_n;                /* queued buffers */
@@ -61,6 +64,17 @@ static int32_t pos_diff(uint32_t a, uint32_t b) {
 
 static uint32_t ring_index(const al_stream_t *s, uint32_t pos) {
     return (pos - s->base) & RING_MASK;
+}
+
+/* Bytes of `frames` frames of the stream's format (ADPCM: whole blocks) */
+static uint32_t bytes_of(const al_stream_t *s, uint32_t frames) {
+    return apu_vp_frames_to_bytes(frames, s->channels, s->bits);
+}
+
+/* ADPCM moves whole blocks: positions where data is copied or silenced are
+ * multiples of the unit (base is one too, so ring indexes are) */
+static uint32_t unit_down(const al_stream_t *s, uint32_t frames) {
+    return frames - frames % s->unit;
 }
 
 void al_stream_shutdown(void) {
@@ -109,20 +123,18 @@ void al_stream_destroy(al_stream_t *s) {
     s->in_use = false;   /* the ring stays allocated for the next stream */
 }
 
-static uint32_t buffer_frame_bytes(const ALbuffer *b) {
-    return (uint32_t)(b->channels * (b->bits / 8));
-}
-
 static void set_format(al_stream_t *s, const ALbuffer *b) {
-    s->frame_bytes = buffer_frame_bytes(b);
-    s->silence = (b->bits == 8) ? 0x80u : 0u;
+    s->channels = b->channels;
+    s->bits = b->bits;
+    s->unit = (b->bits == 4) ? APU_VP_ADPCM_BLOCK_FRAMES : 1u;
+    s->silence = apu_vp_silence_byte(b->bits);
     memset(&s->ring_buf, 0, sizeof(s->ring_buf));
     s->ring_buf.in_use = true;
     s->ring_buf.format = b->format;
     s->ring_buf.frequency = b->frequency;
     s->ring_buf.channels = b->channels;
     s->ring_buf.bits = b->bits;
-    s->ring_buf.size = (ALsizei)(AL_STREAM_RING_FRAMES * s->frame_bytes);
+    s->ring_buf.size = (ALsizei)bytes_of(s, AL_STREAM_RING_FRAMES);
     s->ring_buf.data_virt = s->ring;
     s->ring_buf.data_phys = s->ring_phys;
     s->has_format = true;
@@ -144,9 +156,6 @@ ALenum al_stream_queue(al_stream_t *s, ALsizei n, const ALuint *ids) {
         if (b->size <= 0) {
             continue;   /* no data: queued and processed as it is reached */
         }
-        if (b->bits == 4) {
-            return AL_INVALID_VALUE;   /* the stream ring is PCM: queue ADPCM as one static buffer instead */
-        }
         if (!fmt) {
             fmt = b;
         } else if (b->channels != fmt->channels || b->bits != fmt->bits || b->frequency != fmt->frequency) {
@@ -166,7 +175,7 @@ ALenum al_stream_queue(al_stream_t *s, ALsizei n, const ALuint *ids) {
         ALbuffer *b = al_buffer_get(ids[i]);
         al_buffer_retain(b);
         s->q[s->q_n] = b;
-        s->q_frames[s->q_n] = (b->size > 0) ? (uint32_t)b->size / buffer_frame_bytes(b) : 0u;
+        s->q_frames[s->q_n] = (b->size > 0) ? apu_vp_bytes_to_frames((uint32_t)b->size, b->channels, b->bits) : 0u;
         s->total += s->q_frames[s->q_n];
         s->q_n++;
     }
@@ -269,6 +278,9 @@ void al_stream_seek(al_stream_t *s, uint32_t frames) {
     if (frames > s->total) {
         frames = s->total;
     }
+    if (s->has_format) {
+        frames = unit_down(s, frames);   /* ADPCM: the start of the block */
+    }
     s->read_pos = s->write_pos = s->silent_pos = frames;
     s->q_done = 0;
     for (i = 0; i < s->q_n; i++) {
@@ -293,10 +305,10 @@ static void ring_put(al_stream_t *s, uint32_t pos, const uint8_t *src, uint32_t 
             n = frames;
         }
         if (src) {
-            memcpy(s->ring + idx * s->frame_bytes, src, n * s->frame_bytes);
-            src += n * s->frame_bytes;
+            memcpy(s->ring + bytes_of(s, idx), src, bytes_of(s, n));
+            src += bytes_of(s, n);
         } else {
-            memset(s->ring + idx * s->frame_bytes, s->silence, n * s->frame_bytes);
+            memset(s->ring + bytes_of(s, idx), s->silence, bytes_of(s, n));
         }
         pos += n;
         frames -= n;
@@ -304,11 +316,18 @@ static void ring_put(al_stream_t *s, uint32_t pos, const uint8_t *src, uint32_t 
 }
 
 static void fill(al_stream_t *s, bool looping) {
-    uint32_t target = s->read_pos + AL_STREAM_LEAD_FRAMES;
-    uint32_t quiet_to = s->read_pos + AL_STREAM_RING_FRAMES - SILENCE_GUARD;
+    uint32_t target, quiet_to;
 
     if (!s->has_format || !s->ring) {
         return;
+    }
+    target = s->write_pos + unit_down(s, (uint32_t)pos_diff(s->read_pos + AL_STREAM_LEAD_FRAMES, s->write_pos) > 0
+                                             ? (uint32_t)pos_diff(s->read_pos + AL_STREAM_LEAD_FRAMES, s->write_pos)
+                                             : 0u);
+    quiet_to = s->silent_pos;
+    if (pos_diff(s->read_pos + AL_STREAM_RING_FRAMES - SILENCE_GUARD, s->silent_pos) > 0) {
+        quiet_to = s->silent_pos +
+                   unit_down(s, (uint32_t)pos_diff(s->read_pos + AL_STREAM_RING_FRAMES - SILENCE_GUARD, s->silent_pos));
     }
     /* Data, at most the lead ahead of the play position */
     while (pos_diff(target, s->write_pos) > 0) {
@@ -321,7 +340,10 @@ static void fill(al_stream_t *s, bool looping) {
         if (n > (uint32_t)pos_diff(target, s->write_pos)) {
             n = (uint32_t)pos_diff(target, s->write_pos);
         }
-        ring_put(s, s->write_pos, (const uint8_t *)s->q[e]->data_virt + off * s->frame_bytes, n);
+        if (n == 0) {
+            break;
+        }
+        ring_put(s, s->write_pos, (const uint8_t *)s->q[e]->data_virt + bytes_of(s, off), n);
         s->write_pos += n;
     }
     /* Silence behind it, up to the next lap of the play position */
@@ -335,11 +357,14 @@ static void fill(al_stream_t *s, bool looping) {
 }
 
 void al_stream_voice_start(al_stream_t *s, bool looping) {
+    if (s->has_format) {
+        s->read_pos = unit_down(s, s->read_pos);   /* ADPCM: restart at a block (replays < 64 samples) */
+    }
     s->base = s->read_pos;
     s->last_cbo = 0;
     s->write_pos = s->silent_pos = s->read_pos;
     if (s->has_format && s->ring) {
-        memset(s->ring, s->silence, AL_STREAM_RING_FRAMES * s->frame_bytes);
+        memset(s->ring, s->silence, bytes_of(s, AL_STREAM_RING_FRAMES));
     }
     fill(s, looping);
 }
@@ -369,7 +394,7 @@ bool al_stream_update(al_stream_t *s, uint32_t ring_pos, bool looping) {
         if (looping || pos_diff(s->write_pos, s->total) < 0) {
             s->starved++;
         }
-        s->write_pos = s->read_pos;
+        s->write_pos = s->read_pos + (s->unit - (s->read_pos - s->base) % s->unit) % s->unit;   /* next block */
     }
     fill(s, looping);
     if (looping) {
@@ -422,6 +447,7 @@ void al_stream_scrub_tick(void) {
                 continue;
             }
             pos = apu_voice_get_position(s->slot) & RING_MASK;
+            pos -= pos % s->unit;   /* ADPCM: only blocks wholly played */
             n = (pos - s->scrub) & RING_MASK;
             if (n >= AL_STREAM_RING_FRAMES / 2u) {
                 /* not plausible for a 4 ms pass: leave it, take the new position */
@@ -433,7 +459,7 @@ void al_stream_scrub_tick(void) {
                 if (run > n) {
                     run = n;
                 }
-                memset(s->ring + s->scrub * s->frame_bytes, s->silence, run * s->frame_bytes);
+                memset(s->ring + bytes_of(s, s->scrub), s->silence, bytes_of(s, run));
                 s->scrub = (s->scrub + run) & RING_MASK;
                 n -= run;
             }
