@@ -233,6 +233,48 @@ int main(void) {
     }
 
     /* [8] Clearing the queue releases the buffers */
+    /* [9] Xbox ADPCM: the ring holds 36-byte blocks of 64 frames; data, silence
+     * and scrubbing move whole blocks */
+    printf("[9] ADPCM queue\n");
+    {
+        enum { BLOCKS = 64, BB = 36 };          /* 4096 frames per buffer */
+        static uint8_t data[3][BLOCKS * BB];
+        ALuint ab[3], sa;
+        const uint8_t *r;
+        int b, k;
+        alGenBuffers(3, ab);
+        for (b = 0; b < 3; b++) {
+            for (k = 0; k < BLOCKS * BB; k++) data[b][k] = (uint8_t)(1 + b * BLOCKS + k / BB);   /* block id */
+            alBufferData(ab[b], AL_FORMAT_MONO_XBOX_ADPCM, data[b], BLOCKS * BB, 48000);
+        }
+        alGenSources(1, &sa);
+        alSourceQueueBuffers(sa, 3, ab);
+        assert(alGetError() == AL_NO_ERROR && geti(sa, AL_BUFFERS_QUEUED) == 3);
+        alSourcePlay(sa);
+        r = (const uint8_t *)al_source_play_buffer(al_source_get(sa))->data_virt;
+        assert(al_source_play_buffer(al_source_get(sa))->size == (ALsizei)(AL_STREAM_RING_FRAMES / 64 * BB));
+        /* the lead: 8192 frames = 128 blocks = buffers 0 and 1, then silent blocks */
+        for (k = 0; k < 128; k++) assert(r[k * BB] == (uint8_t)(1 + k) && r[k * BB + BB - 1] == (uint8_t)(1 + k));
+        assert(r[128 * BB] == 0 && r[200 * BB] == 0);
+        /* the voice at frame 3000 (inside block 46): the lead advances by whole blocks */
+        set_pos(sa, 3000);
+        for (k = 128; k < 128 + 46; k++) assert(r[k * BB] == (uint8_t)(1 + k));   /* buffer 2's first 46 blocks */
+        assert(r[(128 + 46) * BB] == 0);
+        /* the output thread silences only blocks wholly played: 0..45 */
+        al_stream_scrub_tick();
+        assert(r[0] == 0 && r[45 * BB + BB - 1] == 0);
+        assert(r[46 * BB] == (uint8_t)47);
+        /* a seek while playing lands on a block start */
+        alSourcei(sa, AL_SAMPLE_OFFSET, 4100);
+        assert(geti(sa, AL_SAMPLE_OFFSET) == 4096 && geti(sa, AL_BUFFERS_PROCESSED) == 1);
+        alSourceStop(sa);
+        alSourcei(sa, AL_BUFFER, 0);
+        alDeleteSources(1, &sa);
+        alDeleteBuffers(3, ab);
+        assert(alGetError() == AL_NO_ERROR);
+    }
+    printf("    -> blocks copied whole, the lead and scrub stop at block boundaries, seeks land on blocks [PASS]\n");
+
     printf("[8] AL_BUFFER 0 releases the queue\n");
     alSourcei(src, AL_BUFFER, 0);
     assert(geti(src, AL_BUFFERS_QUEUED) == 0);

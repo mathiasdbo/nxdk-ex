@@ -1540,6 +1540,8 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
     their rate throughout.
   * Through OpenAL: ADPCM mono (copied), stereo (static) and a one-shot (`AL_STOPPED` after 1002 ms for 1 s)
     played at the expected rates with no gaps; a 4800 Hz PCM tone at `AL_PITCH` 1/64 came out at 75 Hz.
+  * Streamed ADPCM (`openal_engine` phase 10): a 480 Hz tone in 192-block chunks, four queued and refilled for
+    3 s (12 refills), played at 480 Hz with no gap and the source never stopped.
 * Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
   from a spherical-head model (Brown-Duda head-shadow shelf per ear as a 31-tap int8 FIR, Woodworth ITD in
   s6.9; 32 azimuths x elevations -30/0/30/60; no measured data, no pinna cues). `apu_vp_init()` uploads it with

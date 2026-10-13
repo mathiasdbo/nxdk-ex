@@ -181,8 +181,9 @@ int main(void) {
                     ALuint q = b;
                     ALuint s2 = 0;
                     alGenSources(1, &s2);
-                    alSourceQueueBuffers(s2, 1, &q);              /* streams are PCM */
-                    assert(alGetError() == AL_INVALID_VALUE);
+                    alSourceQueueBuffers(s2, 1, &q);              /* streams take ADPCM too */
+                    assert(alGetError() == AL_NO_ERROR);
+                    alSourcei(s2, AL_BUFFER, 0);
                     alDeleteSources(1, &s2);
                 }
                 alSourcei(s, AL_BUFFER, 0);
