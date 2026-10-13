@@ -40,6 +40,7 @@ Hardware limits any design must respect:
 | CHAN_* priority and stealing, up to 128 engine channels | 120 hardware voices, the rest in the CPU mixer (F5) |
 | Music (MP3/OGG), VOX sentences, cinematic audio, voice chat | streamed source (F1) |
 | Pause and resume (menu), restart on level change | pause/stop of all sources (exists), buffer release and reuse (F6) |
+| Music in Xbox ADPCM (.xwav) | APU-decoded ADPCM buffers (`AL_XBOX_adpcm`, `ENGINE_INTEGRATION.md` 3.11) |
 | Room effects (`room_type`: reverb, echo, underwater) | GP reverb (F8): done, `AL_XBOX_reverb` (`ENGINE_INTEGRATION.md` 3.7) |
 | Sound continues during loading screens | output pump independent of the frame loop (F4) |
 

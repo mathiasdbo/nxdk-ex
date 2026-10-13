@@ -144,6 +144,9 @@ ALenum al_stream_queue(al_stream_t *s, ALsizei n, const ALuint *ids) {
         if (b->size <= 0) {
             continue;   /* no data: queued and processed as it is reached */
         }
+        if (b->bits == 4) {
+            return AL_INVALID_VALUE;   /* the stream ring is PCM: queue ADPCM as one static buffer instead */
+        }
         if (!fmt) {
             fmt = b;
         } else if (b->channels != fmt->channels || b->bits != fmt->bits || b->frequency != fmt->frequency) {

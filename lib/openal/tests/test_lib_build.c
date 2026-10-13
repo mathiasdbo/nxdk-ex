@@ -159,6 +159,36 @@ int main(void) {
                 assert(alGetError() == AL_NO_ERROR);
             } else if (strcmp(name, "AL_EXT_MCFORMATS") == 0) {
                 /* checked below: formats must be accepted if (and only if) advertised */
+            } else if (strcmp(name, "AL_XBOX_adpcm") == 0) {
+                static unsigned char blocks[3 * 72];          /* three stereo blocks of silence */
+                ALuint b = 0, s = 0;
+                ALint v = 0;
+                alGenBuffers(1, &b);
+                alBufferData(b, AL_FORMAT_STEREO_XBOX_ADPCM, blocks, (ALsizei)sizeof(blocks), 44100);
+                alGetBufferi(b, AL_BITS, &v);
+                assert(v == 4 && alGetError() == AL_NO_ERROR);
+                alGetBufferi(b, AL_CHANNELS, &v);
+                assert(v == 2);
+                alBufferData(b, AL_FORMAT_MONO_XBOX_ADPCM, blocks, 50, 44100);   /* not whole blocks */
+                assert(alGetError() == AL_INVALID_VALUE);
+                alBufferData(b, AL_FORMAT_MONO_XBOX_ADPCM, blocks, 72, 44100);   /* two mono blocks: 128 frames */
+                alGenSources(1, &s);
+                alSourcei(s, AL_BUFFER, (ALint)b);
+                alSourcei(s, AL_SAMPLE_OFFSET, 100);
+                alGetSourcei(s, AL_BYTE_OFFSET, &v);
+                assert(v == 36 && alGetError() == AL_NO_ERROR);   /* frame 100 is in the second block */
+                {
+                    ALuint q = b;
+                    ALuint s2 = 0;
+                    alGenSources(1, &s2);
+                    alSourceQueueBuffers(s2, 1, &q);              /* streams are PCM */
+                    assert(alGetError() == AL_INVALID_VALUE);
+                    alDeleteSources(1, &s2);
+                }
+                alSourcei(s, AL_BUFFER, 0);
+                alDeleteSources(1, &s);
+                alDeleteBuffers(1, &b);
+                assert(alGetError() == AL_NO_ERROR);
             } else if (strcmp(name, "AL_EXT_STATIC_BUFFER") == 0) {
                 LPALBUFFERDATASTATIC set_static =
                     (LPALBUFFERDATASTATIC)ptr_to_fn(alGetProcAddress("alBufferDataStatic"));

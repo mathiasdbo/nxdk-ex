@@ -57,6 +57,26 @@ extern "C" {
 
 /*
  * ============================================================================
+ * AL_XBOX_adpcm (Xbox ADPCM buffers, decoded by the APU)
+ * ============================================================================
+ *
+ * alBufferData / alBufferDataStatic with these formats take Xbox ADPCM: IMA
+ * ADPCM in 36-byte blocks per channel, each holding 64 samples (a 4-byte header
+ * with the first sample and step index, then 32 bytes of 4-bit codes; the 64th
+ * code is not played, the next block's header carries that sample). Stereo
+ * interleaves the two headers, then 4-byte chunks left, right, left, ...
+ * (the layout of .xwav / WAVE_FORMAT_XBOX_ADPCM, 0x0069). The size must be a
+ * whole number of blocks. The APU decodes it at no CPU cost.
+ *   - frames: 64 per block; AL_SAMPLE_OFFSET and loop points in frames;
+ *     AL_BYTE_OFFSET reads and sets the start of a block; AL_BITS reports 4
+ *   - static buffers work (a whole song in place); streaming queues do not
+ *     take ADPCM buffers (AL_INVALID_VALUE)
+ */
+#define AL_FORMAT_MONO_XBOX_ADPCM                0x7030
+#define AL_FORMAT_STEREO_XBOX_ADPCM              0x7031
+
+/*
+ * ============================================================================
  * AL_EXT_STATIC_BUFFER (same entry point as Apple's and OpenAL Soft's)
  * ============================================================================
  *
