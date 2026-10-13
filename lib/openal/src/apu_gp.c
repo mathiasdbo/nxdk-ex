@@ -307,6 +307,34 @@ uint32_t apu_gp_fifo_available(uintptr_t bar0) {
     return ((fifo_cur(bar0) + APU_GP_FIFO_BYTES - s_read) % APU_GP_FIFO_BYTES) / 4u;
 }
 
+static uint32_t s_fifo_read_mode;   /* apu_gp_debug_set_fifo_read() */
+
+void apu_gp_debug_set_fifo_read(uint32_t mode) {
+    s_fifo_read_mode = mode;
+}
+
+/* Copy n stereo frames out of the ring (no wrap inside) */
+static void copy_frames(uint32_t *dst, const volatile uint32_t *src, uint32_t n) {
+    uint32_t i = 0;
+    if (s_fifo_read_mode == 1u) {
+        /* one 16-bit read per sample (the old reader, for comparison) */
+        const volatile uint16_t *s16 = (const volatile uint16_t *)src;
+        uint16_t *d16 = (uint16_t *)dst;
+        for (i = 0; i < 2u * n; i++) d16[i] = s16[i];
+        return;
+    }
+#if defined(OPENAL_TARGET_XBOX)
+    if (s_fifo_read_mode == 2u) {
+        /* 8-byte MMX reads: two frames per bus transaction */
+        for (; i + 2u <= n; i += 2u) {
+            __asm__ __volatile__("movq (%0), %%mm0\n\tmovq %%mm0, (%1)" : : "r"(src + i), "r"(dst + i) : "mm0", "memory");
+        }
+        __asm__ __volatile__("emms");
+    }
+#endif
+    for (; i < n; i++) dst[i] = src[i];
+}
+
 uint32_t apu_gp_fifo_read(uintptr_t bar0, int16_t *out, uint32_t frames) {
     uint32_t avail, n, i;
 
@@ -322,11 +350,14 @@ uint32_t apu_gp_fifo_read(uintptr_t bar0, int16_t *out, uint32_t frames) {
         avail = apu_gp_fifo_available(bar0);
     }
     n = (frames < avail) ? frames : avail;
-    for (i = 0; i < n; i++) {
-        const int16_t *src = (const int16_t *)(s_fifo + s_read);
-        out[2u * i] = src[0];
-        out[2u * i + 1u] = src[1];
-        s_read = (s_read + 4u) % APU_GP_FIFO_BYTES;
+    /* The ring is uncached memory, and on the console each read of it is a bus
+     * transaction: read whole frames (32 bits), not single samples */
+    for (i = 0; i < n;) {
+        uint32_t idx = s_read / 4u, seg = FIFO_FRAMES - idx;
+        if (seg > n - i) seg = n - i;
+        copy_frames((uint32_t *)(void *)(out + 2u * i), (const volatile uint32_t *)(const void *)s_fifo + idx, seg);
+        i += seg;
+        s_read = (s_read + 4u * seg) % APU_GP_FIFO_BYTES;
     }
     s_frames_read += n;
     return n;
