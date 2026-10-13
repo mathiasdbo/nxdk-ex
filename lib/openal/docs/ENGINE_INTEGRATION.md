@@ -214,6 +214,8 @@ alBufferDataStatic(buf, AL_FORMAT_MONO8, sfx->data, sfx->size, sfx->rate);   /* 
 
 - **The memory:** ordinary RAM (malloc, a sound pool, a loaded file). No alignment and no physical
   contiguity are needed; the APU maps it page by page.
+- **Formats:** every format `alBufferData` takes. That includes 8-bit unsigned PCM (Half-Life's effects; the
+  silent tail is written as 0x80) and Xbox ADPCM (3.11).
 - **Keep it valid:** it must stay allocated, unmoved and unchanged while the buffer has this data. Delete the
   buffer, or give it other data, before freeing or reusing the memory; a buffer a source uses can't be changed
   (`AL_INVALID_OPERATION`), as in OpenAL. After writing new bytes into the same memory, call
@@ -257,11 +259,13 @@ alBufferDataStatic(buf, AL_FORMAT_STEREO_XBOX_ADPCM, xwav_data, xwav_bytes, 4410
   - The size must be whole blocks (`AL_INVALID_VALUE` otherwise).
 - **Positions:** frames (64 per block) for `AL_SAMPLE_OFFSET`, `AL_SEC_OFFSET` and loop points.
   `AL_BYTE_OFFSET` reads and sets a block's start. `AL_BITS` reports 4.
-- **Streaming:** queues don't take ADPCM buffers (`AL_INVALID_VALUE`), because the stream ring holds PCM. Play a
-  song as one buffer. A static one costs no memory beyond the file; it can be up to the 8 MiB the APU maps at
-  once, about 3 minutes of 44.1 kHz stereo.
+- **Streaming:** queue ADPCM chunks on a source as with PCM (3.1); every buffer in a queue has the same format and
+  rate, each a whole number of blocks. Seeks and restarts land on a block start. This plays songs of any length
+  from disk with no CPU decoding. A whole song can also be one buffer (static: no memory beyond the file), up to
+  the 8 MiB the APU maps at once, about 3 minutes of 44.1 kHz stereo.
 - **Measured on a console:** 480 Hz and 960 Hz tones played at the exact rate, mono, stereo, copied and static,
-  and a one-shot reported `AL_STOPPED` 2 ms after its last sample.
+  and a one-shot reported `AL_STOPPED` 2 ms after its last sample. Streamed in 256 ms chunks, four queued and
+  refilled for 3 s, the tone came out at 480 Hz without a gap.
 
 ## 4. Things to know
 

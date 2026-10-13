@@ -69,8 +69,8 @@ extern "C" {
  * whole number of blocks. The APU decodes it at no CPU cost.
  *   - frames: 64 per block; AL_SAMPLE_OFFSET and loop points in frames;
  *     AL_BYTE_OFFSET reads and sets the start of a block; AL_BITS reports 4
- *   - static buffers work (a whole song in place); streaming queues do not
- *     take ADPCM buffers (AL_INVALID_VALUE)
+ *   - static buffers and streaming queues work; a queue moves whole blocks
+ *     (seeks and restarts land on a block start)
  */
 #define AL_FORMAT_MONO_XBOX_ADPCM                0x7030
 #define AL_FORMAT_STEREO_XBOX_ADPCM              0x7031
