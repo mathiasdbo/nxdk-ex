@@ -94,7 +94,8 @@ static const struct {
     { "alXboxReverbf",           (ALC_PROC)alXboxReverbf },
     { "alXboxGetReverbf",        (ALC_PROC)alXboxGetReverbf },
     { "alXboxGetStats",          (ALC_PROC)alXboxGetStats },
-    { "alXboxOutputCallback",    (ALC_PROC)alXboxOutputCallback }
+    { "alXboxOutputCallback",    (ALC_PROC)alXboxOutputCallback },
+    { "alBufferDataStatic",      (ALC_PROC)alBufferDataStatic }
 };
 
 static void *alc_lookup_proc(const char *name) {
@@ -703,7 +704,8 @@ AL_API const ALchar * AL_APIENTRY alGetString(ALenum param) {
                        ? "MCPX APU (MMIO backend)"
                        : "MCPX APU (null backend)";
         case AL_EXTENSIONS:
-            return "AL_EXT_OFFSET AL_SOFT_loop_points AL_XBOX_hardware_status AL_XBOX_hrtf AL_XBOX_output_callback "
+            return "AL_EXT_OFFSET AL_EXT_STATIC_BUFFER AL_SOFT_loop_points AL_XBOX_hardware_status AL_XBOX_hrtf "
+                   "AL_XBOX_output_callback "
                    "AL_XBOX_reverb AL_XBOX_source_control AL_XBOX_stats AL_XBOX_update";
         default:
             alSetError(AL_INVALID_ENUM);
@@ -721,6 +723,7 @@ AL_API ALboolean AL_APIENTRY alIsExtensionPresent(const ALchar *extname) {
         strcmp(extname, "AL_XBOX_hardware_status") == 0 ||
         strcmp(extname, "AL_XBOX_hrtf") == 0 ||
         strcmp(extname, "AL_XBOX_reverb") == 0 ||
+        strcmp(extname, "AL_EXT_STATIC_BUFFER") == 0 ||
         strcmp(extname, "AL_XBOX_stats") == 0 ||
         strcmp(extname, "AL_XBOX_output_callback") == 0 ||
         strcmp(extname, "AL_XBOX_source_control") == 0 ||
@@ -822,6 +825,14 @@ AL_API void AL_APIENTRY alXboxGetHardwareStatus(ALenum param, ALint *value) {
 
         case AL_XBOX_REVERB_ACTIVE:
             *value = (s_active_device_count > 0 && al_reverb_active()) ? 1 : 0;
+            break;
+
+        case AL_XBOX_BUFFER_BYTES:
+            *value = (ALint)al_buffer_held_bytes();
+            break;
+
+        case AL_XBOX_STATIC_BUFFER_BYTES:
+            *value = (ALint)al_buffer_static_bytes();
             break;
 
         default:

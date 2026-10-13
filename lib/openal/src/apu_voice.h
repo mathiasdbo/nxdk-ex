@@ -279,6 +279,16 @@ uint32_t apu_voice_debug_stop_count(void);
 void apu_voice_bind_buffer(uint32_t index, uint32_t phys, uint32_t bytes, int channels, int bits);
 
 /**
+ * Like apu_voice_bind_buffer() for data that is not physically contiguous
+ * (alBufferDataStatic): `pages` holds the physical address of each 4 KiB page
+ * of the data and its silent tail, `offset` the first byte's offset in pages[0],
+ * `map_key` a non-zero key unique to this page list. The list must stay valid
+ * while the voice plays.
+ */
+void apu_voice_bind_pages(uint32_t index, uint32_t offset, const uint32_t *pages, uint32_t page_count,
+                          uint32_t map_key, uint32_t bytes, int channels, int bits);
+
+/**
  * After apu_voice_bind_buffer(): the loop region of a looping voice
  * ([loop_start, loop_end) in frames, loop_end 0 = the whole buffer) and the
  * frame the next trigger starts at (hardware backend; the software model's

@@ -24,7 +24,10 @@ static uint32_t s_stop_calls = 0;
 static bool s_vp_hw = false;
 
 typedef struct {
-    uint32_t phys;
+    uint32_t phys;          /* contiguous data; with pages: the first byte's offset in pages[0] */
+    const uint32_t *pages;  /* static buffers: physical page list (apu_voice_bind_pages) */
+    uint32_t page_count;
+    uint32_t map_key;
     uint32_t bytes;
     int channels;
     int bits;
@@ -323,6 +326,9 @@ int apu_voice_trigger(uintptr_t apu_base, uint32_t index)
 
         memset(&p, 0, sizeof(p));
         p.phys = vb->phys;
+        p.pages = vb->pages;
+        p.page_count = vb->page_count;
+        p.map_key = vb->map_key;
         p.bytes = vb->bytes;
         p.channels = vb->channels;
         p.bits = vb->bits;
@@ -477,12 +483,27 @@ void apu_voice_bind_buffer(uint32_t index, uint32_t phys, uint32_t bytes, int ch
         return;
     }
     s_voice_buffer[index].phys = phys;
+    s_voice_buffer[index].pages = NULL;
+    s_voice_buffer[index].page_count = 0;
+    s_voice_buffer[index].map_key = 0;
     s_voice_buffer[index].bytes = bytes;
     s_voice_buffer[index].channels = channels;
     s_voice_buffer[index].bits = bits;
     s_voice_buffer[index].loop_start = 0;
     s_voice_buffer[index].loop_end = 0;
     s_voice_buffer[index].start_frame = 0;
+}
+
+void apu_voice_bind_pages(uint32_t index, uint32_t offset, const uint32_t *pages, uint32_t page_count,
+                          uint32_t map_key, uint32_t bytes, int channels, int bits)
+{
+    if (index >= APU_VOICE_MAX_SLOTS) {
+        return;
+    }
+    apu_voice_bind_buffer(index, offset, bytes, channels, bits);
+    s_voice_buffer[index].pages = pages;
+    s_voice_buffer[index].page_count = page_count;
+    s_voice_buffer[index].map_key = map_key;
 }
 
 void apu_voice_bind_loop(uint32_t index, uint32_t loop_start, uint32_t loop_end, uint32_t start_frame)

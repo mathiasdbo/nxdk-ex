@@ -494,7 +494,12 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
     }
 
     apu_voice_set_direction(hw_voice_idx, calc.local_pos);
-    apu_voice_bind_buffer(hw_voice_idx, pb->data_phys, (uint32_t)pb->size, pb->channels, pb->bits);
+    if (pb->is_static) {
+        apu_voice_bind_pages(hw_voice_idx, pb->page_offset, pb->pages, pb->page_count, pb->map_key,
+                             (uint32_t)pb->size, pb->channels, pb->bits);
+    } else {
+        apu_voice_bind_buffer(hw_voice_idx, pb->data_phys, (uint32_t)pb->size, pb->channels, pb->bits);
+    }
     if (!src->stream) {
         /* A static buffer's loop points, and where to start: a pending offset
          * (AL_*_OFFSET, or the position a preempted voice had reached) */
