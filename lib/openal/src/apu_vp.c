@@ -17,7 +17,8 @@
 #define LIST_NONE           0xFFu   /* s_list[]: not on a list */
 
 typedef struct {
-    uint32_t page_phys;     /* first physical page mapped */
+    uint32_t id;            /* page_phys for a contiguous mapping, (key << 1) | 1 for a page list */
+    uint32_t page_phys;     /* first physical page mapped (contiguous mappings) */
     uint32_t pages;
     uint32_t entry;         /* first SGE index */
 } apu_vp_map_t;
@@ -38,7 +39,7 @@ static uint32_t s_soft_end[APU_VP_MAX_HANDLES];  /* data frames of a one-shot lo
 static uint32_t s_retired_at[APU_VP_MAX_HANDLES]; /* XGSCNT when the handle left its list */
 static uint8_t s_retired[APU_VP_MAX_HANDLES];     /* has left a list since init */
 static uint32_t s_alloc_next;                      /* round-robin start for apu_vp_alloc_handle() */
-static uint32_t s_handle_page[APU_VP_MAX_HANDLES]; /* page_phys of the mapping the handle's buffer uses */
+static uint32_t s_handle_page[APU_VP_MAX_HANDLES]; /* id of the mapping the handle's buffer uses */
 static uint32_t s_frames[APU_VP_MAX_HANDLES];      /* data frames of the buffer the handle plays */
 static uint32_t s_tail[APU_VP_MAX_HANDLES];        /* silent-tail frames after them (0: none) */
 static uint32_t s_pending_ebo[APU_VP_MAX_HANDLES];  /* loop end - 1 to set once the voice is before it, 0 = none */
@@ -172,7 +173,7 @@ static void reclaim_maps(uintptr_t bar0) {
         apu_vp_map_t m = s_maps[i];
         bool used = false;
         for (h = 0; h < APU_VP_MAX_HANDLES && !used; h++) {
-            used = s_handle_page[h] == m.page_phys && handle_live(h, now);
+            used = s_handle_page[h] == m.id && handle_live(h, now);
         }
         if (used) {
             uint32_t e;
@@ -208,7 +209,7 @@ static int map_buffer(uintptr_t bar0, uint32_t phys, uint32_t bytes, uint32_t *b
 
     for (i = 0; i < s_map_count; i++) {
         const apu_vp_map_t *m = &s_maps[i];
-        if (page0 >= m->page_phys && page0 + pages * 4096u <= m->page_phys + m->pages * 4096u) {
+        if (m->id == m->page_phys && page0 >= m->page_phys && page0 + pages * 4096u <= m->page_phys + m->pages * 4096u) {
             *ba = (m->entry << 12) + (phys - m->page_phys);
             *map_page = m->page_phys;
             return 0;
@@ -227,12 +228,49 @@ static int map_buffer(uintptr_t bar0, uint32_t phys, uint32_t bytes, uint32_t *b
         s_sge[2u * (start + i) + 1u] = 0;
         s_sge_used[(start + i) >> 5] |= 1u << ((start + i) & 31u);
     }
+    s_maps[s_map_count].id = page0;
     s_maps[s_map_count].page_phys = page0;
     s_maps[s_map_count].pages = pages;
     s_maps[s_map_count].entry = start;
     s_map_count++;
     *ba = (start << 12) + (phys & 0xFFFu);
     *map_page = page0;
+    return 0;
+}
+
+/* Map a list of pages (one SGE entry each, in order); `offset` is the first
+ * byte's offset in pages[0]. Cached by key like the contiguous mappings. */
+static int map_pages(uintptr_t bar0, const uint32_t *list, uint32_t count, uint32_t key, uint32_t offset,
+                     uint32_t *ba, uint32_t *map_id) {
+    uint32_t id = (key << 1) | 1u, i, start;
+
+    for (i = 0; i < s_map_count; i++) {
+        if (s_maps[i].id == id && s_maps[i].pages == count) {
+            *ba = (s_maps[i].entry << 12) + (offset & 0xFFFu);
+            *map_id = id;
+            return 0;
+        }
+    }
+    start = (s_map_count < APU_VP_MAX_MAPS) ? find_free_run(count) : APU_VP_SGE_ENTRIES;
+    if (start >= APU_VP_SGE_ENTRIES) {
+        reclaim_maps(bar0);
+        start = (s_map_count < APU_VP_MAX_MAPS) ? find_free_run(count) : APU_VP_SGE_ENTRIES;
+        if (start >= APU_VP_SGE_ENTRIES) {
+            return -1;
+        }
+    }
+    for (i = 0; i < count; i++) {
+        s_sge[2u * (start + i)] = list[i] & ~0xFFFu;
+        s_sge[2u * (start + i) + 1u] = 0;
+        s_sge_used[(start + i) >> 5] |= 1u << ((start + i) & 31u);
+    }
+    s_maps[s_map_count].id = id;
+    s_maps[s_map_count].page_phys = 0;
+    s_maps[s_map_count].pages = count;
+    s_maps[s_map_count].entry = start;
+    s_map_count++;
+    *ba = (start << 12) + (offset & 0xFFFu);
+    *map_id = id;
     return 0;
 }
 
@@ -784,7 +822,14 @@ int apu_vp_voice_start(uintptr_t bar0, uint32_t h, const apu_vp_voice_params_t *
     /* Real console: a one-shot must not reach its end (that stops every
      * frame), so it loops over the silent tail and the driver ends it */
     soft_end = !s_fe_ok && !p->loop && tail_frames > 0;
-    if (map_buffer(bar0, p->phys, p->bytes + (soft_end ? tail_frames * frame_bytes : 0u), &ba, &map_page) != 0) {
+    if (p->pages) {
+        /* The list covers the data and its silent tail (al_buffer.c) */
+        if (p->page_count == 0u || p->map_key == 0u ||
+            (p->phys & 0xFFFu) + p->bytes + (soft_end ? tail_frames * frame_bytes : 0u) > p->page_count * 4096u ||
+            map_pages(bar0, p->pages, p->page_count, p->map_key, p->phys, &ba, &map_page) != 0) {
+            return -3;
+        }
+    } else if (map_buffer(bar0, p->phys, p->bytes + (soft_end ? tail_frames * frame_bytes : 0u), &ba, &map_page) != 0) {
         return -3;
     }
     s_handle_page[h] = map_page;

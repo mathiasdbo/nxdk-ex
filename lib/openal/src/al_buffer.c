@@ -1,6 +1,8 @@
 #include "al_buffer.h"
 #include <AL/alext.h>
+#include "apu_platform.h"
 #include "apu_vp.h"
+#include <stdlib.h>
 #include <string.h>
 
 /*
@@ -11,6 +13,52 @@
 static ALbuffer s_buffers[AL_MAX_BUFFERS];
 static bool s_subsystem_initialized = false;
 static ALenum s_last_error = AL_NO_ERROR;
+static uint32_t s_held_bytes;      /* library memory held for buffer data */
+static uint32_t s_static_bytes;    /* application memory static buffers point at */
+static uint32_t s_next_map_key = 1;
+static bool s_static_flush = true;
+
+/* Free whatever data a buffer holds (its own copy, or a static buffer's page
+ * list and tail copy) and its PRD table */
+static void release_data(ALbuffer *buf) {
+    if (buf->is_static) {
+        free(buf->pages);
+        if (buf->tail_virt) {
+            apu_mem_free_phys(buf->tail_virt);
+        }
+        s_static_bytes -= (uint32_t)buf->size;
+    } else if (buf->data_virt) {
+        apu_mem_free_phys(buf->data_virt);
+    }
+    if (buf->prd_table_virt) {
+        apu_mem_free_phys(buf->prd_table_virt);
+    }
+    s_held_bytes -= buf->held_bytes;
+    buf->data_virt = NULL;
+    buf->data_phys = 0;
+    buf->prd_table_virt = NULL;
+    buf->prd_table_phys = 0;
+    buf->prd_count = 0;
+    buf->is_static = false;
+    buf->pages = NULL;
+    buf->page_count = 0;
+    buf->page_offset = 0;
+    buf->tail_virt = NULL;
+    buf->map_key = 0;
+    buf->held_bytes = 0;
+}
+
+uint32_t al_buffer_held_bytes(void) {
+    return s_held_bytes;
+}
+
+uint32_t al_buffer_static_bytes(void) {
+    return s_static_bytes;
+}
+
+void al_buffer_debug_set_static_flush(bool on) {
+    s_static_flush = on;
+}
 
 /*
  * ============================================================================
@@ -53,7 +101,16 @@ void al_buffer_init_subsystem(void) {
         s_buffers[i].prd_table_phys = 0;
         s_buffers[i].prd_count = 0;
         s_buffers[i].ref_count = 0;
+        s_buffers[i].is_static = false;
+        s_buffers[i].pages = NULL;
+        s_buffers[i].page_count = 0;
+        s_buffers[i].page_offset = 0;
+        s_buffers[i].tail_virt = NULL;
+        s_buffers[i].map_key = 0;
+        s_buffers[i].held_bytes = 0;
     }
+    s_held_bytes = 0;
+    s_static_bytes = 0;
     s_subsystem_initialized = true;
     s_last_error = AL_NO_ERROR;
 }
@@ -61,16 +118,7 @@ void al_buffer_init_subsystem(void) {
 void al_buffer_cleanup_subsystem(void) {
     for (size_t i = 0; i < AL_MAX_BUFFERS; i++) {
         if (s_buffers[i].in_use) {
-            if (s_buffers[i].data_virt) {
-                apu_mem_free_phys(s_buffers[i].data_virt);
-                s_buffers[i].data_virt = NULL;
-                s_buffers[i].data_phys = 0;
-            }
-            if (s_buffers[i].prd_table_virt) {
-                apu_mem_free_phys(s_buffers[i].prd_table_virt);
-                s_buffers[i].prd_table_virt = NULL;
-                s_buffers[i].prd_table_phys = 0;
-            }
+            release_data(&s_buffers[i]);
             s_buffers[i].in_use = false;
             s_buffers[i].ref_count = 0;
             s_buffers[i].loop_start = 0;
@@ -208,16 +256,7 @@ AL_API void AL_APIENTRY alDeleteBuffers(ALsizei n, const ALuint *buffers) {
         }
         ALbuffer *buf = &s_buffers[id - 1];
         if (buf->in_use) {
-            if (buf->data_virt) {
-                apu_mem_free_phys(buf->data_virt);
-                buf->data_virt = NULL;
-                buf->data_phys = 0;
-            }
-            if (buf->prd_table_virt) {
-                apu_mem_free_phys(buf->prd_table_virt);
-                buf->prd_table_virt = NULL;
-                buf->prd_table_phys = 0;
-            }
+            release_data(buf);
             buf->in_use = false;
             buf->format = 0;
             buf->frequency = 0;
@@ -323,13 +362,10 @@ AL_API void AL_APIENTRY alBufferData(ALuint buffer, ALenum format, const ALvoid 
     memset((uint8_t *)data_virt + size, (bits == 8) ? 0x80 : 0, APU_VP_SILENT_TAIL_BYTES);   /* U8 silence is 0x80 */
 
     /* Free previously attached PCM data and PRD table if re-specifying buffer data */
-    if (buf->data_virt) {
-        apu_mem_free_phys(buf->data_virt);
-    }
-    if (buf->prd_table_virt) {
-        apu_mem_free_phys(buf->prd_table_virt);
-    }
+    release_data(buf);
 
+    buf->held_bytes = (uint32_t)((size_t)size + APU_VP_SILENT_TAIL_BYTES + prd_table_bytes);
+    s_held_bytes += buf->held_bytes;
     buf->data_virt = data_virt;
     buf->data_phys = data_phys;
     buf->prd_table_virt = prd_table_virt;
@@ -341,6 +377,119 @@ AL_API void AL_APIENTRY alBufferData(ALuint buffer, ALenum format, const ALvoid 
     buf->channels = channels;
     buf->bits = bits;
     buf->loop_start = 0;                                   /* AL_SOFT_loop_points: the whole buffer */
+    buf->loop_end = size / frame_size;
+}
+
+/* Write the CPU cache back to memory: the APU reads RAM directly */
+static void flush_cpu_cache(void) {
+#if defined(OPENAL_TARGET_XBOX)
+    __asm__ __volatile__("wbinvd" ::: "memory");
+#endif
+}
+
+/*
+ * AL_EXT_STATIC_BUFFER: the buffer plays the application's memory in place.
+ * The APU maps it page by page (each 4 KiB page's physical address), so it need
+ * not be physically contiguous. Only the last partial page is copied, into the
+ * library's own page(s), followed by the silent tail a console one-shot needs.
+ */
+AL_API void AL_APIENTRY alBufferDataStatic(ALuint buffer, ALenum format, const ALvoid *data, ALsizei size,
+                                           ALsizei freq) {
+    ALbuffer *buf;
+    ALint channels, bits;
+    ALsizei frame_size;
+    uintptr_t start, end, last_page;
+    uint32_t engine_pages, tail_bytes, tail_pages, count, i, tail_phys = 0;
+    uint32_t *pages;
+    uint8_t *tail;
+
+    ensure_subsystem_initialized();
+    buf = al_buffer_get(buffer);
+    if (!buf) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+    if (buf->ref_count > 0) {
+        alSetError(AL_INVALID_OPERATION);
+        return;
+    }
+    switch (format) {
+        case AL_FORMAT_MONO8:    channels = 1; bits = 8;  frame_size = 1; break;
+        case AL_FORMAT_MONO16:   channels = 1; bits = 16; frame_size = 2; break;
+        case AL_FORMAT_STEREO8:  channels = 2; bits = 8;  frame_size = 2; break;
+        case AL_FORMAT_STEREO16: channels = 2; bits = 16; frame_size = 4; break;
+        default:
+            alSetError(AL_INVALID_ENUM);
+            return;
+    }
+    if (size <= 0 || freq <= 0 || (size % frame_size) != 0 || data == NULL) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+
+    /* The application's whole pages; the page holding the end (partial, or a
+     * fresh one when the data ends on a page boundary) becomes the library's */
+    start = (uintptr_t)data;
+    end = start + (uintptr_t)size;
+    last_page = end & ~(uintptr_t)0xFFF;
+    engine_pages = (uint32_t)((last_page - (start & ~(uintptr_t)0xFFF)) >> 12);
+    tail_bytes = (uint32_t)(end & 0xFFFu) + APU_VP_SILENT_TAIL_BYTES;
+    tail_pages = (tail_bytes + 4095u) / 4096u;
+    count = engine_pages + tail_pages;
+
+    pages = (uint32_t *)malloc(count * sizeof(uint32_t));
+    tail = (uint8_t *)apu_mem_alloc_phys(tail_pages * 4096u, 4096, &tail_phys);
+    if (!pages || !tail) {
+        free(pages);
+        if (tail) apu_mem_free_phys(tail);
+        alSetError(AL_OUT_OF_MEMORY);
+        return;
+    }
+    for (i = 0; i < engine_pages; i++) {
+        uint32_t phys = apu_mem_get_physical_address((const void *)((start & ~(uintptr_t)0xFFF) + 4096u * i));
+        if (phys == 0) {
+            free(pages);
+            apu_mem_free_phys(tail);
+            alSetError(AL_INVALID_VALUE);   /* not RAM the APU can read */
+            return;
+        }
+        pages[i] = phys & ~0xFFFu;
+    }
+    for (i = 0; i < tail_pages; i++) {
+        pages[engine_pages + i] = tail_phys + 4096u * i;
+    }
+    /* The tail page holds the data's last bytes at their page offset, then silence */
+    memset(tail, 0, tail_pages * 4096u);
+    {
+        uintptr_t from = (start > last_page) ? start : last_page;
+        memcpy(tail + (from & 0xFFFu), (const void *)from, (size_t)(end - from));
+    }
+    memset(tail + (end & 0xFFFu), (bits == 8) ? 0x80 : 0, APU_VP_SILENT_TAIL_BYTES);   /* U8 silence is 0x80 */
+    if (s_static_flush) {
+        flush_cpu_cache();   /* the application's last writes reach RAM before the APU reads it */
+    }
+
+    release_data(buf);
+    buf->is_static = true;
+    buf->data_virt = (void *)(uintptr_t)data;
+    buf->data_phys = 0;
+    buf->pages = pages;
+    buf->page_count = count;
+    buf->page_offset = (uint32_t)(start & 0xFFFu);
+    buf->tail_virt = tail;
+    buf->map_key = s_next_map_key++;
+    if (s_next_map_key == 0x80000000u) {
+        s_next_map_key = 1;   /* keys are 31-bit (apu_vp.c makes them odd ids) */
+    }
+    buf->held_bytes = tail_pages * 4096u + count * (uint32_t)sizeof(uint32_t);
+    s_held_bytes += buf->held_bytes;
+    s_static_bytes += (uint32_t)size;
+    buf->format = format;
+    buf->frequency = freq;
+    buf->size = size;
+    buf->channels = channels;
+    buf->bits = bits;
+    buf->loop_start = 0;
     buf->loop_end = size / frame_size;
 }
 

@@ -159,6 +159,25 @@ int main(void) {
                 assert(alGetError() == AL_NO_ERROR);
             } else if (strcmp(name, "AL_EXT_MCFORMATS") == 0) {
                 /* checked below: formats must be accepted if (and only if) advertised */
+            } else if (strcmp(name, "AL_EXT_STATIC_BUFFER") == 0) {
+                LPALBUFFERDATASTATIC set_static =
+                    (LPALBUFFERDATASTATIC)ptr_to_fn(alGetProcAddress("alBufferDataStatic"));
+                static short pcm[4096];
+                ALuint b = 0, s = 0;
+                ALint v = 0;
+                assert(set_static != NULL);
+                alGenBuffers(1, &b);
+                set_static(b, AL_FORMAT_MONO16, pcm + 3, 6000, 22050);   /* any offset, any length */
+                alGetBufferi(b, AL_SIZE, &v);
+                assert(v == 6000 && alGetError() == AL_NO_ERROR);
+                alGenSources(1, &s);
+                alSourcei(s, AL_BUFFER, (ALint)b);
+                alSourcePlay(s);
+                alSourceStop(s);
+                alSourcei(s, AL_BUFFER, 0);
+                alDeleteSources(1, &s);
+                alDeleteBuffers(1, &b);
+                assert(alGetError() == AL_NO_ERROR);
             } else if (strcmp(name, "AL_XBOX_stats") == 0) {
                 LPALXBOXGETSTATS get_stats = (LPALXBOXGETSTATS)ptr_to_fn(alGetProcAddress("alXboxGetStats"));
                 ALXBOXSTATS a, b;
