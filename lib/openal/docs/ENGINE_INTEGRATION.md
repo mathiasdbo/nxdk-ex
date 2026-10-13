@@ -29,7 +29,7 @@ the AC97 codec. Console verification of each feature is recorded in `XEMU_VERIFI
 | --- | --- | --- |
 | Hardware voices | 120 (64 on xemu) | handles 0-127; the APU can stop for good on a higher handle, and the driver refuses one |
 | Sources | 256 | the rest wait in virtual standby, or stop (`AL_XBOX_VIRTUALIZE`) |
-| Buffers | 2048 | |
+| Buffers | 2048 | copied (`alBufferData`) or played in place from the engine's memory (`alBufferDataStatic`, 3.10) |
 | Formats | mono/stereo, 8-bit unsigned or 16-bit signed PCM | any sample rate; no ADPCM, no multichannel |
 | Pitch | playback rate 1/16 to 4 times 48 kHz | `AL_PITCH` times the buffer's rate is clamped to it |
 | Sample space | 2048 pages of 4 KiB (8 MiB) | counts buffers of playing voices only; reclaimed automatically (`AL_XBOX_SAMPLE_PAGES_USED`) |
@@ -202,11 +202,50 @@ alXboxOutputCallback(my_fx, my_state);   /* NULL removes it */
 - **Uses:** a CPU effect on the whole mix, a recorder, a level meter.
 - **Effects that don't need it:** the GP reverb (3.7) adds room effects at no CPU cost.
 
+### 3.10 Sounds from the engine's own memory (AL_EXT_STATIC_BUFFER)
+
+`alBufferData` copies the sound into the library, so an engine that keeps its sound pool holds every sound twice.
+`alBufferDataStatic` (the same entry point as Apple's and OpenAL Soft's) plays the engine's memory in place:
+
+```c
+alBufferDataStatic(buf, AL_FORMAT_MONO8, sfx->data, sfx->size, sfx->rate);   /* no copy */
+```
+
+- **The memory:** ordinary RAM (malloc, a sound pool, a loaded file). No alignment and no physical
+  contiguity are needed; the APU maps it page by page.
+- **Keep it valid:** it must stay allocated, unmoved and unchanged while the buffer has this data. Delete the
+  buffer, or give it other data, before freeing or reusing the memory; a buffer a source uses can't be changed
+  (`AL_INVALID_OPERATION`), as in OpenAL. After writing new bytes into the same memory, call
+  `alBufferDataStatic` again.
+- **Cost:** the library copies only the sound's last partial 4 KiB page (a silent tail must follow the data)
+  and writes the CPU cache back to RAM. On a console a 96 KB sound in 24 physically scattered pages cost the
+  library 4 KB.
+- **Budget queries:** `alXboxGetHardwareStatus(AL_XBOX_BUFFER_BYTES)` is the library's own buffer memory,
+  `AL_XBOX_STATIC_BUFFER_BYTES` the engine memory static buffers point at.
+
+**Part of a sound, and sentences.** A static buffer can start and end at any byte, so a range of a sound
+needs no copy either. Half-Life's sentence words with start/end percentages are buffers into the word's data.
+To play words back to back, queue them on one source; queued buffers play without a gap (on a console five
+queued pieces of one tone came out as one continuous tone):
+
+```c
+for (w = 0; w < n; w++) {
+    const uint8_t *d = word[w].data + word[w].start;
+    alBufferDataStatic(piece[w], fmt, d, word[w].end - word[w].start, word[w].rate);
+}
+alSourceQueueBuffers(src, n, piece);   /* one format and rate per queue */
+alSourcePlay(src);
+```
+
+When a sound has ended, `alGetSourcei(src, AL_SOURCE_STATE)` says so at once: it reads the voice's position (a
+250 ms one-shot reported `AL_STOPPED` after 252 ms on a console). The only delay is how often the engine asks.
+
 ## 4. Things to know
 
 - **A one-shot ends a little late.** On a console a voice must never reach the end of its data: that stops the
-  whole APU. So every buffer carries 256 bytes of silence, a one-shot loops over it, and the library ends it at
-  the next `alXboxUpdateVoices()`. A source reports `AL_STOPPED` up to one frame after its data ends.
+  whole APU. So every buffer carries 256 bytes of silence, a one-shot loops over it, and the library takes the
+  voice off at the next `alXboxUpdateVoices()`. A state query reports `AL_STOPPED` as soon as the data has
+  played (it reads the voice's position); the voice itself is released at the next tick.
 - **Stopping and restarting is cheap.** Each start takes a fresh hardware voice. Restarting a sound every
   frame is fine.
 - **Deleting a buffer that is attached or queued** fails with `AL_INVALID_OPERATION`, as in OpenAL.
