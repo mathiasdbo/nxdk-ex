@@ -80,10 +80,10 @@ void apu_gp_fifo_discard(uintptr_t bar0);
 
 void apu_gp_get_stats(uintptr_t bar0, apu_gp_stats_t *out);
 
-/** How apu_gp_fifo_read() reads the uncached ring (diagnostics): 0 32-bit reads, 1 16-bit, 2 64-bit MMX (default). */
+/** How apu_gp_fifo_read() reads the ring (diagnostics): 0 32-bit reads (default), 1 16-bit, 2 64-bit MMX. */
 void apu_gp_debug_set_fifo_read(uint32_t mode);
 
-/** Map the output ring cached (true) or uncached (false, the default): a probe of the APU's DMA coherence. */
+/** Map the output ring cached (true, the default on a console) or uncached (false): a probe of the APU's DMA coherence. */
 void apu_gp_debug_set_fifo_cached(bool on);
 
 /** Frames the GP program has run (its counter at X:$10, 24 bits). */

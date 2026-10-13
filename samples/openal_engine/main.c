@@ -404,9 +404,10 @@ static void stats_window(const char *what, uint32_t ms) {
           (unsigned long)(s_cb_frames - f0), (unsigned long)s_cb_peak);
 }
 
-/* Smoothness of the left channel: a 440 Hz sine of amplitude A has
- * |x[n+1] - 2 x[n] + x[n-1]| <= A (2 pi 440 / 48000)^2, about 13 here; a stale
- * cache line (data from an earlier lap of the ring) shows as a jump */
+/* Smoothness of the left channel: a 480 Hz sine of amplitude A has
+ * |x[n+1] - 2 x[n] + x[n-1]| <= A (2 pi 480 / 48000)^2, about 15 here, and the
+ * one-second buffer holds a whole number of cycles (no jump at the loop); a
+ * stale cache line (data from an earlier lap of the ring) shows as a jump */
 static volatile uint32_t s_glitches, s_glitch_samples;
 static int s_g1, s_g2;
 
@@ -438,31 +439,23 @@ static void phase_stats(void) {
     uint32_t i;
     ALuint b, s;
     for (i = 0; i < 48000u; i++) {
-        ph += TWO_PI * 440.0f / 48000.0f;
+        ph += TWO_PI * 480.0f / 48000.0f;
         s_pcm[i] = (int16_t)(8000.0f * sinf(ph));
     }
     b = make_buffer(s_pcm, 48000u, 48000);
     s = make_source(b);
     alSourcei(s, AL_LOOPING, AL_TRUE);
-    logf_("-- 7 CPU time (AL_XBOX_stats), the GP ring's read cost and cache coherence, the output callback "
-          "(440 Hz; the 5th window is quieter)\n");
+    logf_("-- 7 CPU time (AL_XBOX_stats), the GP ring (cached by default) and the output callback "
+          "(480 Hz; the 6th window is quieter)\n");
     alSourcePlay(s);
-    stats_window("64-bit rd ", 2000);      /* the default */
-    apu_gp_debug_set_fifo_read(1);
-    stats_window("16-bit rd ", 2000);
-    apu_gp_debug_set_fifo_read(0);
-    stats_window("32-bit rd ", 2000);
-    apu_gp_debug_set_fifo_read(2);
-    glitch_window("uncached ring, jump check", 2000);
-    /* The ring mapped cached: cheap reads if the APU's DMA writes are seen
-     * through the CPU cache, stale data (jumps) if they are not */
-    apu_gp_debug_set_fifo_read(0);
-    apu_gp_debug_set_fifo_cached(true);
-    stats_window("cached rd ", 2000);
+    stats_window("cached    ", 2000);      /* the default: cached ring, 32-bit reads */
     glitch_window("cached ring, jump check", 3000);
     apu_gp_debug_set_fifo_cached(false);
     apu_gp_debug_set_fifo_read(2);
-    glitch_window("uncached again, jump check", 1000);
+    stats_window("uncached64", 2000);      /* the previous default */
+    glitch_window("uncached ring, jump check", 2000);
+    apu_gp_debug_set_fifo_read(0);
+    apu_gp_debug_set_fifo_cached(true);
     alXboxOutputCallback(output_cb, NULL);
     stats_window("callback  ", 2000);
     s_cb_halve = 1;
