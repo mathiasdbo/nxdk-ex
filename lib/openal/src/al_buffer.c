@@ -317,6 +317,16 @@ AL_API void AL_APIENTRY alBufferData(ALuint buffer, ALenum format, const ALvoid 
             bits = 16;
             frame_size = 4;
             break;
+        case AL_FORMAT_MONO_XBOX_ADPCM:     /* sizes in whole 36-byte blocks */
+            channels = 1;
+            bits = 4;
+            frame_size = (ALsizei)APU_VP_ADPCM_BLOCK_BYTES;
+            break;
+        case AL_FORMAT_STEREO_XBOX_ADPCM:
+            channels = 2;
+            bits = 4;
+            frame_size = (ALsizei)(2u * APU_VP_ADPCM_BLOCK_BYTES);
+            break;
         default:
             alSetError(AL_INVALID_ENUM);
             return;
@@ -334,8 +344,9 @@ AL_API void AL_APIENTRY alBufferData(ALuint buffer, ALenum format, const ALvoid 
     }
 
     uint32_t data_phys = 0;
-    /* The data is followed by APU_VP_SILENT_TAIL_BYTES of silence that real-console one-shots loop over */
-    void *data_virt = apu_mem_alloc_phys((size_t)size + APU_VP_SILENT_TAIL_BYTES, 8, &data_phys);
+    /* The data is followed by silence that real-console one-shots loop over */
+    uint32_t tail_bytes = apu_vp_tail_bytes(channels, bits);
+    void *data_virt = apu_mem_alloc_phys((size_t)size + tail_bytes, 8, &data_phys);
     if (!data_virt) {
         alSetError(AL_OUT_OF_MEMORY);
         return;
@@ -359,12 +370,12 @@ AL_API void AL_APIENTRY alBufferData(ALuint buffer, ALenum format, const ALvoid 
     }
 
     memcpy(data_virt, data, (size_t)size);
-    memset((uint8_t *)data_virt + size, (bits == 8) ? 0x80 : 0, APU_VP_SILENT_TAIL_BYTES);   /* U8 silence is 0x80 */
+    memset((uint8_t *)data_virt + size, apu_vp_silence_byte(bits), tail_bytes);
 
     /* Free previously attached PCM data and PRD table if re-specifying buffer data */
     release_data(buf);
 
-    buf->held_bytes = (uint32_t)((size_t)size + APU_VP_SILENT_TAIL_BYTES + prd_table_bytes);
+    buf->held_bytes = (uint32_t)((size_t)size + tail_bytes + prd_table_bytes);
     s_held_bytes += buf->held_bytes;
     buf->data_virt = data_virt;
     buf->data_phys = data_phys;
@@ -377,7 +388,7 @@ AL_API void AL_APIENTRY alBufferData(ALuint buffer, ALenum format, const ALvoid 
     buf->channels = channels;
     buf->bits = bits;
     buf->loop_start = 0;                                   /* AL_SOFT_loop_points: the whole buffer */
-    buf->loop_end = size / frame_size;
+    buf->loop_end = (ALint)apu_vp_bytes_to_frames((uint32_t)size, channels, bits);
 }
 
 /* Write the CPU cache back to memory: the APU reads RAM directly */
@@ -418,6 +429,8 @@ AL_API void AL_APIENTRY alBufferDataStatic(ALuint buffer, ALenum format, const A
         case AL_FORMAT_MONO16:   channels = 1; bits = 16; frame_size = 2; break;
         case AL_FORMAT_STEREO8:  channels = 2; bits = 8;  frame_size = 2; break;
         case AL_FORMAT_STEREO16: channels = 2; bits = 16; frame_size = 4; break;
+        case AL_FORMAT_MONO_XBOX_ADPCM:   channels = 1; bits = 4; frame_size = (ALsizei)APU_VP_ADPCM_BLOCK_BYTES; break;
+        case AL_FORMAT_STEREO_XBOX_ADPCM: channels = 2; bits = 4; frame_size = (ALsizei)(2u * APU_VP_ADPCM_BLOCK_BYTES); break;
         default:
             alSetError(AL_INVALID_ENUM);
             return;
@@ -433,7 +446,7 @@ AL_API void AL_APIENTRY alBufferDataStatic(ALuint buffer, ALenum format, const A
     end = start + (uintptr_t)size;
     last_page = end & ~(uintptr_t)0xFFF;
     engine_pages = (uint32_t)((last_page - (start & ~(uintptr_t)0xFFF)) >> 12);
-    tail_bytes = (uint32_t)(end & 0xFFFu) + APU_VP_SILENT_TAIL_BYTES;
+    tail_bytes = (uint32_t)(end & 0xFFFu) + apu_vp_tail_bytes(channels, bits);
     tail_pages = (tail_bytes + 4095u) / 4096u;
     count = engine_pages + tail_pages;
 
@@ -464,7 +477,7 @@ AL_API void AL_APIENTRY alBufferDataStatic(ALuint buffer, ALenum format, const A
         uintptr_t from = (start > last_page) ? start : last_page;
         memcpy(tail + (from & 0xFFFu), (const void *)from, (size_t)(end - from));
     }
-    memset(tail + (end & 0xFFFu), (bits == 8) ? 0x80 : 0, APU_VP_SILENT_TAIL_BYTES);   /* U8 silence is 0x80 */
+    memset(tail + (end & 0xFFFu), apu_vp_silence_byte(bits), apu_vp_tail_bytes(channels, bits));
     if (s_static_flush) {
         flush_cpu_cache();   /* the application's last writes reach RAM before the APU reads it */
     }
@@ -490,7 +503,7 @@ AL_API void AL_APIENTRY alBufferDataStatic(ALuint buffer, ALenum format, const A
     buf->channels = channels;
     buf->bits = bits;
     buf->loop_start = 0;
-    buf->loop_end = size / frame_size;
+    buf->loop_end = (ALint)apu_vp_bytes_to_frames((uint32_t)size, channels, bits);
 }
 
 AL_API void AL_APIENTRY alGetBufferi(ALuint buffer, ALenum param, ALint *value) {
@@ -653,7 +666,8 @@ AL_API void AL_APIENTRY alBufferiv(ALuint buffer, ALenum param, const ALint *val
         return;
     }
     {
-        ALint frames = (buf->channels > 0 && buf->bits > 0) ? buf->size / (buf->channels * (buf->bits / 8)) : 0;
+        ALint frames = (buf->channels > 0 && buf->bits > 0)
+                           ? (ALint)apu_vp_bytes_to_frames((uint32_t)buf->size, buf->channels, buf->bits) : 0;
         if (values[0] < 0 || values[0] >= values[1] || values[1] > frames) {
             alSetError(AL_INVALID_VALUE);
             return;

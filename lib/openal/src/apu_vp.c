@@ -123,8 +123,10 @@ void apu_vp_pack_bins(const uint8_t b[APU_VP_OUTPUTS], uint32_t *vbin, uint32_t 
 }
 
 uint32_t apu_vp_format(int channels, int bits, bool loop) {
-    /* 16-bit: S16 in a 2-byte container; 8-bit: U8 in a 1-byte container (both 0) */
-    uint32_t fmt = (bits == 16) ? (MCPX_FMT_SAMPLE_S16 | MCPX_FMT_CONTAINER_B16) : 0u;
+    /* 16-bit: S16 in a 2-byte container; 8-bit: U8 in a 1-byte container (both 0);
+     * 4: Xbox ADPCM (container size 2, S16 samples) */
+    uint32_t fmt = (bits == 16) ? (MCPX_FMT_SAMPLE_S16 | MCPX_FMT_CONTAINER_B16)
+                 : (bits == 4) ? (MCPX_FMT_SAMPLE_S16 | MCPX_FMT_CONTAINER_ADPCM) : 0u;
     if (channels == 2) {
         /* Interleaved stereo needs SAMPLES_PER_BLOCK = 1 (stride of two containers) */
         fmt |= MCPX_FMT_STEREO | (1u << MCPX_FMT_SPB_SHIFT);
@@ -805,17 +807,16 @@ static void latch_hrtf(uintptr_t bar0, uint32_t h, uint32_t entry) {
 }
 
 int apu_vp_voice_start(uintptr_t bar0, uint32_t h, const apu_vp_voice_params_t *p) {
-    uint32_t frame_bytes, frames, tail_frames, ba, vbin, fmt_bins, vola, volb, volc, hrtf, i, map_page;
+    uint32_t frames, tail_frames, ba, vbin, fmt_bins, vola, volb, volc, hrtf, i, map_page;
     uint32_t loop_start, loop_end, start;
     bool soft_end;
 
     if (!s_ready || !p || h >= (s_fe_ok ? APU_VP_MAX_HANDLES : APU_VP_HW_HANDLES) || p->bytes == 0 ||
-        (p->channels != 1 && p->channels != 2) || (p->bits != 8 && p->bits != 16)) {
+        (p->channels != 1 && p->channels != 2) || (p->bits != 8 && p->bits != 16 && p->bits != 4)) {
         return -1;
     }
-    frame_bytes = (uint32_t)(p->bits / 8) * (uint32_t)p->channels;
-    frames = p->bytes / frame_bytes;
-    tail_frames = p->tail_bytes / frame_bytes;
+    frames = apu_vp_bytes_to_frames(p->bytes, p->channels, p->bits);
+    tail_frames = apu_vp_bytes_to_frames(p->tail_bytes, p->channels, p->bits);
     if (frames == 0 || frames + tail_frames > 0xFFFFFFu) {
         return -1;
     }
@@ -825,11 +826,11 @@ int apu_vp_voice_start(uintptr_t bar0, uint32_t h, const apu_vp_voice_params_t *
     if (p->pages) {
         /* The list covers the data and its silent tail (al_buffer.c) */
         if (p->page_count == 0u || p->map_key == 0u ||
-            (p->phys & 0xFFFu) + p->bytes + (soft_end ? tail_frames * frame_bytes : 0u) > p->page_count * 4096u ||
+            (p->phys & 0xFFFu) + p->bytes + (soft_end ? p->tail_bytes : 0u) > p->page_count * 4096u ||
             map_pages(bar0, p->pages, p->page_count, p->map_key, p->phys, &ba, &map_page) != 0) {
             return -3;
         }
-    } else if (map_buffer(bar0, p->phys, p->bytes + (soft_end ? tail_frames * frame_bytes : 0u), &ba, &map_page) != 0) {
+    } else if (map_buffer(bar0, p->phys, p->bytes + (soft_end ? p->tail_bytes : 0u), &ba, &map_page) != 0) {
         return -3;
     }
     s_handle_page[h] = map_page;
