@@ -333,7 +333,7 @@ int apu_voice_trigger(uintptr_t apu_base, uint32_t index)
         p.channels = vb->channels;
         p.bits = vb->bits;
         p.loop = ctx->loop_mode != 0u;
-        p.tail_bytes = APU_VP_SILENT_TAIL_BYTES;   /* al_buffer.c pads every buffer with silence */
+        p.tail_bytes = apu_vp_tail_bytes(vb->channels, vb->bits);   /* al_buffer.c pads every buffer with silence */
         p.loop_start = vb->loop_start;
         p.loop_end = vb->loop_end;
         p.start_frame = vb->start_frame;

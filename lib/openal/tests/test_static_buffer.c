@@ -155,6 +155,20 @@ int main(void) {
         p.bytes = 4096u;
         p.map_key = 0;                                        /* a list needs a key */
         assert(apu_vp_voice_start(base, 73, &p) != 0);
+        /* Xbox ADPCM: 36-byte blocks of 64 samples per channel; EBO counts samples */
+        p.map_key = 43;
+        p.bits = 4;
+        p.channels = 2;
+        p.bytes = 40u * 72u;                                  /* 40 stereo blocks */
+        p.loop = true;
+        p.tail_bytes = apu_vp_tail_bytes(2, 4);
+        assert(p.tail_bytes == 8u * 72u);                     /* eight silent blocks */
+        assert(apu_vp_voice_start(base, 74, &p) == 0);
+        assert(voice_dw(74, MCPX_VOICE_PAR_NEXT) == 40u * 64u - 1u);
+        assert((voice_dw(74, MCPX_VOICE_CFG_FMT) & (3u << 30)) == MCPX_FMT_CONTAINER_ADPCM);
+        assert(voice_dw(74, MCPX_VOICE_CFG_FMT) & MCPX_FMT_STEREO);
+        assert(apu_vp_bytes_to_frames(36u, 1, 4) == 64u && apu_vp_frames_to_bytes(100u, 1, 4) == 36u);
+        assert(apu_vp_frames_to_bytes(100u, 2, 16) == 400u && apu_vp_tail_bytes(1, 8) == APU_VP_SILENT_TAIL_BYTES);
         apu_vp_deinit(base);
         apu_mem_shutdown();
         free(s_bar0);

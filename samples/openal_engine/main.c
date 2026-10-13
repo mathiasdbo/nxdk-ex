@@ -644,6 +644,145 @@ static void phase_static(void) {
     check_apu("static");
 }
 
+/* 9: AL_XBOX_adpcm and the lower pitch floor, through OpenAL */
+static const int16_t k_ima_step[89] = {
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97, 107,
+    118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963,
+    1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894,
+    6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794,
+    32767
+};
+
+static uint8_t ima_code(int *pred, int *index, int target) {
+    static const int8_t adj[8] = { -1, -1, -1, -1, 2, 4, 6, 8 };
+    int step = k_ima_step[*index], diff = target - *pred, delta = step >> 3;
+    uint8_t n = 0;
+    if (diff < 0) { n = 8; diff = -diff; }
+    if (diff >= step) { n |= 4; diff -= step; delta += step; }
+    if (diff >= step >> 1) { n |= 2; diff -= step >> 1; delta += step >> 1; }
+    if (diff >= step >> 2) { n |= 1; delta += step >> 2; }
+    *pred += (n & 8) ? -delta : delta;
+    if (*pred > 32767) *pred = 32767;
+    if (*pred < -32768) *pred = -32768;
+    *index += adj[n & 7];
+    if (*index < 0) *index = 0;
+    if (*index > 88) *index = 88;
+    return n;
+}
+
+/* Xbox ADPCM: 64 samples per 36-byte block and channel (the header holds the
+ * first; the 64th code repeats the next block's header) */
+static void xbox_adpcm_encode(uint8_t *dst, const int16_t *src, uint32_t blocks, int ch) {
+    int pred[2] = { 0, 0 }, index[2] = { 0, 0 }, c, k;
+    uint32_t b, i;
+    for (b = 0; b < blocks; b++) {
+        const int16_t *in = src + (size_t)b * 64u * (uint32_t)ch;
+        for (c = 0; c < ch; c++) {
+            pred[c] = in[c];
+            *dst++ = (uint8_t)(in[c] & 0xFF);
+            *dst++ = (uint8_t)((uint16_t)in[c] >> 8);
+            *dst++ = (uint8_t)index[c];
+            *dst++ = 0;
+        }
+        for (i = 0; i < 8u; i++) {
+            for (c = 0; c < ch; c++) {
+                for (k = 0; k < 4; k++) {
+                    uint32_t s1 = 1u + i * 8u + (uint32_t)k * 2u;
+                    uint8_t lo = ima_code(&pred[c], &index[c], in[s1 * (uint32_t)ch + (uint32_t)c]);
+                    uint8_t hi = ima_code(&pred[c], &index[c], in[(s1 + 1u) * (uint32_t)ch + (uint32_t)c]);
+                    *dst++ = (uint8_t)(lo | (hi << 4));
+                }
+            }
+        }
+    }
+}
+
+static void phase_adpcm(void) {
+    const uint32_t blocks = 750u;                 /* 48000 samples: 1 s */
+    int16_t *pcm = (int16_t *)malloc((blocks * 64u + 2u) * 2u * sizeof(int16_t));
+    uint8_t *mono = (uint8_t *)malloc(blocks * 36u), *stereo = (uint8_t *)malloc(blocks * 72u + 0x40);
+    ALuint b, s;
+    ALint st = 0, off0 = 0, off1 = 0;
+    uint32_t i;
+
+    logf_("-- 9 Xbox ADPCM buffers (decoded by the APU) and the pitch floor\n");
+    if (!pcm || !mono || !stereo) {
+        logf_("   malloc failed\n");
+        return;
+    }
+    alXboxOutputCallback(scan_cb, NULL);
+    /* a: mono, copied, looping */
+    for (i = 0; i < blocks * 64u + 1u; i++) pcm[i] = (int16_t)(8000.0f * sinf(TWO_PI * 480.0f * (float)(i % 48000u) / 48000.0f));
+    xbox_adpcm_encode(mono, pcm, blocks, 1);
+    alGenBuffers(1, &b);
+    alBufferData(b, AL_FORMAT_MONO_XBOX_ADPCM, mono, (ALsizei)(blocks * 36u), 48000);
+    alGetBufferi(b, AL_BITS, &st);
+    logf_("   mono ADPCM buffer: %u bytes, AL_BITS %ld, AL error 0x%x\n", (unsigned)(blocks * 36u), (long)st, alGetError());
+    s = make_source(b);
+    alSourcei(s, AL_LOOPING, AL_TRUE);
+    alSourcePlay(s);
+    run_for(200);
+    scan_start();
+    run_for(2000);
+    scan_log("ADPCM mono 480 Hz, copied ");
+    /* c: the same as a one-shot: it ends after 1 s */
+    alSourceStop(s);
+    alSourcei(s, AL_LOOPING, AL_FALSE);
+    scan_start();
+    alSourcePlay(s);
+    {
+        DWORD t0 = GetTickCount(), t_stop = 0;
+        while (GetTickCount() - t0 < 1300u) {
+            alGetSourcei(s, AL_SOURCE_STATE, &st);
+            if (st != AL_PLAYING && t_stop == 0) t_stop = GetTickCount() - t0;
+            alXboxUpdateVoices();
+            Sleep(1);
+        }
+        scan_log("ADPCM one-shot 1 s (48000 frames)");
+        logf_("   AL_STOPPED after %lu ms\n", (unsigned long)t_stop);
+    }
+    free_source(s, b);
+
+    /* b: stereo (480 Hz left, 960 Hz right), static, looping; the scan reads the left */
+    for (i = 0; i < blocks * 64u + 1u; i++) {
+        pcm[2u * i] = (int16_t)(8000.0f * sinf(TWO_PI * 480.0f * (float)(i % 48000u) / 48000.0f));
+        pcm[2u * i + 1u] = (int16_t)(8000.0f * sinf(TWO_PI * 960.0f * (float)(i % 48000u) / 48000.0f));
+    }
+    xbox_adpcm_encode(stereo + 0x14, pcm, blocks, 2);
+    alGenBuffers(1, &b);
+    alBufferDataStatic(b, AL_FORMAT_STEREO_XBOX_ADPCM, stereo + 0x14, (ALsizei)(blocks * 72u), 48000);
+    s = make_source(b);
+    alSourcei(s, AL_LOOPING, AL_TRUE);
+    alSourcePlay(s);
+    run_for(200);
+    scan_start();
+    run_for(2000);
+    scan_log("ADPCM stereo, static, left");
+    free_source(s, b);
+
+    /* d: pitch 1/64 (below the old 1/16 floor): a 4800 Hz PCM tone plays at 75 Hz */
+    for (i = 0; i < 48000u; i++) pcm[i] = (int16_t)(8000.0f * sinf(TWO_PI * 4800.0f * (float)i / 48000.0f));
+    b = make_buffer(pcm, 48000u, 48000);
+    s = make_source(b);
+    alSourcei(s, AL_LOOPING, AL_TRUE);
+    alSourcef(s, AL_PITCH, 1.0f / 64.0f);
+    alSourcePlay(s);
+    run_for(300);
+    alGetSourcei(s, AL_SAMPLE_OFFSET, &off0);
+    scan_start();
+    run_for(2000);
+    alGetSourcei(s, AL_SAMPLE_OFFSET, &off1);
+    scan_log("PCM 4800 Hz at pitch 1/64 (75 Hz)");
+    logf_("   AL_SAMPLE_OFFSET %ld -> %ld in 2 s (1500 expected)\n", (long)off0, (long)off1);
+    free_source(s, b);
+
+    alXboxOutputCallback(NULL, NULL);
+    free(pcm);
+    free(mono);
+    free(stereo);
+    check_apu("adpcm");
+}
+
 int main(void) {
     ALCdevice *dev;
     ALCcontext *ctx;
@@ -686,6 +825,7 @@ int main(void) {
     phase_churn();
     phase_stats();
     phase_static();
+    phase_adpcm();
     logf_("done\n");
     save_log();
     for (;;) {

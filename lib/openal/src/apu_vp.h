@@ -55,6 +55,40 @@ extern "C" {
  * silence and the driver stops them once CBO passes the data. */
 #define APU_VP_SILENT_TAIL_BYTES 256u
 
+/*
+ * Xbox ADPCM (bits = 4 in this library): IMA ADPCM in 36-byte blocks per
+ * channel (stereo: the two headers, then 4-byte chunks alternating left and
+ * right), 64 samples per block: the header sample is the block's first, and
+ * the next block's header repeats its last (apu_adpcm_probe round 1: that
+ * layout played at the exact rate, a 65-sample layout 65/64 too fast). CBO,
+ * EBO and LBO count samples. All-zero blocks decode to silence, so the silent
+ * tail of an ADPCM buffer is APU_VP_ADPCM_TAIL_BLOCKS zero blocks.
+ */
+#define APU_VP_ADPCM_BLOCK_BYTES  36u
+#define APU_VP_ADPCM_BLOCK_FRAMES 64u
+#define APU_VP_ADPCM_TAIL_BLOCKS  8u
+
+static inline uint32_t apu_vp_bytes_to_frames(uint32_t bytes, int channels, int bits) {
+    return (bits == 4) ? bytes / (APU_VP_ADPCM_BLOCK_BYTES * (uint32_t)channels) * APU_VP_ADPCM_BLOCK_FRAMES
+                       : bytes / ((uint32_t)(bits / 8) * (uint32_t)channels);
+}
+
+/* Bytes before frame `frames` (ADPCM: the start of its block) */
+static inline uint32_t apu_vp_frames_to_bytes(uint32_t frames, int channels, int bits) {
+    return (bits == 4) ? frames / APU_VP_ADPCM_BLOCK_FRAMES * APU_VP_ADPCM_BLOCK_BYTES * (uint32_t)channels
+                       : frames * (uint32_t)(bits / 8) * (uint32_t)channels;
+}
+
+/* Silence behind every buffer's data, and the byte it is made of */
+static inline uint32_t apu_vp_tail_bytes(int channels, int bits) {
+    return (bits == 4) ? APU_VP_ADPCM_TAIL_BLOCKS * APU_VP_ADPCM_BLOCK_BYTES * (uint32_t)channels
+                       : APU_VP_SILENT_TAIL_BYTES;
+}
+
+static inline uint8_t apu_vp_silence_byte(int bits) {
+    return (bits == 8) ? 0x80u : 0u;   /* U8 silence is 0x80; S16 and ADPCM 0 */
+}
+
 typedef struct {
     uint32_t phys;          /* physical address of the sample data (contiguous); with `pages`: the offset
                                of the first byte in pages[0] */
@@ -64,7 +98,7 @@ typedef struct {
     uint32_t map_key;       /* with `pages`: non-zero, unique per page list (the mapping is cached by it) */
     uint32_t bytes;
     int channels;           /* 1 or 2 (interleaved) */
-    int bits;               /* 8 (unsigned) or 16 (signed) */
+    int bits;               /* 8 (unsigned), 16 (signed) or 4 (Xbox ADPCM) */
     bool loop;
     int16_t pitch;          /* signed 4.12 log2 of (source rate * pitch / 48000) */
     uint8_t bins[APU_VP_OUTPUTS];   /* mixbin of each output */
