@@ -12,6 +12,8 @@
 #include "apu_mem.h"
 #include "apu_voice.h"
 #include "apu_voice_mgr.h"
+#include "apu_ac97.h"
+#include "apu_platform.h"
 #include "apu_vp.h"
 #include "apu_gp_ucode.h"
 #include "al_buffer.h"
@@ -90,7 +92,9 @@ static const struct {
     { "alXboxUpdateVoices",      (ALC_PROC)alXboxUpdateVoices },
     { "alXboxReverbPreset",      (ALC_PROC)alXboxReverbPreset },
     { "alXboxReverbf",           (ALC_PROC)alXboxReverbf },
-    { "alXboxGetReverbf",        (ALC_PROC)alXboxGetReverbf }
+    { "alXboxGetReverbf",        (ALC_PROC)alXboxGetReverbf },
+    { "alXboxGetStats",          (ALC_PROC)alXboxGetStats },
+    { "alXboxOutputCallback",    (ALC_PROC)alXboxOutputCallback }
 };
 
 static void *alc_lookup_proc(const char *name) {
@@ -699,7 +703,8 @@ AL_API const ALchar * AL_APIENTRY alGetString(ALenum param) {
                        ? "MCPX APU (MMIO backend)"
                        : "MCPX APU (null backend)";
         case AL_EXTENSIONS:
-            return "AL_EXT_OFFSET AL_SOFT_loop_points AL_XBOX_hardware_status AL_XBOX_hrtf AL_XBOX_reverb AL_XBOX_source_control AL_XBOX_update";
+            return "AL_EXT_OFFSET AL_SOFT_loop_points AL_XBOX_hardware_status AL_XBOX_hrtf AL_XBOX_output_callback "
+                   "AL_XBOX_reverb AL_XBOX_source_control AL_XBOX_stats AL_XBOX_update";
         default:
             alSetError(AL_INVALID_ENUM);
             return NULL;
@@ -716,6 +721,8 @@ AL_API ALboolean AL_APIENTRY alIsExtensionPresent(const ALchar *extname) {
         strcmp(extname, "AL_XBOX_hardware_status") == 0 ||
         strcmp(extname, "AL_XBOX_hrtf") == 0 ||
         strcmp(extname, "AL_XBOX_reverb") == 0 ||
+        strcmp(extname, "AL_XBOX_stats") == 0 ||
+        strcmp(extname, "AL_XBOX_output_callback") == 0 ||
         strcmp(extname, "AL_XBOX_source_control") == 0 ||
         strcmp(extname, "AL_XBOX_update") == 0) {
         return AL_TRUE;
@@ -829,6 +836,11 @@ AL_API void AL_APIENTRY alXboxGetHardwareStatus(ALenum param, ALint *value) {
  * ============================================================================
  */
 
+/* alXboxUpdateVoices CPU time (AL_XBOX_stats) */
+static ALuint s_update_calls;
+static unsigned long long s_update_cycles;
+static ALuint s_update_max;
+
 AL_API void AL_APIENTRY alXboxUpdateVoices(void) {
     /*
      * The tick reads APU state. With no device open the source subsystem
@@ -838,5 +850,67 @@ AL_API void AL_APIENTRY alXboxUpdateVoices(void) {
     if (s_active_device_count == 0) {
         return;
     }
-    al_source_update_frame();
+    {
+        uint64_t t0 = apu_platform_cycles(), dt;
+        al_source_update_frame();
+        dt = apu_platform_cycles() - t0;
+        s_update_calls++;
+        s_update_cycles += dt;
+        if (dt > s_update_max) {
+            s_update_max = (dt > 0xFFFFFFFFu) ? 0xFFFFFFFFu : (uint32_t)dt;
+        }
+    }
+}
+
+/*
+ * ============================================================================
+ * AL_XBOX_stats / AL_XBOX_output_callback
+ * ============================================================================
+ */
+
+AL_API void AL_APIENTRY alXboxGetStats(ALXBOXSTATS *stats) {
+    ALXBOXSTATS s;
+    apu_ac97_stats_t a;
+    ALuint n;
+    if (!stats || stats->size < sizeof(ALuint)) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    apu_ac97_get_stats(&a);
+    memset(&s, 0, sizeof(s));
+    s.size = sizeof(s);
+    s.cycle_hz = a.cycle_hz;
+    s.output_passes = a.pumps;
+    s.output_max_gap_ms = a.max_gap_ms;
+    s.output_cycles = a.cycles;
+    s.output_max_cycles = a.max_cycles;
+    s.output_hook_cycles = a.hook_cycles;
+    s.update_calls = s_update_calls;
+    s.update_cycles = s_update_cycles;
+    s.update_max_cycles = s_update_max;
+    s.ac97_buffers = a.chunks;
+    s.ac97_underruns = a.underruns;
+    s.ac97_padded = a.padded;
+    s.output_threaded = a.threaded ? AL_TRUE : AL_FALSE;
+    n = (stats->size < sizeof(s)) ? stats->size : (ALuint)sizeof(s);
+    s.size = stats->size;
+    memcpy(stats, &s, n);
+}
+
+/* The output hook's C signature and the AL one differ only in the integer types */
+static ALXBOXOUTPUTPROC s_output_fn;
+
+static void output_trampoline(int16_t *samples, uint32_t frames, void *user) {
+    ALXBOXOUTPUTPROC fn = s_output_fn;
+    if (fn) {
+        fn((ALshort *)samples, (ALsizei)frames, user);
+    }
+}
+
+AL_API void AL_APIENTRY alXboxOutputCallback(ALXBOXOUTPUTPROC fn, ALvoid *user) {
+    apu_ac97_set_output_hook(NULL, NULL);
+    s_output_fn = fn;
+    if (fn) {
+        apu_ac97_set_output_hook(output_trampoline, user);
+    }
 }

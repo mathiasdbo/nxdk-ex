@@ -1512,6 +1512,15 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
     10.1), its onset where the pre-delay and the shortest comb put it; full frame rate, about 800 polls of DMA
     wait per frame, no timeouts, 0 underruns and 0 padded buffers over 64 s of listening. A new voice ramps its
     volume up from 0, so a click in its first samples is not heard.
+* **CPU cost of the output path and cache coherence** (`samples/openal_engine` phase 7, `AL_XBOX_stats`):
+  * The output thread reads the GP's output ring (64 KiB) and queues it on the AC97. With the ring uncached its
+    CPU time followed the number of reads: 23.5 ms per second with 16-bit reads, 13.4 with 32-bit, 8.3 with 64-bit
+    MMX reads (about 0.21 us per uncached read, plus about 3 ms of other work).
+  * Mapped cached, the ring cost 5.0 ms per second (0.5 % of the 733 MHz CPU; longest pass 56 us), and a 480 Hz
+    tone read through it showed no more discontinuities than through the uncached mapping: the APU's DMA
+    writes are seen by the CPU cache. The library zeroes the ring uncached, then maps it cached and only reads it.
+  * The voice tick (`alXboxUpdateVoices`) cost about 19 us per call with a few voices playing. An output
+    callback that reads and halves every sample cost 7.3 ms per second; one that only reads them, 2.7.
 * Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
   from a spherical-head model (Brown-Duda head-shadow shelf per ear as a 31-tap int8 FIR, Woodworth ITD in
   s6.9; 32 azimuths x elevations -30/0/30/60; no measured data, no pinna cues). `apu_vp_init()` uploads it with

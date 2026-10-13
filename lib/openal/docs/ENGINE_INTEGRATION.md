@@ -161,6 +161,47 @@ alSourcef(src, AL_XBOX_REVERB_SEND, 0.5f);             /* per source, 0..1, defa
   or `GENERIC` with a low gain. 23-25 (cavern): `CAVE`. 26-28 (weirdo): `CAVE` with a long pre-delay. Send
   about 0.3-0.6 for world sounds, 0 for HUD sounds and music.
 
+### 3.8 Measuring the library's CPU time (AL_XBOX_stats)
+
+With OpenAL the audio CPU time is in two places: the library's **output thread** (every 4 ms, top priority; it
+moves the APU's mix to the AC97 and scrubs played stream data) and the **voice tick** (`alXboxUpdateVoices`, on
+the game thread). Both are counted in CPU cycles:
+
+```c
+ALXBOXSTATS s = { sizeof(s) };
+alXboxGetStats(&s);               /* once per frame; keep the previous one */
+double out_ms = (s.output_cycles - prev.output_cycles) * 1000.0 / s.cycle_hz;
+double tick_ms = (s.update_cycles - prev.update_cycles) * 1000.0 / s.cycle_hz;
+```
+
+- **Counters:** they never reset; take differences. `cycle_hz` is measured (733 MHz on a retail console), 0 for
+  the first 10 ms.
+- **Other fields:**
+  - `output_passes`, `output_max_gap_ms`, `output_max_cycles`: how regularly the thread ran and its longest pass;
+  - `output_hook_cycles`: the share of 3.9's callback;
+  - `update_calls`, `update_max_cycles`: the voice tick;
+  - `ac97_buffers`, `ac97_underruns`, `ac97_padded`: output health (10.7 ms per buffer; padded means the APU's
+    mix was late).
+- **Without the output thread:** the output work runs inside the tick, so `update_cycles` includes it.
+- **Older structures:** only `size` bytes are written, so a program built against an older `ALXBOXSTATS` keeps
+  working.
+
+### 3.9 Processing the final mix on the CPU (AL_XBOX_output_callback)
+
+```c
+static void AL_APIENTRY my_fx(ALshort *samples, ALsizei frames, ALvoid *user) {
+    /* frames = 512 interleaved 16-bit stereo frames at 48 kHz; change them in place */
+}
+alXboxOutputCallback(my_fx, my_state);   /* NULL removes it */
+```
+
+- **When it runs:** for every block of the final mix (after the APU's voices, HRTF and GP reverb), just before
+  it goes to the codec. The samples are in cached memory, so reading them is cheap.
+- **Constraints:** it runs in the output thread at high priority. Keep it well under a millisecond per block
+  (it shows in `output_hook_cycles`), and do not call OpenAL from it.
+- **Uses:** a CPU effect on the whole mix, a recorder, a level meter.
+- **Effects that don't need it:** the GP reverb (3.7) adds room effects at no CPU cost.
+
 ## 4. Things to know
 
 - **A one-shot ends a little late.** On a console a voice must never reach the end of its data: that stops the

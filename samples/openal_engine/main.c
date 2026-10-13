@@ -358,6 +358,115 @@ static void phase_churn(void) {
     check_apu("churn");
 }
 
+/* 7: AL_XBOX_stats and AL_XBOX_output_callback: CPU time of the output thread
+ * and the voice tick, and a callback that sees (and for 2 s halves) the mix */
+static volatile uint32_t s_cb_calls, s_cb_frames, s_cb_peak;
+static volatile int s_cb_halve;
+
+static void AL_APIENTRY output_cb(ALshort *samples, ALsizei frames, ALvoid *user) {
+    ALsizei i;
+    uint32_t peak = s_cb_peak;
+    (void)user;
+    for (i = 0; i < 2 * frames; i++) {
+        uint32_t a = (uint32_t)(samples[i] < 0 ? -samples[i] : samples[i]);
+        if (a > peak) peak = a;
+        if (s_cb_halve) samples[i] = (ALshort)(samples[i] / 2);
+    }
+    s_cb_peak = peak;
+    s_cb_frames += (uint32_t)frames;
+    s_cb_calls++;
+}
+
+static void stats_window(const char *what, uint32_t ms) {
+    ALXBOXSTATS a, b;
+    uint32_t c0 = s_cb_calls, f0 = s_cb_frames;
+    double hz;
+    memset(&a, 0, sizeof(a));
+    a.size = sizeof(a);
+    b = a;
+    s_cb_peak = 0;
+    alXboxGetStats(&a);
+    run_for(ms);
+    alXboxGetStats(&b);
+    hz = b.cycle_hz ? (double)b.cycle_hz : 733333333.0;
+    /* per second of the window, in microseconds of CPU (nxdk printf has no %f) */
+    logf_("   %s: clock %lu Hz; output thread %lu passes, %lu us/s (longest pass %lu us, gap %lu ms), callback %lu us/s; "
+          "voice tick %lu calls, %lu us/s (longest %lu us); AC97 +%lu buffers, und %lu pad %lu; callback %lu calls, "
+          "%lu frames, peak %lu\n",
+          what, (unsigned long)b.cycle_hz, (unsigned long)(b.output_passes - a.output_passes),
+          (unsigned long)((double)(b.output_cycles - a.output_cycles) * 1e6 / hz * 1000.0 / ms),
+          (unsigned long)((double)b.output_max_cycles * 1e6 / hz), (unsigned long)b.output_max_gap_ms,
+          (unsigned long)((double)(b.output_hook_cycles - a.output_hook_cycles) * 1e6 / hz * 1000.0 / ms),
+          (unsigned long)(b.update_calls - a.update_calls),
+          (unsigned long)((double)(b.update_cycles - a.update_cycles) * 1e6 / hz * 1000.0 / ms),
+          (unsigned long)((double)b.update_max_cycles * 1e6 / hz), (unsigned long)(b.ac97_buffers - a.ac97_buffers),
+          (unsigned long)b.ac97_underruns, (unsigned long)b.ac97_padded, (unsigned long)(s_cb_calls - c0),
+          (unsigned long)(s_cb_frames - f0), (unsigned long)s_cb_peak);
+}
+
+/* Smoothness of the left channel: a 480 Hz sine of amplitude A has
+ * |x[n+1] - 2 x[n] + x[n-1]| <= A (2 pi 480 / 48000)^2, about 15 here, and the
+ * one-second buffer holds a whole number of cycles (no jump at the loop); a
+ * stale cache line (data from an earlier lap of the ring) shows as a jump */
+static volatile uint32_t s_glitches, s_glitch_samples;
+static int s_g1, s_g2;
+
+static void AL_APIENTRY glitch_cb(ALshort *samples, ALsizei frames, ALvoid *user) {
+    ALsizei i;
+    uint32_t g = 0;
+    (void)user;
+    for (i = 0; i < frames; i++) {
+        int x = samples[2 * i], d = x - 2 * s_g1 + s_g2;
+        if (d > 300 || d < -300) g++;
+        s_g2 = s_g1;
+        s_g1 = x;
+    }
+    s_glitches += g;
+    s_glitch_samples += (uint32_t)frames;
+}
+
+static void glitch_window(const char *what, uint32_t ms) {
+    s_glitches = 0;
+    s_glitch_samples = 0;
+    alXboxOutputCallback(glitch_cb, NULL);
+    run_for(ms);
+    alXboxOutputCallback(NULL, NULL);
+    logf_("   %s: %lu jumps in %lu samples\n", what, (unsigned long)s_glitches, (unsigned long)s_glitch_samples);
+}
+
+static void phase_stats(void) {
+    float ph = 0.0f;
+    uint32_t i;
+    ALuint b, s;
+    for (i = 0; i < 48000u; i++) {
+        ph += TWO_PI * 480.0f / 48000.0f;
+        s_pcm[i] = (int16_t)(8000.0f * sinf(ph));
+    }
+    b = make_buffer(s_pcm, 48000u, 48000);
+    s = make_source(b);
+    alSourcei(s, AL_LOOPING, AL_TRUE);
+    logf_("-- 7 CPU time (AL_XBOX_stats), the GP ring (cached by default) and the output callback "
+          "(480 Hz; the 6th window is quieter)\n");
+    alSourcePlay(s);
+    stats_window("cached    ", 2000);      /* the default: cached ring, 32-bit reads */
+    glitch_window("cached ring, jump check", 3000);
+    apu_gp_debug_set_fifo_cached(false);
+    apu_gp_debug_set_fifo_read(2);
+    stats_window("uncached64", 2000);      /* the previous default */
+    glitch_window("uncached ring, jump check", 2000);
+    apu_gp_debug_set_fifo_read(0);
+    apu_gp_debug_set_fifo_cached(true);
+    alXboxOutputCallback(output_cb, NULL);
+    stats_window("callback  ", 2000);
+    s_cb_halve = 1;
+    stats_window("halving   ", 2000);
+    s_cb_halve = 0;
+    alXboxOutputCallback(NULL, NULL);
+    stats_window("removed   ", 2000);
+    free_source(s, b);
+    check_apu("stats");
+}
+
 int main(void) {
     ALCdevice *dev;
     ALCcontext *ctx;
@@ -398,6 +507,7 @@ int main(void) {
     phase_pitch();
     phase_budget();
     phase_churn();
+    phase_stats();
     logf_("done\n");
     save_log();
     for (;;) {

@@ -39,7 +39,21 @@ typedef struct {
     uint32_t pumps;         /* pump passes (thread or apu_vp_service()) */
     uint32_t max_gap_ms;    /* longest time between two pump passes */
     bool threaded;          /* the pump thread is running */
+    uint64_t cycles;        /* CPU cycles in pump passes, the thread hook and the output hook included */
+    uint32_t max_cycles;    /* longest pass */
+    uint64_t hook_cycles;   /* of which in the output hook */
+    uint32_t cycle_hz;      /* rate of the cycle counter, measured since the start (0 until 10 ms have passed) */
 } apu_ac97_stats_t;
+
+/*
+ * Output hook: called with each block of the mix (APU_AC97_CHUNK_FRAMES
+ * interleaved 16-bit stereo frames at 48 kHz, in cached memory) before it is
+ * queued on the AC97; it may change the samples in place. It runs in the pump
+ * thread (or from apu_ac97_pump() without the thread), so it must be quick and
+ * must not call the library. NULL removes it.
+ */
+typedef void (*apu_ac97_output_fn)(int16_t *samples, uint32_t frames, void *user);
+void apu_ac97_set_output_hook(apu_ac97_output_fn fn, void *user);
 
 /** Use the pump thread (default true) from the next apu_ac97_start() on. */
 void apu_ac97_set_thread(bool on);
