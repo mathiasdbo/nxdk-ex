@@ -331,8 +331,11 @@ uint32_t al_source_debug_spatial_calc_count(void) {
  * Hardware Pitch & Master Volume Mapping Helpers
  * ============================================================================
  */
-#define APU_PITCH_STEP_MIN 0x00001000u
-#define APU_PITCH_STEP_MAX 0x00040000u
+/* Playback rate relative to 48 kHz, 16.16: the VP plays exactly down to 1/256 and
+ * tops out at 3.82 times (apu_adpcm_probe round 1: 4, 8 and 16 all ran at 183366
+ * samples/s) */
+#define APU_PITCH_STEP_MIN 0x00000100u   /* 1/256 */
+#define APU_PITCH_STEP_MAX 0x0003CCCDu   /* 3.8 */
 
 static uint32_t source_calc_pitch_step(ALsizei freq, float pitch) {
     uint32_t step = APU_CALC_PITCH_STEP(freq, pitch);
@@ -534,7 +537,7 @@ static uint32_t source_length_frames(const ALsource *src) {
         return al_stream_total_frames(src->stream);
     }
     if (src->buffer && src->buffer->channels > 0 && src->buffer->bits > 0) {
-        return (uint32_t)src->buffer->size / (uint32_t)(src->buffer->channels * (src->buffer->bits / 8));
+        return apu_vp_bytes_to_frames((uint32_t)src->buffer->size, src->buffer->channels, src->buffer->bits);
     }
     return 0;
 }
@@ -571,7 +574,8 @@ static bool offset_to_frames(const ALsource *src, ALenum param, double v, uint32
         f = v * (double)b->frequency;
         break;
     case AL_BYTE_OFFSET:
-        f = v / (double)(b->channels * (b->bits / 8));
+        f = (b->bits == 4) ? floor(v / (double)(APU_VP_ADPCM_BLOCK_BYTES * (uint32_t)b->channels)) * APU_VP_ADPCM_BLOCK_FRAMES
+                            : v / (double)(b->channels * (b->bits / 8));
         break;
     default:
         f = v;
@@ -593,7 +597,7 @@ static double frames_to_offset(const ALsource *src, ALenum param, uint32_t frame
     case AL_SEC_OFFSET:
         return (double)frames / (double)b->frequency;
     case AL_BYTE_OFFSET:
-        return (double)frames * (double)(b->channels * (b->bits / 8));
+        return (double)apu_vp_frames_to_bytes(frames, b->channels, b->bits);
     default:
         return (double)frames;
     }

@@ -1,5 +1,6 @@
 #include "apu_voice_mgr.h"
 #include "apu_voice.h"
+#include "apu_vp.h"
 #include "apu_hardware.h"
 #include "al_source.h"
 #include <string.h>
@@ -181,8 +182,8 @@ int apu_voice_mgr_allocate(ALsource *src) {
             /* Resume from the voice's position when it gets a voice again (a
              * stream keeps its own read position) */
             uint32_t len = (victim->buffer && victim->buffer->channels > 0 && victim->buffer->bits > 0)
-                               ? (uint32_t)victim->buffer->size /
-                                     (uint32_t)(victim->buffer->channels * (victim->buffer->bits / 8))
+                               ? apu_vp_bytes_to_frames((uint32_t)victim->buffer->size, victim->buffer->channels,
+                                                        victim->buffer->bits)
                                : 0u;
             uint32_t pos = apu_voice_get_position((uint32_t)victim_voice);
             victim->offset_frames = (len > 0u && pos >= len) ? len - 1u : pos;

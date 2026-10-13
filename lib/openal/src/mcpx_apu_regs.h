@@ -145,6 +145,7 @@
 #define MCPX_FMT_STEREO         (1u << 27)
 #define MCPX_FMT_SAMPLE_S16     (1u << 28)
 #define MCPX_FMT_CONTAINER_B16  (1u << 30)
+#define MCPX_FMT_CONTAINER_ADPCM (2u << 30)             /* Xbox ADPCM, 36-byte blocks of 64 samples per channel */
 #define MCPX_FMT_SPB_SHIFT      16              /* SAMPLES_PER_BLOCK: 1 for stereo PCM16 */
 
 /* Volumes: 12-bit attenuation in 1/64 dB, 0 = unity, 0xFFF = mute */

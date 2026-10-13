@@ -705,7 +705,7 @@ AL_API const ALchar * AL_APIENTRY alGetString(ALenum param) {
                        : "MCPX APU (null backend)";
         case AL_EXTENSIONS:
             return "AL_EXT_OFFSET AL_EXT_STATIC_BUFFER AL_SOFT_loop_points AL_XBOX_hardware_status AL_XBOX_hrtf "
-                   "AL_XBOX_output_callback "
+                   "AL_XBOX_adpcm AL_XBOX_output_callback "
                    "AL_XBOX_reverb AL_XBOX_source_control AL_XBOX_stats AL_XBOX_update";
         default:
             alSetError(AL_INVALID_ENUM);
@@ -724,6 +724,7 @@ AL_API ALboolean AL_APIENTRY alIsExtensionPresent(const ALchar *extname) {
         strcmp(extname, "AL_XBOX_hrtf") == 0 ||
         strcmp(extname, "AL_XBOX_reverb") == 0 ||
         strcmp(extname, "AL_EXT_STATIC_BUFFER") == 0 ||
+        strcmp(extname, "AL_XBOX_adpcm") == 0 ||
         strcmp(extname, "AL_XBOX_stats") == 0 ||
         strcmp(extname, "AL_XBOX_output_callback") == 0 ||
         strcmp(extname, "AL_XBOX_source_control") == 0 ||

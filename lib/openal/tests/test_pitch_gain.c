@@ -136,15 +136,20 @@ int main(void) {
     assert(ctx0->pitch_step == APU_CALC_PITCH_STEP(48000, 0.5f));
     assert(ctx0->pitch_step == 0x00008000u);
 
-    /* Clamping to maximum rate [0x00040000] (4.0x at 48kHz) */
+    /* Clamping to the VP's measured maximum [0x0003CCCD] (3.8x at 48kHz; a console tops out at 3.82) */
     alSourcef(sources[0], AL_PITCH, 10.0f);
     assert(alGetError() == AL_NO_ERROR);
-    assert(ctx0->pitch_step == 0x00040000u);
+    assert(ctx0->pitch_step == 0x0003CCCDu);
 
-    /* Clamping to minimum rate [0x00001000] (0.0625x) */
-    alSourcef(sources[0], AL_PITCH, 0.001f);
+    /* 1/16 is no longer clamped: a console plays exactly down to 1/256 */
+    alSourcef(sources[0], AL_PITCH, 0.0625f);
     assert(alGetError() == AL_NO_ERROR);
     assert(ctx0->pitch_step == 0x00001000u);
+
+    /* Clamping to the minimum rate [0x00000100] (1/256) */
+    alSourcef(sources[0], AL_PITCH, 0.001f);
+    assert(alGetError() == AL_NO_ERROR);
+    assert(ctx0->pitch_step == 0x00000100u);
 
     /* Invalid pitch <= 0.0f must set AL_INVALID_VALUE */
     alSourcef(sources[0], AL_PITCH, 0.0f);
