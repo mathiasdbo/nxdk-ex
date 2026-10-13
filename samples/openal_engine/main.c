@@ -415,10 +415,16 @@ static void phase_stats(void) {
     b = make_buffer(s_pcm, 48000u, 48000);
     s = make_source(b);
     alSourcei(s, AL_LOOPING, AL_TRUE);
-    logf_("-- 7 CPU time (AL_XBOX_stats) and the output callback: 440 Hz, 2 s plain, 2 s with the callback, "
+    logf_("-- 7 CPU time (AL_XBOX_stats) and the output callback: 440 Hz, 2 s plain (32-bit ring reads), 2 s with 16-bit and 2 s with 64-bit reads, 2 s with the callback, "
           "2 s with it halving the mix (quieter), 2 s plain again\n");
     alSourcePlay(s);
     stats_window("plain     ", 2000);
+    /* the same with the GP ring read 16 bits at a time (the old reader) and 64 bits (MMX) */
+    apu_gp_debug_set_fifo_read(1);
+    stats_window("16-bit rd ", 2000);
+    apu_gp_debug_set_fifo_read(2);
+    stats_window("64-bit rd ", 2000);
+    apu_gp_debug_set_fifo_read(0);
     alXboxOutputCallback(output_cb, NULL);
     stats_window("callback  ", 2000);
     s_cb_halve = 1;
