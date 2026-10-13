@@ -233,6 +233,63 @@ AL_API void AL_APIENTRY alXboxUpdateVoices(void);
 /* Function Pointer Type Definition */
 typedef void (AL_APIENTRY *LPALXBOXUPDATEVOICES)(void);
 
+/*
+ * ============================================================================
+ * AL_XBOX_stats (CPU time of the library's audio work)
+ * ============================================================================
+ *
+ * alXboxGetStats(&s) fills the structure below; set s.size = sizeof(s) first
+ * (fields past it are left alone). The counters run from alcOpenDevice and
+ * never reset: take the difference between two calls (one per game frame).
+ * Cycles are the CPU's time-stamp counter, cycle_hz of them per second
+ * (733 MHz on a retail console; 0 until the device has run 10 ms).
+ *
+ *   output_*   the output thread: every 4 ms it moves the APU's mix to the
+ *              AC97 codec and scrubs played stream data; output_hook_cycles is
+ *              the part spent in the AL_XBOX_output_callback function
+ *   update_*   alXboxUpdateVoices / alcProcessContext (the per-frame voice
+ *              tick; it includes the output work when the thread is off)
+ *   ac97_*     buffers queued on the codec (10.7 ms each), restarts after it
+ *              ran dry, and buffers completed with silence because the mix
+ *              was late
+ */
+typedef struct ALXBOXSTATS {
+    ALuint size;                         /* sizeof(ALXBOXSTATS), set by the caller */
+    ALuint cycle_hz;
+    ALuint output_passes;
+    ALuint output_max_gap_ms;            /* longest time between two passes */
+    unsigned long long output_cycles;
+    ALuint output_max_cycles;            /* longest pass */
+    unsigned long long output_hook_cycles;
+    ALuint update_calls;
+    unsigned long long update_cycles;
+    ALuint update_max_cycles;
+    ALuint ac97_buffers;
+    ALuint ac97_underruns;
+    ALuint ac97_padded;
+    ALuint output_threaded;              /* AL_TRUE while the output thread runs */
+} ALXBOXSTATS;
+
+AL_API void AL_APIENTRY alXboxGetStats(ALXBOXSTATS *stats);
+typedef void (AL_APIENTRY *LPALXBOXGETSTATS)(ALXBOXSTATS *stats);
+
+/*
+ * ============================================================================
+ * AL_XBOX_output_callback (process the final mix on the CPU)
+ * ============================================================================
+ *
+ * alXboxOutputCallback(fn, user): fn(samples, frames, user) receives every
+ * block of the final mix (frames = 512 interleaved 16-bit stereo frames at
+ * 48 kHz, 10.7 ms) just before it goes to the AC97 codec, and may change the
+ * samples in place (a CPU effect, a recorder, a meter). It runs in the output
+ * thread at high priority: keep it well under a millisecond and do not call
+ * OpenAL from it. Its time shows in ALXBOXSTATS.output_hook_cycles.
+ * fn = NULL removes it. Real console only (nothing is output on the host).
+ */
+typedef void (AL_APIENTRY *ALXBOXOUTPUTPROC)(ALshort *samples, ALsizei frames, ALvoid *user);
+AL_API void AL_APIENTRY alXboxOutputCallback(ALXBOXOUTPUTPROC fn, ALvoid *user);
+typedef void (AL_APIENTRY *LPALXBOXOUTPUTCALLBACK)(ALXBOXOUTPUTPROC fn, ALvoid *user);
+
 #if defined(__cplusplus)
 }
 #endif
