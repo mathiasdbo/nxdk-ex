@@ -83,8 +83,8 @@ screens.
 See the table in `docs/ENGINE_INTEGRATION.md` section 2. In short:
 - **Output:** stereo 16-bit 48 kHz only. No 5.1 or Dolby Digital; the 5.1 panning and topology code is model
   state only.
-- **Formats:** mono/stereo PCM and Xbox ADPCM (decoded by the APU); no multichannel buffers. ADPCM plays from
-  whole buffers, not from streaming queues.
+- **Formats:** mono/stereo PCM and Xbox ADPCM (decoded by the APU, also from streaming queues); no multichannel
+  buffers.
 - **Pitch:** playback rate 1/256 to 3.8 times 48 kHz (measured: exact down to 1/256, at most 3.82).
 - **Threads:** use the library from one thread. Its own output thread touches only the output path and
   already-played stream data.
