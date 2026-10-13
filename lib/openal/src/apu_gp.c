@@ -5,6 +5,9 @@
 #include "apu_platform.h"
 #include "mcpx_apu_regs.h"
 #include <string.h>
+#if defined(OPENAL_TARGET_XBOX)
+#include <xboxkrnl/xboxkrnl.h>
+#endif
 
 /* DSP56300 words, see apu_gp.h */
 const uint32_t apu_gp_program[APU_GP_PROGRAM_WORDS] = {
@@ -307,10 +310,23 @@ uint32_t apu_gp_fifo_available(uintptr_t bar0) {
     return ((fifo_cur(bar0) + APU_GP_FIFO_BYTES - s_read) % APU_GP_FIFO_BYTES) / 4u;
 }
 
-static uint32_t s_fifo_read_mode;   /* apu_gp_debug_set_fifo_read() */
+/* 64-bit reads by default: on a console the output thread spent 23.6 ms of CPU
+ * per second with 16-bit reads, 13.4 with 32-bit and 8.3 with 64-bit ones
+ * (openal_engine phase 7) */
+static uint32_t s_fifo_read_mode = 2u;   /* apu_gp_debug_set_fifo_read() */
 
 void apu_gp_debug_set_fifo_read(uint32_t mode) {
     s_fifo_read_mode = mode;
+}
+
+void apu_gp_debug_set_fifo_cached(bool on) {
+#if defined(OPENAL_TARGET_XBOX)
+    if (s_fifo) {
+        MmSetAddressProtect(s_fifo, APU_GP_FIFO_BYTES, on ? PAGE_READWRITE : (PAGE_READWRITE | PAGE_NOCACHE));
+    }
+#else
+    (void)on;
+#endif
 }
 
 /* Copy n stereo frames out of the ring (no wrap inside) */
