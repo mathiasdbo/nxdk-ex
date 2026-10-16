@@ -280,6 +280,18 @@ AL_API void AL_APIENTRY alXboxUpdateVoices(void);
 typedef void (AL_APIENTRY *LPALXBOXUPDATEVOICES)(void);
 
 /*
+ * AL_XBOX_pool_size: the size in bytes of the physically contiguous APU memory
+ * pool the next alcOpenDevice allocates (rounded up to 4 KiB; 0 or less: the
+ * default, 2 MiB). The pool holds the voice table, the ITD buffers and the APU
+ * copies of buffers voices play directly (a source's AL_BUFFER); buffers that
+ * are only queued on streaming sources stay in CPU memory and never use it. An
+ * allocation the pool cannot satisfy falls back to its own contiguous block, so
+ * a small pool costs speed, not correctness. Call it before alcOpenDevice.
+ */
+AL_API void AL_APIENTRY alXboxSetPoolSize(ALsizei bytes);
+typedef void (AL_APIENTRY *LPALXBOXSETPOOLSIZE)(ALsizei bytes);
+
+/*
  * ============================================================================
  * AL_XBOX_stats (CPU time of the library's audio work)
  * ============================================================================

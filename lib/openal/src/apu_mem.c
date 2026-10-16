@@ -119,6 +119,10 @@ int apu_mem_init(size_t pool_size) {
     return 0;
 }
 
+size_t apu_mem_pool_size(void) {
+    return s_pool_virt ? s_pool_size : 0u;
+}
+
 void apu_mem_shutdown(void) {
     if (!s_pool_virt) {
         return;
