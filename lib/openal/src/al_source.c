@@ -1034,6 +1034,13 @@ AL_API void AL_APIENTRY alSourcei(ALuint source, ALenum param, ALint value) {
                     alSetError(AL_INVALID_NAME);
                     return;
                 }
+                /* A voice plays a static buffer from APU memory (a queued
+                 * buffer is copied into the stream's ring instead) */
+                ALenum err = al_buffer_make_apu_ready(buf);
+                if (err != AL_NO_ERROR) {
+                    alSetError(err);
+                    return;
+                }
                 if (src->buffer != NULL) {
                     al_buffer_release(src->buffer);
                 }

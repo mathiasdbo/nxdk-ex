@@ -27,9 +27,13 @@ static void release_data(ALbuffer *buf) {
             apu_mem_free_phys(buf->tail_virt);
         }
         s_static_bytes -= (uint32_t)buf->size;
+    } else if (buf->cpu_data) {
+        free(buf->cpu_data);   /* data_virt points at it */
     } else if (buf->data_virt) {
         apu_mem_free_phys(buf->data_virt);
     }
+    buf->cpu_data = NULL;
+    buf->cpu_cap = 0;
     if (buf->prd_table_virt) {
         apu_mem_free_phys(buf->prd_table_virt);
     }
@@ -108,6 +112,8 @@ void al_buffer_init_subsystem(void) {
         s_buffers[i].tail_virt = NULL;
         s_buffers[i].map_key = 0;
         s_buffers[i].held_bytes = 0;
+        s_buffers[i].cpu_data = NULL;
+        s_buffers[i].cpu_cap = 0;
     }
     s_held_bytes = 0;
     s_static_bytes = 0;
@@ -337,51 +343,47 @@ AL_API void AL_APIENTRY alBufferData(ALuint buffer, ALenum format, const ALvoid 
         return;
     }
 
-    size_t prd_count = apu_prd_calculate_count((size_t)size);
-    if (prd_count == 0) {
+    if (apu_prd_calculate_count((size_t)size) == 0) {
         alSetError(AL_INVALID_VALUE);
         return;
     }
 
-    uint32_t data_phys = 0;
-    /* The data is followed by silence that real-console one-shots loop over */
-    uint32_t tail_bytes = apu_vp_tail_bytes(channels, bits);
-    void *data_virt = apu_mem_alloc_phys((size_t)size + tail_bytes, 8, &data_phys);
-    if (!data_virt) {
-        alSetError(AL_OUT_OF_MEMORY);
-        return;
+    /*
+     * The data goes to cached CPU memory, not to the APU pool: the pool is
+     * write-combined, and a stream reads its buffers back to copy them into
+     * its ring (al_stream.c fill), which from write-combined memory is an
+     * uncached read of every byte - on a console about 16 MB/s, 0.2 ms a frame
+     * for one 48 kHz stereo stream. The APU copy is made when a voice needs it
+     * (al_buffer_make_apu_ready). A buffer re-filled with no more data than
+     * it held keeps its block, so a stream's refills allocate nothing.
+     */
+    void *cpu;
+    uint32_t cap;
+    if (buf->cpu_data != NULL && buf->cpu_cap >= (uint32_t)size) {
+        cpu = buf->cpu_data;
+        cap = buf->cpu_cap;
+        buf->cpu_data = NULL;   /* kept from release_data below */
+        buf->data_virt = NULL;
+        s_held_bytes -= buf->held_bytes;
+        buf->held_bytes = 0;
+    } else {
+        cpu = malloc((size_t)size);
+        if (!cpu) {
+            alSetError(AL_OUT_OF_MEMORY);
+            return;
+        }
+        cap = (uint32_t)size;
     }
-
-    uint32_t prd_table_phys = 0;
-    size_t prd_table_bytes = prd_count * sizeof(NVAPU_PRD_ENTRY);
-    NVAPU_PRD_ENTRY *prd_table_virt = (NVAPU_PRD_ENTRY *)apu_mem_alloc_phys(prd_table_bytes, 8, &prd_table_phys);
-    if (!prd_table_virt) {
-        apu_mem_free_phys(data_virt);
-        alSetError(AL_OUT_OF_MEMORY);
-        return;
-    }
-
-    int prd_res = apu_prd_build(data_phys, (size_t)size, prd_table_virt, prd_count, NULL);
-    if (prd_res != 0) {
-        apu_mem_free_phys(data_virt);
-        apu_mem_free_phys(prd_table_virt);
-        alSetError(AL_INVALID_VALUE);
-        return;
-    }
-
-    memcpy(data_virt, data, (size_t)size);
-    memset((uint8_t *)data_virt + size, apu_vp_silence_byte(bits), tail_bytes);
+    memcpy(cpu, data, (size_t)size);
 
     /* Free previously attached PCM data and PRD table if re-specifying buffer data */
     release_data(buf);
 
-    buf->held_bytes = (uint32_t)((size_t)size + tail_bytes + prd_table_bytes);
+    buf->cpu_data = cpu;
+    buf->cpu_cap = cap;
+    buf->held_bytes = cap;
     s_held_bytes += buf->held_bytes;
-    buf->data_virt = data_virt;
-    buf->data_phys = data_phys;
-    buf->prd_table_virt = prd_table_virt;
-    buf->prd_table_phys = prd_table_phys;
-    buf->prd_count = (uint32_t)prd_count;
+    buf->data_virt = cpu;
     buf->format = format;
     buf->frequency = freq;
     buf->size = size;
@@ -389,6 +391,52 @@ AL_API void AL_APIENTRY alBufferData(ALuint buffer, ALenum format, const ALvoid 
     buf->bits = bits;
     buf->loop_start = 0;                                   /* AL_SOFT_loop_points: the whole buffer */
     buf->loop_end = (ALint)apu_vp_bytes_to_frames((uint32_t)size, channels, bits);
+}
+
+ALenum al_buffer_make_apu_ready(ALbuffer *buf) {
+    if (!buf || buf->is_static || buf->cpu_data == NULL) {
+        return AL_NO_ERROR;
+    }
+
+    size_t size = (size_t)buf->size;
+    size_t prd_count = apu_prd_calculate_count(size);
+    uint32_t data_phys = 0;
+    /* The data is followed by silence that real-console one-shots loop over */
+    uint32_t tail_bytes = apu_vp_tail_bytes(buf->channels, buf->bits);
+    void *data_virt = apu_mem_alloc_phys(size + tail_bytes, 8, &data_phys);
+    if (!data_virt) {
+        return AL_OUT_OF_MEMORY;
+    }
+
+    uint32_t prd_table_phys = 0;
+    size_t prd_table_bytes = prd_count * sizeof(NVAPU_PRD_ENTRY);
+    NVAPU_PRD_ENTRY *prd_table_virt = (NVAPU_PRD_ENTRY *)apu_mem_alloc_phys(prd_table_bytes, 8, &prd_table_phys);
+    if (!prd_table_virt) {
+        apu_mem_free_phys(data_virt);
+        return AL_OUT_OF_MEMORY;
+    }
+
+    if (apu_prd_build(data_phys, size, prd_table_virt, prd_count, NULL) != 0) {
+        apu_mem_free_phys(data_virt);
+        apu_mem_free_phys(prd_table_virt);
+        return AL_INVALID_VALUE;
+    }
+
+    memcpy(data_virt, buf->cpu_data, size);
+    memset((uint8_t *)data_virt + size, apu_vp_silence_byte(buf->bits), tail_bytes);
+
+    free(buf->cpu_data);
+    buf->cpu_data = NULL;
+    buf->cpu_cap = 0;
+    s_held_bytes -= buf->held_bytes;
+    buf->held_bytes = (uint32_t)(size + tail_bytes + prd_table_bytes);
+    s_held_bytes += buf->held_bytes;
+    buf->data_virt = data_virt;
+    buf->data_phys = data_phys;
+    buf->prd_table_virt = prd_table_virt;
+    buf->prd_table_phys = prd_table_phys;
+    buf->prd_count = (uint32_t)prd_count;
+    return AL_NO_ERROR;
 }
 
 /* Write the CPU cache back to memory: the APU reads RAM directly */

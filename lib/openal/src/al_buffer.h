@@ -14,7 +14,11 @@ extern "C" {
 /**
  * Maximum number of concurrent OpenAL buffers supported.
  */
+/* Buffer names (each slot is a static ALbuffer); an application that needs
+ * fewer can build the library with -DAL_MAX_BUFFERS=<n> */
+#ifndef AL_MAX_BUFFERS
 #define AL_MAX_BUFFERS 2048   /* an engine precaches hundreds of sounds (Xash3D: up to 2048) */
+#endif
 
 /**
  * Internal OpenAL 1.1 Buffer Object.
@@ -46,6 +50,13 @@ typedef struct ALbuffer {
     void *tail_virt;
     uint32_t map_key;
     uint32_t held_bytes;   /* library memory this buffer holds (AL_XBOX_BUFFER_BYTES) */
+    /* alBufferData keeps the data in cached CPU memory (cpu_data, cpu_cap bytes
+     * allocated; data_virt points at it, data_phys 0, no PRD table). A stream
+     * copies it into its ring from there; the APU-visible copy is made only
+     * when a source takes the buffer as its static buffer
+     * (al_buffer_make_apu_ready), and cpu_data is freed then. */
+    void *cpu_data;
+    uint32_t cpu_cap;
 } ALbuffer;
 
 /*
@@ -85,6 +96,14 @@ void al_buffer_retain(ALbuffer *buf);
  * @param buf Pointer to ALbuffer object.
  */
 void al_buffer_release(ALbuffer *buf);
+
+/**
+ * Give an alBufferData buffer the APU-visible copy a voice playing it directly
+ * reads (data in the pool, its silent tail, the PRD table), and free the CPU
+ * copy. Nothing to do for a buffer that has it already, a static buffer, or one
+ * with no data. AL_OUT_OF_MEMORY leaves the buffer as it was.
+ */
+ALenum al_buffer_make_apu_ready(ALbuffer *buf);
 
 /**
  * Internal error recording helpers.

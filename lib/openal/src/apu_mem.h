@@ -106,6 +106,9 @@ void *apu_mem_alloc_table(size_t size, uint32_t *out_phys);
  */
 void apu_mem_shutdown(void);
 
+/** Size of the pool apu_mem_init made, in bytes; 0 with none. */
+size_t apu_mem_pool_size(void);
+
 /**
  * Calculate the number of PRD entries required for a buffer of given size.
  *
