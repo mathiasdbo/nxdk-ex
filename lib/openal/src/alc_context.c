@@ -916,6 +916,7 @@ AL_API void AL_APIENTRY alXboxGetStats(ALXBOXSTATS *stats) {
     s.output_fifo_cycles = a.fifo_cycles;
     s.output_queue_cycles = a.queue_cycles;
     s.output_scrub_cycles = a.thread_hook_cycles;
+    al_source_tick_cycles(&s.update_stream_cycles, &s.update_voice_cycles);
     n = (stats->size < sizeof(s)) ? stats->size : (ALuint)sizeof(s);
     s.size = stats->size;
     memcpy(stats, &s, n);

@@ -348,6 +348,16 @@ static void copy_frames(uint32_t *dst, const volatile uint32_t *src, uint32_t n)
         return;
     }
 #if defined(OPENAL_TARGET_XBOX)
+    if (s_fifo_read_mode == 0u) {
+        /* Every line is a fresh APU write, so every read misses (~400 ns a
+         * 32-byte line on a console, one after the other): ask for all of
+         * them first and the misses overlap */
+        const char *p = (const char *)(const void *)src;
+        const char *e = (const char *)(const void *)(src + n);
+        for (; p < e; p += 32) {
+            __asm__ __volatile__("prefetchnta (%0)" : : "r"(p));
+        }
+    }
     if (s_fifo_read_mode == 2u) {
         /* 8-byte MMX reads: two frames per bus transaction */
         for (; i + 2u <= n; i += 2u) {
