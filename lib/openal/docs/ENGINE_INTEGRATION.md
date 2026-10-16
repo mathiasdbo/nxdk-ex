@@ -29,7 +29,7 @@ the AC97 codec. Console verification of each feature is recorded in `XEMU_VERIFI
 | --- | --- | --- |
 | Hardware voices | 120 (64 on xemu) | handles 0-127; the APU can stop for good on a higher handle, and the driver refuses one |
 | Sources | 256 | the rest wait in virtual standby, or stop (`AL_XBOX_VIRTUALIZE`) |
-| Buffers | 2048 | copied (`alBufferData`) or played in place from the engine's memory (`alBufferDataStatic`, 3.10) |
+| Buffers | 2048 (`-DAL_MAX_BUFFERS=<n>` to build fewer) | copied (`alBufferData`) or played in place from the engine's memory (`alBufferDataStatic`, 3.10) |
 | Formats | mono/stereo, 8-bit unsigned or 16-bit signed PCM, Xbox ADPCM | any sample rate; ADPCM decoded by the APU (3.11); no multichannel |
 | Pitch | playback rate 1/256 to 3.8 times 48 kHz | `AL_PITCH` times the buffer's rate is clamped to it (a console plays exactly down to 1/256 and tops out at 3.82) |
 | Sample space | 2048 pages of 4 KiB (8 MiB) | counts buffers of playing voices only; reclaimed automatically (`AL_XBOX_SAMPLE_PAGES_USED`) |
@@ -39,6 +39,11 @@ the AC97 codec. Console verification of each feature is recorded in `XEMU_VERIFI
 | Reverb | one room for the whole mix | on the GP DSP, no CPU time; each source chooses how much it sends (`AL_XBOX_reverb`, 3.7) |
 
 Buffer memory itself comes from contiguous RAM (`apu_mem.c`), so the console's 64 MiB is the real ceiling.
+`alBufferData` keeps a buffer's data in ordinary cached RAM; the APU copy (contiguous, write-combined) is made
+when a source takes the buffer as its `AL_BUFFER`, so buffers that are only queued on streaming sources never
+use APU memory. The contiguous pool that copy and the voice table come from is 2 MiB unless
+`alXboxSetPoolSize(bytes)` is called before `alcOpenDevice` (`AL_XBOX_pool_size`); an allocation the pool
+cannot hold gets its own block, so a small pool only costs speed.
 
 ## 3. Recipes
 
@@ -49,7 +54,8 @@ audio or a sound card driver. Create one streaming source and keep 4-8 buffers o
 
 ```c
 alGenSources(1, &src);
-alSourcei(src, AL_SOURCE_RELATIVE, AL_TRUE);          /* no 3D model on the mix */
+const ALfloat unity[2] = { 1.0f, 1.0f };
+alSourcefv(src, AL_XBOX_DIRECT_GAINS, unity);        /* the mix is panned already: no 3D model */
 for (i = 0; i < NBUF; i++) { mix(chunk); alBufferData(buf[i], AL_FORMAT_STEREO16, chunk, bytes, rate);
                              alSourceQueueBuffers(src, 1, &buf[i]); }
 alSourcePlay(src);
@@ -62,6 +68,12 @@ alXboxUpdateVoices();
 ```
 
 Mix at the engine's own rate (11/22/44.1 kHz). The APU resamples to 48 kHz for free.
+
+Use direct mode, not a relative source at the origin: that one still goes through the 5.1 pan, which spreads a
+source at the listener evenly over four speakers and folds them to stereo 3 dB down. The queued buffers stay
+in CPU memory (section 2), and the stream copies them into its ring from there, not from write-combined
+memory, which the CPU reads uncached; refilling the same buffers allocates nothing. If no source plays a buffer
+directly, `alXboxSetPoolSize(256 * 1024)` before opening the device returns most of the default 2 MiB pool.
 
 ### 3.2 Engine-spatialized effects on hardware voices
 
