@@ -151,7 +151,9 @@ static void timed_pass(uintptr_t bar0, void (*hook)(void)) {
 static DWORD WINAPI pump_thread(LPVOID arg) {
     (void)arg;
     while (!s_quit) {
-        timed_pass(s_thread_bar0, s_hook);
+        /* The scrub every second pass (8 ms): it only guards against an
+         * application that stops feeding a stream, with half a ring of slack */
+        timed_pass(s_thread_bar0, (s_stats.pumps & 1u) ? s_hook : NULL);
         Sleep(APU_AC97_PUMP_MS);
     }
     return 0;

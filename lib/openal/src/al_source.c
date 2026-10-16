@@ -5,6 +5,7 @@
 #include "apu_gp.h"
 #include "apu_reverb.h"
 #include "apu_vp.h"
+#include "apu_platform.h"
 #include <string.h>
 #include <math.h>
 #include <float.h>
@@ -663,15 +664,27 @@ static void source_update_stream(ALsource *src) {
 
 static void reverb_sync(void);
 
+static uint64_t s_tick_stream_cycles, s_tick_voice_cycles;
+
+void al_source_tick_cycles(uint64_t *stream, uint64_t *voices) {
+    *stream = s_tick_stream_cycles;
+    *voices = s_tick_voice_cycles;
+}
+
 void al_source_update_frame(void) {
+    uint64_t t0, t1;
     ensure_subsystem_initialized();
+    t0 = apu_platform_cycles();
     for (size_t i = 0; i < s_source_end; i++) {
         if (g_sources[i].in_use) {
             source_update_stream(&g_sources[i]);
         }
     }
+    t1 = apu_platform_cycles();
+    s_tick_stream_cycles += t1 - t0;
     apu_voice_mgr_update(al_source_get_apu_base());
     reverb_sync();
+    s_tick_voice_cycles += apu_platform_cycles() - t1;
 }
 
 

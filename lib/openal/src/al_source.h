@@ -105,6 +105,10 @@ ALsource *al_source_get(ALuint id);
  * stop there instead of at AL_MAX_SOURCES. */
 ALuint al_source_id_end(void);
 
+/** Cycles the voice tick spent bringing streams up to date and in the voice
+ * manager (with the APU service), since the start (AL_XBOX_stats) */
+void al_source_tick_cycles(uint64_t *stream, uint64_t *voices);
+
 /**
  * Override the APU base MMIO address used by the source subsystem (host testing support).
  *
