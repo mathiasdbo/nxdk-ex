@@ -322,13 +322,14 @@ void apu_voice_mgr_update(uintptr_t apu_base) {
      * Each standby candidate's priority is computed once per update; free slots
      * then take the best remaining candidate (ties: lowest source id). */
     bool candidates_ready = false;
+    const ALuint id_end = al_source_id_end();
     for (uint32_t v = 0; v < apu_voice_slot_count(); v++) {
         if (s_hw_voice_owner[v] != AL_HW_VOICE_INVALID) {
             continue;
         }
 
         if (!candidates_ready) {
-            for (ALuint id = 1; id <= AL_MAX_SOURCES; id++) {
+            for (ALuint id = 1; id <= id_end; id++) {
                 ALsource *src = al_source_get(id);
                 s_promo_priority[id - 1] = 0.0f;
                 if (src && src->in_use && src->state == AL_PLAYING &&
@@ -341,7 +342,7 @@ void apu_voice_mgr_update(uintptr_t apu_base) {
 
         ALuint best_id = 0;
         float best_priority = 0.0f;
-        for (ALuint id = 1; id <= AL_MAX_SOURCES; id++) {
+        for (ALuint id = 1; id <= id_end; id++) {
             if (s_promo_priority[id - 1] > best_priority) {
                 best_priority = s_promo_priority[id - 1];
                 best_id = id;
@@ -380,7 +381,8 @@ uint32_t apu_voice_mgr_get_active_hw_count(void) {
 
 uint32_t apu_voice_mgr_get_virtual_standby_count(void) {
     uint32_t count = 0;
-    for (ALuint id = 1; id <= AL_MAX_SOURCES; id++) {
+    const ALuint id_end = al_source_id_end();
+    for (ALuint id = 1; id <= id_end; id++) {
         ALsource *src = al_source_get(id);
         if (src && src->in_use && src->state == AL_PLAYING && src->hw_voice_idx == AL_HW_VOICE_INVALID) {
             count++;
