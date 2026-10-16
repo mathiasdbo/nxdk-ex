@@ -1,8 +1,18 @@
 #include "al_stream.h"
+#include "apu_platform.h"
 #include "apu_mem.h"
 #include "apu_voice.h"
 #include "apu_vp.h"
 #include <string.h>
+
+/* The ring is write-combining (apu_mem_alloc_phys): drain the CPU's WC buffers
+ * after writing it, so the data is in RAM before the voice reaches it. A locked
+ * instruction flushes them on every x86 (as apu_vp.c's wc_flush). */
+static inline void ring_flush(void) {
+#if defined(OPENAL_TARGET_XBOX) && (defined(__i386__) || defined(_M_IX86))
+    __asm__ __volatile__("lock; addl $0,(%%esp)" ::: "memory");
+#endif
+}
 
 #define RING_MASK      (AL_STREAM_RING_FRAMES - 1u)
 #define RING_BYTES_MAX (AL_STREAM_RING_FRAMES * 4u)   /* stereo 16-bit */
@@ -164,7 +174,11 @@ ALenum al_stream_queue(al_stream_t *s, ALsizei n, const ALuint *ids) {
     }
     if (fmt && !s->has_format) {
         if (!s->ring) {
-            s->ring = (uint8_t *)apu_mem_alloc_table(RING_BYTES_MAX, &s->ring_phys);
+            /* Write-combining, not uncached: the CPU only writes the ring
+             * (data, the silence ahead, the scrub behind), and uncached
+             * stores go out to the bus one by one where write-combined ones
+             * go out in whole lines. 16 KiB aligned, as the table it was. */
+            s->ring = (uint8_t *)apu_mem_alloc_phys(RING_BYTES_MAX, 0x4000, &s->ring_phys);
             if (!s->ring) {
                 return AL_OUT_OF_MEMORY;
             }
@@ -354,6 +368,7 @@ static void fill(al_stream_t *s, bool looping) {
         ring_put(s, s->silent_pos, NULL, (uint32_t)pos_diff(quiet_to, s->silent_pos));
         s->silent_pos = quiet_to;
     }
+    ring_flush();
 }
 
 void al_stream_voice_start(al_stream_t *s, bool looping) {
