@@ -102,6 +102,15 @@ void apu_mem_free(void *ptr);
 void *apu_mem_alloc_table(size_t size, uint32_t *out_phys);
 
 /**
+ * apu_mem_alloc_table's block (zeroed, contiguous, physically 16 KiB-aligned,
+ * outside the pool), but write-combining: for memory the CPU only writes, in
+ * order, and the APU only reads, such as a stream's ring. Drain the WC buffers
+ * (a locked instruction) before the APU may read what was written. Free with
+ * apu_mem_free().
+ */
+void *apu_mem_alloc_wc(size_t size, uint32_t *out_phys);
+
+/**
  * Release all resources and destroy the contiguous memory pool.
  */
 void apu_mem_shutdown(void);

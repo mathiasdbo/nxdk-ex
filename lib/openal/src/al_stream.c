@@ -177,8 +177,10 @@ ALenum al_stream_queue(al_stream_t *s, ALsizei n, const ALuint *ids) {
             /* Write-combining, not uncached: the CPU only writes the ring
              * (data, the silence ahead, the scrub behind), and uncached
              * stores go out to the bus one by one where write-combined ones
-             * go out in whole lines. 16 KiB aligned, as the table it was. */
-            s->ring = (uint8_t *)apu_mem_alloc_phys(RING_BYTES_MAX, 0x4000, &s->ring_phys);
+             * go out in whole lines. Its own block, as the table it was: a
+             * ring placed in the pool stopped the APU's output on a console
+             * (2026-10-16; xemu played it). */
+            s->ring = (uint8_t *)apu_mem_alloc_wc(RING_BYTES_MAX, &s->ring_phys);
             if (!s->ring) {
                 return AL_OUT_OF_MEMORY;
             }
