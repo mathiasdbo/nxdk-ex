@@ -76,6 +76,7 @@ screens.
 | `AL_XBOX_reverb` | a room reverb on the GP DSP, eight presets, a send per source (`ENGINE_INTEGRATION.md` 3.7) |
 | `AL_XBOX_stats` | `alXboxGetStats`: CPU cycles of the output thread and of the voice tick, AC97 buffers, underruns (3.8) |
 | `AL_XBOX_output_callback` | `alXboxOutputCallback`: a function that sees, and may change, every block of the final mix (3.9) |
+| `AL_XBOX_pool_size` | `alXboxSetPoolSize`: the size of the contiguous APU memory pool the next device open allocates (default 2 MiB) |
 | `AL_XBOX_update` | `alXboxUpdateVoices`, the per-frame tick |
 
 ## Limits
