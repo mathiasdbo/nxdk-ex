@@ -42,6 +42,9 @@ typedef struct {
     uint64_t cycles;        /* CPU cycles in pump passes, the thread hook and the output hook included */
     uint32_t max_cycles;    /* longest pass */
     uint64_t hook_cycles;   /* of which in the output hook */
+    uint64_t fifo_cycles;   /* of which reading the GP's mix (apu_gp_fifo_read) */
+    uint64_t queue_cycles;  /* of which copying blocks to the codec's buffers and queueing them */
+    uint64_t thread_hook_cycles;   /* of which in the thread hook (scrubbing played stream data) */
     uint32_t cycle_hz;      /* rate of the cycle counter, measured since the start (0 until 10 ms have passed) */
 } apu_ac97_stats_t;
 

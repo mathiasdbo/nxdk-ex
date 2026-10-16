@@ -913,6 +913,9 @@ AL_API void AL_APIENTRY alXboxGetStats(ALXBOXSTATS *stats) {
     s.ac97_underruns = a.underruns;
     s.ac97_padded = a.padded;
     s.output_threaded = a.threaded ? AL_TRUE : AL_FALSE;
+    s.output_fifo_cycles = a.fifo_cycles;
+    s.output_queue_cycles = a.queue_cycles;
+    s.output_scrub_cycles = a.thread_hook_cycles;
     n = (stats->size < sizeof(s)) ? stats->size : (ALuint)sizeof(s);
     s.size = stats->size;
     memcpy(stats, &s, n);

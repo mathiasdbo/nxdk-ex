@@ -326,6 +326,10 @@ typedef struct ALXBOXSTATS {
     ALuint ac97_underruns;
     ALuint ac97_padded;
     ALuint output_threaded;              /* AL_TRUE while the output thread runs */
+    /* output_cycles split (the rest: the codec's registers, the pass itself) */
+    unsigned long long output_fifo_cycles;    /* reading the APU's mix */
+    unsigned long long output_queue_cycles;   /* copying it to the codec's buffers */
+    unsigned long long output_scrub_cycles;   /* silencing played stream data */
 } ALXBOXSTATS;
 
 AL_API void AL_APIENTRY alXboxGetStats(ALXBOXSTATS *stats);
