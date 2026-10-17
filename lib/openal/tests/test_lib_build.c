@@ -230,6 +230,13 @@ int main(void) {
                 }
                 get_stats(NULL);
                 assert(alGetError() == AL_INVALID_VALUE);
+            } else if (strcmp(name, "AL_XBOX_pool_size") == 0) {
+                /* takes effect at the next open (test_buffer_cpu.c checks the size) */
+                LPALXBOXSETPOOLSIZE set_pool =
+                    (LPALXBOXSETPOOLSIZE)ptr_to_fn(alGetProcAddress("alXboxSetPoolSize"));
+                assert(set_pool != NULL);
+                set_pool(256 * 1024);
+                set_pool(0);
             } else if (strcmp(name, "AL_XBOX_output_callback") == 0) {
                 LPALXBOXOUTPUTCALLBACK set_cb =
                     (LPALXBOXOUTPUTCALLBACK)ptr_to_fn(alGetProcAddress("alXboxOutputCallback"));

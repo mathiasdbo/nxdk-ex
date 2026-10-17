@@ -203,6 +203,9 @@ int main(void) {
         assert(p_al == p_alc);
         assert(alIsExtensionPresent("AL_XBOX_update") == AL_TRUE);
         assert(strstr(alGetString(AL_EXTENSIONS), "AL_XBOX_update") != NULL);
+        assert(alGetProcAddress("alXboxSetPoolSize") == (void *)alXboxSetPoolSize);
+        assert(alIsExtensionPresent("AL_XBOX_pool_size") == AL_TRUE);
+        assert(strstr(alGetString(AL_EXTENSIONS), "AL_XBOX_pool_size") != NULL);
     }
 
     alDeleteBuffers(1, &buf);
