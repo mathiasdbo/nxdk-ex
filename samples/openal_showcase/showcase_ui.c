@@ -10,15 +10,17 @@
 #  define HAS_PBKIT 1
 #endif
 
+#if defined(HAS_PBKIT)
 static bool s_pbkit_active = false;
 static bool s_text_overlay = true;   /* pbkit text dashboard (off when the 3D scene draws the HUD) */
+#endif
 static uint32_t s_frame_count = 0;
 
 int showcase_ui_init(void) {
     s_frame_count = 0;
-    s_pbkit_active = false;
 
 #if defined(HAS_PBKIT)
+    s_pbkit_active = false;
     XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
     if (pb_init() == 0) {
         pb_show_front_screen();
@@ -32,7 +34,11 @@ int showcase_ui_init(void) {
 }
 
 void showcase_ui_set_text_overlay(bool enabled) {
+#if defined(HAS_PBKIT)
     s_text_overlay = enabled;
+#else
+    (void)enabled;
+#endif
 }
 
 void showcase_ui_begin_frame(void) {
