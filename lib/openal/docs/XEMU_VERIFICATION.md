@@ -1563,6 +1563,15 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
   switch hung (it is now done once), and the test tone's float phase sum clicked once per loop (now
   `fill_tone`). In xemu, whose codec is neither locked nor smooth, zero-copy ran without underruns but slipped
   (35 slips in 6 min), and the refill must not follow the S/PDIF DMA, which xemu does not run.
+* EFX probes (phase 8, `samples/apu_efx_probe`, 2026-10-17; details in EFX_PLAN.md 2.1). Outputs 4/5 reach
+  any bin pair 2/3..8/9 at full level on plain, HRTF and stereo voices (stereo left on the even bin, right on
+  the odd). HRTF spare slots land on bin 30 (bin 31 stays clean). Rewriting `CFG_VBIN` or the `CFG_FMT` bin
+  bits on a playing voice moves its outputs at once, with no click on the unchanged outputs. The voice filter
+  works live: `FMODE` 1 is a resonant 2-pole lowpass on `TAR_FCA` (cutoff s4.12 in octaves, 0 about 8 kHz;
+  Q field = damping, 0 resonates by +25..33 dB), `FMODE` 2 boosts around the cutoff when Q is set, `FMODE` 3
+  looks like both in series; FCA/FCB per mode is still open. The GP frame loop + Freeverb kernel
+  (`apu_gp_reverb`) matches the monolithic program: decay -29.8 / -9.9 dB for T60 1 / 3 s, 0 timeouts, 0
+  underruns over 64 s.
 * Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
   from a spherical-head model (Brown-Duda head-shadow shelf per ear as a 31-tap int8 FIR, Woodworth ITD in
   s6.9; 32 azimuths x elevations -30/0/30/60; no measured data, no pinna cues). `apu_vp_init()` uploads it with

@@ -1,8 +1,8 @@
 # ALC_EXT_EFX on the APU: implementation plan
 
-Branch `feat/openal-efx`. Workflow phase 8 (`.agents/workflow/state.json`). Status: phase8-01 (EFX objects)
-and phase8-02 (frame loop, kernel, mailbox) done on the host; phase8-00 (console probe) built, waiting for the
-console; phases 03-05 to do.
+Branch `feat/openal-efx`. Workflow phase 8 (`.agents/workflow/state.json`). Status: phase8-00 (console probe) done,
+results in 2.1; phase8-01..03 done on the host, phase8-02's reverb confirmed on a console (2.1); phases 04-05
+to do.
 
 ## 1. Goal
 
@@ -30,11 +30,11 @@ The pasted design (`al_nxdk.h` sketch) gets the mapping right; these details dif
 | Mixbins are 24-bit float | 24-bit fixed point (Q23), 32 samples a frame at `X:$1400 + 32n`; clip at 1.0, no headroom (headroom needs front-end methods) |
 | Dry bins go straight to the AC97 | Everything passes the GP: its program reads bins 0/1 and writes the only output, the FIFO ring the AC97 reads (zero-copy). Any program must emit dry + wet |
 | Stereo source = 2 linked voices | One record; left on even outputs, right on odd |
-| 16-bit gain per output | 8 outputs, each a 5-bit bin and a 12-bit attenuation (1/64 dB). Bins are written at voice start; rewriting `VBIN` on a playing voice is unprobed |
+| 16-bit gain per output | 8 outputs, each a 5-bit bin and a 12-bit attenuation (1/64 dB). Rewriting `VBIN` / `CFG_FMT` bins on a playing voice takes effect at once (2.1) |
 | 256 hardware voices | 256 records, 120 used (64 with HRTF) |
 | GP runs I3DL2 / chorus natively | GP runs only what we load: the copy program or `gp_reverb.asm` (Freeverb, 165 words) |
 | Scratch page table at `0xFE802000` | `GPSADDR` + SGE table, already working (`apu_gp.c`) |
-| Per-voice SVF "for free" | `CFG_MISC.FMODE` / `TAR_FCA` / `TAR_FCB` exist; on a console only "FMODE 1 and 3 change the level" is known |
+| Per-voice SVF "for free" | A per-voice resonant 2-pole lowpass (`FMODE` 1), live; calibration open (2.1) |
 | `float_to_dsp24`, RT60 maths | Fine for the generic reverb (`apu_reverb_coefficients` does it); a Half-Life kernel needs its own integers |
 
 Also from the tree:
@@ -47,6 +47,20 @@ Also from the tree:
   uses 25 delay lines (about 50 descriptors). There is room for one heavy effect, not two.
 - **No mailbox.** Coefficients are single live X-word writes; a pre-delay change rewrites descriptors with the
   wet gain at zero for a frame.
+
+### 2.1 Console results (phase8-00, 2026-10-17)
+
+`samples/apu_efx_probe`, log `E:pu_efx_probe.txt`; RMS on a 5657 tone, frame rate 1493-1505/s throughout.
+
+| Probe | Result |
+|---|---|
+| Send bins | Outputs 4/5 reach any bin pair 2/3 .. 8/9 at full level (5656) on plain, HRTF and stereo voices, nothing elsewhere; stereo left only on the even bin, right only on the odd. The send routing of 3.2 holds |
+| Bin 30 | HRTF spare slots land on bin 30 (RMS 5295 unless muted); bin 31 stays clean. No kernel may read bin 30. The probe's `0x20AC` rewrite changed nothing visible (the register's role stays open) |
+| Live re-route | `CFG_VBIN` and the `CFG_FMT` bin bits move a playing voice's outputs at once. Dry bins: no click (largest step 1048 against the tone's 1044). The moved send starts abruptly (step 3062): a live move needs a volume ramp. Not needed by 3.2 (only volumes change) |
+| VP filter | Live writes work. `FMODE` 0 and `FMODE` 2 with Q 0 are flat (within the +-3 dB of the band estimate). **`FMODE` 1: resonant 2-pole lowpass on `TAR_FCA`**: cutoff s4.12 in octaves (-0x1000 = one octave down, 0 about 8 kHz), Q (31:16) is damping (0: +25..33 dB peak, 0x4000: about +6 dB, about -12 dB/octave above). `FMODE` 2 with Q 0x4000: a boost around the cutoff (+7..+14 dB). `FMODE` 3 looks like 1 and 2 in series. FCA and FCB were written together; which mode uses which is open |
+| Mailbox / GP | (phase8-02 on the real loop) `apu_gp_reverb`: decay -29.8 / -9.9 dB at 0.5 s for T60 1 / 3 s (expected -30 / -10), waits max 810 polls, 0 timeouts, 0 underruns over 64 s: identical to the monolithic program |
+
+Toolchain note: nxdk's pdclib `lrint*()` is an `assert(0)` stub; round by hand.
 
 ## 3. Design
 
@@ -156,9 +170,11 @@ so existing code is unchanged; `AL_XBOX_REVERB_OUTPUT_LOWPASS` stays an Xbox ext
 ### 3.7 Filters
 
 `alGenFilters` and the object API work; `AL_FILTER_NULL` is accepted everywhere. `AL_FILTER_LOWPASS`,
-`HIGHPASS`, `BANDPASS` give `AL_INVALID_VALUE` until probe step 4 (phase8-00) shows a usable per-voice filter. If it does, the
-direct filter maps to the voice filter (it acts on all outputs, so a send filter whose HF differs from the
-direct one gets its gain only, documented); that is a follow-up task, not Phase 1.
+`HIGHPASS`, `BANDPASS` give `AL_INVALID_VALUE` in Phase 1. Probe step 4 found a usable per-voice lowpass
+(`FMODE` 1, 2.1), so `AL_FILTER_LOWPASS` becomes a follow-up task: a calibration probe first (Q sweep up to
+0xFFFF for a flat response, FCA vs FCB per mode, positive cutoffs, a finer frequency scale), then `GAINHF`
+at `LOWPASS_GAINHF`'s 5 kHz reference mapped to a cutoff, `GAIN` on the volumes. The voice filter acts on all
+outputs, so a send filter whose HF differs from the direct one gets its gain only (documented).
 
 ## 4. Tasks
 
@@ -190,6 +206,6 @@ library than the ABI and the mailbox.
 |---|---|
 | `VBIN` cannot change on a playing voice | bin changes apply at the next play (documented); the engine sets sends before playing |
 | The split loop costs too much with the reverb | keep the reverb monolithic for `AL_EFFECT_REVERB`; custom kernels replace the whole program with a loop template we ship |
-| The VP filter is unusable | filters stay `AL_INVALID_VALUE`; muffling via `AL_XBOX_REVERB_OUTPUT_LOWPASS` or the game's kernel |
+| The VP filter is unusable | probed usable (2.1); until the follow-up, filters stay `AL_INVALID_VALUE` and muffling goes via `AL_XBOX_REVERB_OUTPUT_LOWPASS` or the game's kernel |
 | A custom kernel overruns the frame | `padded` / `slips` in `AL_XBOX_stats` and `AL_XBOX_GP_KERNEL_CYCLES` show it; nothing guards it on the DSP |
 | Games expect several slots (EAX-style per-room) | one active effect is reported by `AL_INVALID_OPERATION`; a later phase links several light kernels into one image |
