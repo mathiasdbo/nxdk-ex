@@ -5,6 +5,7 @@
 #include "apu_gp.h"
 #include "apu_reverb.h"
 #include "apu_vp.h"
+#include "apu_platform.h"
 #include <string.h>
 #include <math.h>
 #include <float.h>
@@ -15,6 +16,8 @@
  * ============================================================================
  */
 static ALsource g_sources[AL_MAX_SOURCES];
+static ALuint s_source_end;   /* al_source_id_end() */
+static uint64_t s_tick_stream_cycles, s_tick_voice_cycles;   /* al_source_tick_cycles(), per device */
 static bool s_subsystem_initialized = false;
 static uintptr_t s_apu_base = 0; /* 0: no base installed, see al_source_get_apu_base() */
 static uint32_t s_spatial_calc_count = 0;
@@ -115,6 +118,8 @@ void al_source_init_subsystem(void) {
     apu_ac97_set_thread_hook(al_stream_scrub_tick);   /* streams are silenced behind their voices */
     apu_spatial_reset();
     s_play_seq = 0;
+    s_source_end = 0;
+    s_tick_stream_cycles = s_tick_voice_cycles = 0;
     s_subsystem_initialized = true;
 }
 
@@ -136,6 +141,8 @@ void al_source_cleanup_subsystem(void) {
     al_stream_shutdown();
     apu_voice_mgr_deinit();
     apu_spatial_reset();
+    s_source_end = 0;
+    s_tick_stream_cycles = s_tick_voice_cycles = 0;
     s_subsystem_initialized = false;
 }
 
@@ -155,6 +162,17 @@ ALsource *al_source_get(ALuint id) {
         return NULL;
     }
     return src->in_use ? src : NULL;
+}
+
+ALuint al_source_id_end(void) {
+    return s_source_end;
+}
+
+/* After deletions: down to the highest source still in use */
+static void source_trim_end(void) {
+    while (s_source_end > 0 && !g_sources[s_source_end - 1].in_use) {
+        s_source_end--;
+    }
 }
 
 const ALbuffer *al_source_play_buffer(const ALsource *src) {
@@ -414,7 +432,7 @@ static void source_update_hw(const ALsource *src, unsigned fields) {
 
 void al_source_update_all_spatial(void) {
     ensure_subsystem_initialized();
-    for (size_t i = 0; i < AL_MAX_SOURCES; i++) {
+    for (size_t i = 0; i < s_source_end; i++) {
         ALsource *src = &g_sources[i];
         if (src->in_use) {
             source_update_hw(src, SRC_HW_SPATIAL);
@@ -649,15 +667,25 @@ static void source_update_stream(ALsource *src) {
 
 static void reverb_sync(void);
 
+void al_source_tick_cycles(uint64_t *stream, uint64_t *voices) {
+    *stream = s_tick_stream_cycles;
+    *voices = s_tick_voice_cycles;
+}
+
 void al_source_update_frame(void) {
+    uint64_t t0, t1;
     ensure_subsystem_initialized();
-    for (size_t i = 0; i < AL_MAX_SOURCES; i++) {
+    t0 = apu_platform_cycles();
+    for (size_t i = 0; i < s_source_end; i++) {
         if (g_sources[i].in_use) {
             source_update_stream(&g_sources[i]);
         }
     }
+    t1 = apu_platform_cycles();
+    s_tick_stream_cycles += t1 - t0;
     apu_voice_mgr_update(al_source_get_apu_base());
-    reverb_sync();
+    s_tick_voice_cycles += apu_platform_cycles() - t1;
+    reverb_sync();   /* in the update's unsplit rest (ALXBOXSTATS) */
 }
 
 
@@ -703,6 +731,9 @@ AL_API void AL_APIENTRY alGenSources(ALsizei n, ALuint *sources) {
             source_reset_defaults(src, (ALuint)(i + 1));
             src->in_use = true;
             sources[allocated++] = src->id;
+            if (src->id > s_source_end) {
+                s_source_end = src->id;
+            }
         }
     }
 }
@@ -752,6 +783,7 @@ AL_API void AL_APIENTRY alDeleteSources(ALsizei n, const ALuint *sources) {
             source_reset_defaults(src, id);
         }
     }
+    source_trim_end();
 }
 
 AL_API ALboolean AL_APIENTRY alIsSource(ALuint source) {

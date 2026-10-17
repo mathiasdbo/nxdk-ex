@@ -326,6 +326,14 @@ typedef struct ALXBOXSTATS {
     ALuint ac97_underruns;
     ALuint ac97_padded;
     ALuint output_threaded;              /* AL_TRUE while the output thread runs */
+    /* output_cycles split (the rest: the codec's registers, the pass itself) */
+    unsigned long long output_fifo_cycles;    /* reading the APU's mix */
+    unsigned long long output_queue_cycles;   /* copying it to the codec's buffers */
+    unsigned long long output_scrub_cycles;   /* silencing played stream data */
+    /* update_cycles split (the rest: the reverb check, the call itself) */
+    unsigned long long update_stream_cycles;  /* bringing streams up to date */
+    unsigned long long update_voice_cycles;   /* the voice manager and the APU service */
+    unsigned long long update_service_cycles; /* of it, the APU service (apu_vp_service) */
 } ALXBOXSTATS;
 
 AL_API void AL_APIENTRY alXboxGetStats(ALXBOXSTATS *stats);

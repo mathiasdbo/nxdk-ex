@@ -16,9 +16,14 @@ extern "C" {
 #endif
 
 /**
- * Maximum number of concurrent OpenAL sources supported.
+ * Maximum number of concurrent OpenAL sources supported. An application that
+ * needs fewer may define it smaller for every library file (a source is ~160
+ * bytes of bss); the per-frame tick only walks up to the highest source in
+ * use either way (al_source_id_end).
  */
+#ifndef AL_MAX_SOURCES
 #define AL_MAX_SOURCES 256
+#endif
 
 /**
  * Sentinel value indicating no hardware voice is currently bound.
@@ -95,6 +100,14 @@ void al_source_cleanup_subsystem(void);
  * @return Pointer to ALsource if valid and in use, NULL otherwise.
  */
 ALsource *al_source_get(ALuint id);
+
+/** The highest source name in use (0 with none): loops over the sources
+ * stop there instead of at AL_MAX_SOURCES. */
+ALuint al_source_id_end(void);
+
+/** Cycles the voice tick spent bringing streams up to date and in the voice
+ * manager (with the APU service), since the start (AL_XBOX_stats) */
+void al_source_tick_cycles(uint64_t *stream, uint64_t *voices);
 
 /**
  * Override the APU base MMIO address used by the source subsystem (host testing support).
