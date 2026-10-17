@@ -47,6 +47,7 @@ struct ALCcontext_struct {
     ALCint sync;                        /**< Synchronous context flag (ALC_FALSE) */
     ALCint mono_sources;                /**< Mono source hints (default: 64) */
     ALCint stereo_sources;              /**< Stereo source hints (default: 32) */
+    ALCint max_aux_sends;               /**< ALC_MAX_AUXILIARY_SENDS (ALC_EXT_EFX), 0..2 */
 };
 
 /*

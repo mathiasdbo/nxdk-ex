@@ -2,7 +2,9 @@
 #define _CRT_SECURE_NO_WARNINGS
 #endif
 
+#define AL_ALEXT_PROTOTYPES
 #include "alc_context.h"
+#include "al_efx.h"
 #include <AL/al.h>
 #include <AL/alext.h>
 #include <string.h>
@@ -98,7 +100,41 @@ static const struct {
     { "alXboxGetStats",          (ALC_PROC)alXboxGetStats },
     { "alXboxOutputCallback",    (ALC_PROC)alXboxOutputCallback },
     { "alXboxSetPoolSize",       (ALC_PROC)alXboxSetPoolSize },
-    { "alBufferDataStatic",      (ALC_PROC)alBufferDataStatic }
+    { "alBufferDataStatic",      (ALC_PROC)alBufferDataStatic },
+    /* ALC_EXT_EFX */
+    { "alGenEffects",                  (ALC_PROC)alGenEffects },
+    { "alDeleteEffects",               (ALC_PROC)alDeleteEffects },
+    { "alIsEffect",                    (ALC_PROC)alIsEffect },
+    { "alEffecti",                     (ALC_PROC)alEffecti },
+    { "alEffectiv",                    (ALC_PROC)alEffectiv },
+    { "alEffectf",                     (ALC_PROC)alEffectf },
+    { "alEffectfv",                    (ALC_PROC)alEffectfv },
+    { "alGetEffecti",                  (ALC_PROC)alGetEffecti },
+    { "alGetEffectiv",                 (ALC_PROC)alGetEffectiv },
+    { "alGetEffectf",                  (ALC_PROC)alGetEffectf },
+    { "alGetEffectfv",                 (ALC_PROC)alGetEffectfv },
+    { "alGenFilters",                  (ALC_PROC)alGenFilters },
+    { "alDeleteFilters",               (ALC_PROC)alDeleteFilters },
+    { "alIsFilter",                    (ALC_PROC)alIsFilter },
+    { "alFilteri",                     (ALC_PROC)alFilteri },
+    { "alFilteriv",                    (ALC_PROC)alFilteriv },
+    { "alFilterf",                     (ALC_PROC)alFilterf },
+    { "alFilterfv",                    (ALC_PROC)alFilterfv },
+    { "alGetFilteri",                  (ALC_PROC)alGetFilteri },
+    { "alGetFilteriv",                 (ALC_PROC)alGetFilteriv },
+    { "alGetFilterf",                  (ALC_PROC)alGetFilterf },
+    { "alGetFilterfv",                 (ALC_PROC)alGetFilterfv },
+    { "alGenAuxiliaryEffectSlots",     (ALC_PROC)alGenAuxiliaryEffectSlots },
+    { "alDeleteAuxiliaryEffectSlots",  (ALC_PROC)alDeleteAuxiliaryEffectSlots },
+    { "alIsAuxiliaryEffectSlot",       (ALC_PROC)alIsAuxiliaryEffectSlot },
+    { "alAuxiliaryEffectSloti",        (ALC_PROC)alAuxiliaryEffectSloti },
+    { "alAuxiliaryEffectSlotiv",       (ALC_PROC)alAuxiliaryEffectSlotiv },
+    { "alAuxiliaryEffectSlotf",        (ALC_PROC)alAuxiliaryEffectSlotf },
+    { "alAuxiliaryEffectSlotfv",       (ALC_PROC)alAuxiliaryEffectSlotfv },
+    { "alGetAuxiliaryEffectSloti",     (ALC_PROC)alGetAuxiliaryEffectSloti },
+    { "alGetAuxiliaryEffectSlotiv",    (ALC_PROC)alGetAuxiliaryEffectSlotiv },
+    { "alGetAuxiliaryEffectSlotf",     (ALC_PROC)alGetAuxiliaryEffectSlotf },
+    { "alGetAuxiliaryEffectSlotfv",    (ALC_PROC)alGetAuxiliaryEffectSlotfv }
 };
 
 /* The APU pool size the next alcOpenDevice allocates; 0 is the default */
@@ -341,6 +377,7 @@ ALC_API ALCboolean ALC_APIENTRY alcCloseDevice(ALCdevice *device) {
         if (s_active_device_count == 0) {
             /* Deinitialize OpenAL subsystems */
             al_source_cleanup_subsystem();
+            al_efx_reset();
             al_buffer_cleanup_subsystem();
             al_listener_reset();
 
@@ -404,6 +441,7 @@ ALC_API ALCcontext * ALC_APIENTRY alcCreateContext(ALCdevice *device, const ALCi
     ctx->sync = ALC_FALSE;
     ctx->mono_sources = (ALCint)apu_voice_slot_count();
     ctx->stereo_sources = (ALCint)(apu_voice_slot_count() / 2u);
+    ctx->max_aux_sends = AL_EFX_MAX_SENDS;
 
     if (attrlist != NULL) {
         for (const ALCint *attr = attrlist; *attr != 0; attr += 2) {
@@ -424,6 +462,10 @@ ALC_API ALCcontext * ALC_APIENTRY alcCreateContext(ALCdevice *device, const ALCi
                     break;
                 case ALC_STEREO_SOURCES:
                     ctx->stereo_sources = val;
+                    break;
+                case ALC_MAX_AUXILIARY_SENDS:
+                    /* A request: the context gets at most the hardware's two sends */
+                    ctx->max_aux_sends = (val < 0) ? 0 : (val > AL_EFX_MAX_SENDS ? AL_EFX_MAX_SENDS : val);
                     break;
                 default:
                     break;
@@ -457,6 +499,7 @@ ALC_API ALCboolean ALC_APIENTRY alcMakeContextCurrent(ALCcontext *context) {
 
     s_current_context = context;
     context->device->active_context = context;
+    al_efx_set_max_sends(context->max_aux_sends);
     return ALC_TRUE;
 }
 
@@ -554,7 +597,7 @@ ALC_API const ALCchar * ALC_APIENTRY alcGetString(ALCdevice *device, ALCenum par
             return "MCPX APU 5.1 Surround\0";
 
         case ALC_EXTENSIONS:
-            return "";
+            return "ALC_EXT_EFX";
 
         case ALC_CAPTURE_DEVICE_SPECIFIER:
         case ALC_CAPTURE_DEFAULT_DEVICE_SPECIFIER:
@@ -564,6 +607,12 @@ ALC_API const ALCchar * ALC_APIENTRY alcGetString(ALCdevice *device, ALCenum par
             alc_set_error(device, ALC_INVALID_ENUM);
             return NULL;
     }
+}
+
+/* Sends per source of the device's current context (the default without one) */
+static ALCint alc_aux_sends(const ALCdevice *device) {
+    return (device != NULL && device->active_context != NULL) ? device->active_context->max_aux_sends
+                                                              : (ALCint)AL_EFX_MAX_SENDS;
 }
 
 ALC_API void ALC_APIENTRY alcGetIntegerv(ALCdevice *device, ALCenum param, ALCsizei size, ALCint *values) {
@@ -582,11 +631,11 @@ ALC_API void ALC_APIENTRY alcGetIntegerv(ALCdevice *device, ALCenum param, ALCsi
             break;
 
         case ALC_ATTRIBUTES_SIZE:
-            *values = 11;
+            *values = 13;
             break;
 
         case ALC_ALL_ATTRIBUTES:
-            if (size < 11) {
+            if (size < 13) {
                 alc_set_error(device, ALC_INVALID_VALUE);
                 return;
             }
@@ -600,7 +649,9 @@ ALC_API void ALC_APIENTRY alcGetIntegerv(ALCdevice *device, ALCenum param, ALCsi
             values[7] = (ALCint)apu_voice_slot_count();
             values[8] = ALC_STEREO_SOURCES;
             values[9] = (ALCint)(apu_voice_slot_count() / 2u);
-            values[10] = 0;
+            values[10] = ALC_MAX_AUXILIARY_SENDS;
+            values[11] = alc_aux_sends(device);
+            values[12] = 0;
             break;
 
         case ALC_FREQUENCY:
@@ -627,6 +678,19 @@ ALC_API void ALC_APIENTRY alcGetIntegerv(ALCdevice *device, ALCenum param, ALCsi
             *values = 0;
             break;
 
+        /* ALC_EXT_EFX */
+        case ALC_EFX_MAJOR_VERSION:
+            *values = 1;
+            break;
+
+        case ALC_EFX_MINOR_VERSION:
+            *values = 0;
+            break;
+
+        case ALC_MAX_AUXILIARY_SENDS:
+            *values = alc_aux_sends(device);
+            break;
+
         case ALC_XBOX_TOPOLOGY:
             if (device != NULL) {
                 *values = (ALCint)device->topology;
@@ -649,7 +713,10 @@ ALC_API void ALC_APIENTRY alcGetIntegerv(ALCdevice *device, ALCenum param, ALCsi
 
 ALC_API ALCboolean ALC_APIENTRY alcIsExtensionPresent(ALCdevice *device, const ALCchar *extname) {
     (void)device;
-    (void)extname;
+    /* Keep in sync with alcGetString(ALC_EXTENSIONS) */
+    if (extname != NULL && strcmp(extname, ALC_EXT_EFX_NAME) == 0) {
+        return ALC_TRUE;
+    }
     return ALC_FALSE;
 }
 
