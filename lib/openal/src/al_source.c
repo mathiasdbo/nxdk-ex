@@ -2015,46 +2015,69 @@ static void reverb_params(void) {
     }
 }
 
-/* The parameters of the GP effect, false if there is none */
-static bool gp_effect(apu_reverb_params_t *p) {
+/* What the GP runs: the reverb (`p`), an AL_XBOX_gp_program kernel (`k`, `params`) or nothing */
+typedef enum { GP_NONE, GP_REVERB, GP_KERNEL } gp_kind_t;
+
+static gp_kind_t gp_effect(apu_reverb_params_t *p, apu_gp_kernel_t *k, const uint32_t **params) {
     const al_efx_slot_t *slot;
     reverb_params();
+    *p = s_reverb;
     if (s_reverb_enabled) {
-        *p = s_reverb;
-        return true;
+        return GP_REVERB;
     }
     slot = al_efx_slot(al_efx_active_slot());
     if (slot && (slot->props.type == AL_EFFECT_REVERB || slot->props.type == AL_EFFECT_EAXREVERB)) {
         al_efx_reverb_params(slot, p);
-        return true;
+        return GP_REVERB;
     }
-    *p = s_reverb;
-    return false;
+    if (al_efx_slot_kernel(slot, k, params)) {
+        return GP_KERNEL;
+    }
+    return GP_NONE;
 }
 
 static void reverb_apply(void) {
     apu_reverb_params_t p;
-    bool on = gp_effect(&p);
+    apu_gp_kernel_t k;
+    const uint32_t *params = NULL;
+    gp_kind_t kind = gp_effect(&p, &k, &params);
+    uintptr_t base = al_source_get_apu_base();
     if (!apu_gp_ready() || apu_vp_front_end_ok()) {
         return;
     }
-    (void)apu_gp_reverb_set(al_source_get_apu_base(), &p, on);
+    if (kind == GP_KERNEL) {
+        (void)apu_gp_kernel_set(base, &k, params, true);
+        return;
+    }
+    (void)apu_gp_kernel_set(base, NULL, NULL, false);
+    (void)apu_gp_reverb_set(base, &p, kind == GP_REVERB);
 }
 
 static void reverb_sync(void) {
     apu_reverb_params_t p;
-    if (gp_effect(&p) && !apu_gp_reverb_on()) {
+    apu_gp_kernel_t k;
+    const uint32_t *params;
+    if (gp_effect(&p, &k, &params) != GP_NONE && !apu_gp_reverb_on() && !apu_gp_kernel_on()) {
         reverb_apply();
     }
 }
 
 bool al_reverb_active(void) {
     apu_reverb_params_t p;
-    return gp_effect(&p) && apu_gp_reverb_on();
+    apu_gp_kernel_t k;
+    const uint32_t *params;
+    return gp_effect(&p, &k, &params) == GP_REVERB && apu_gp_reverb_on();
 }
 
 bool al_source_debug_gp_effect(apu_reverb_params_t *p) {
-    return gp_effect(p);
+    apu_gp_kernel_t k;
+    const uint32_t *params;
+    return gp_effect(p, &k, &params) == GP_REVERB;
+}
+
+bool al_source_debug_gp_kernel(apu_gp_kernel_t *k, const uint32_t **params) {
+    apu_reverb_params_t p;
+    return gp_effect(&p, k, params) == GP_KERNEL;
 }
 
 bool al_source_debug_sends(ALuint source, float out[APU_VOICE_SENDS]) {

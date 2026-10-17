@@ -97,6 +97,7 @@ static const struct {
     { "alXboxReverbPreset",      (ALC_PROC)alXboxReverbPreset },
     { "alXboxReverbf",           (ALC_PROC)alXboxReverbf },
     { "alXboxGetReverbf",        (ALC_PROC)alXboxGetReverbf },
+    { "alXboxEffectProgram",     (ALC_PROC)alXboxEffectProgram },
     { "alXboxGetStats",          (ALC_PROC)alXboxGetStats },
     { "alXboxOutputCallback",    (ALC_PROC)alXboxOutputCallback },
     { "alXboxSetPoolSize",       (ALC_PROC)alXboxSetPoolSize },
@@ -906,6 +907,16 @@ AL_API void AL_APIENTRY alXboxGetHardwareStatus(ALenum param, ALint *value) {
         case AL_XBOX_REVERB_ACTIVE:
             *value = (s_active_device_count > 0 && al_reverb_active()) ? 1 : 0;
             break;
+
+        case AL_XBOX_GP_LOAD:
+        case AL_XBOX_GP_LOAD_PEAK: {
+            uint32_t last = 0, peak = 0;
+            if (s_active_device_count > 0) {
+                apu_gp_load(al_source_get_apu_base(), &last, param == AL_XBOX_GP_LOAD_PEAK ? &peak : NULL);
+            }
+            *value = (ALint)(param == AL_XBOX_GP_LOAD_PEAK ? peak : last);
+            break;
+        }
 
         case AL_XBOX_BUFFER_BYTES:
             *value = (ALint)al_buffer_held_bytes();

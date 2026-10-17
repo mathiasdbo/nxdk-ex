@@ -245,6 +245,9 @@ bool al_reverb_active(void);
  * re-apply it and update every voice's sends. */
 void al_source_effects_changed(void);
 
+/** Tests: the custom kernel the GP should run (an active AL_EFFECT_XBOX_GP_PROGRAM slot with an image). */
+bool al_source_debug_gp_kernel(apu_gp_kernel_t *k, const uint32_t **params);
+
 /** Host tests: the GP effect's parameters (false: none runs), and a source's send gains as they would reach its voice. */
 bool al_source_debug_gp_effect(apu_reverb_params_t *p);
 bool al_source_debug_sends(ALuint source, float out[APU_VOICE_SENDS]);

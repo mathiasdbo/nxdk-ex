@@ -1,8 +1,7 @@
 # ALC_EXT_EFX on the APU: implementation plan
 
 Branch `feat/openal-efx`. Workflow phase 8 (`.agents/workflow/state.json`). Status: phase8-00 (console probe) done,
-results in 2.1; phase8-01..03 done on the host, phase8-02's reverb confirmed on a console (2.1); phases 04-05
-to do.
+results in 2.1; phase8-01..04 done on the host, phase8-02's reverb confirmed on a console (2.1); phase 05 to do.
 
 ## 1. Goal
 
@@ -114,9 +113,10 @@ As built:
 
 | Where | What |
 |---|---|
-| P:$000-$0FF | the loop (108 words) |
+| P:$000-$0FF | the loop (116 words) |
 | P:$100-$7FF | the kernel (the reverb: 101 words); entry at $100, returns with `rts` |
-| X:$00 / X:$08 | copy descriptor (bins 0/1) / mix descriptor (OUT L/R), both to FIFO 0 |
+| X:$00 / X:$08 | copy descriptor (bins 0/1) / mix descriptor (OUT L/R), both to FIFO 0 (both written by `apu_gp_init`) |
+| X:$07 / X:$0F | IDLE (START_FRAME polls before this frame) / IDLMIN (the smallest since the CPU wrote $7FFFFF): the load meter |
 | X:$10-$1F | CNT, FLAGS (bit 0 kernel on), BURN, SPINS, SPMAX, TMOUT, MB_SEQ, MB_ACK, MB_N, K_RHEAD, K_WHEAD, OUTLP, OUTST[4] |
 | X:$20 / X:$40 | OUT L / OUT R (32 words each): the dry bins 0/1, the kernel adds to them, then the output lowpass |
 | X:$60-$DF | mailbox: 64 (address, value) pairs |
@@ -164,8 +164,31 @@ so existing code is unchanged; `AL_XBOX_REVERB_OUTPUT_LOWPASS` stays an Xbox ext
   scratch and descriptor quotas (`AL_INVALID_VALUE`) and keeps a copy.
 - Parameters: `alEffecti(effect, AL_XBOX_GP_PARAM0 + n, v)`, n < 32, raw 24-bit words (integers stay exact;
   `alEffectf` stores `v` as Q23). Delivered through the mailbox on a frame boundary.
-- `alXboxGetHardwareStatus(AL_XBOX_GP_KERNEL_CYCLES)`: last frame's kernel cycle count, so a game can see
-  its headroom.
+- `alXboxGetHardwareStatus(AL_XBOX_GP_LOAD / AL_XBOX_GP_LOAD_PEAK)`: the share of the frame the effect takes,
+  in percent (no cycle counter is known on the GP, so the loop counts its START_FRAME polls and the library
+  compares them with a frame without the kernel).
+
+As built (phase8-04):
+- **Image** (`tools/dsp56asm.py --image`, symbols `K_SCRATCH_BYTES` / `K_DESCRIPTORS` in the source): magic
+  `$47504B` ('GPK'), ABI 1, scratch bytes, descriptors a frame, then the code for P:$100. Checks: code 1..$700
+  words, each 24-bit, descriptors <= 60, scratch <= the device's space above $2000 (the reverb's size, about
+  180 KiB; before a device, what the next one will allocate). `alXboxEffectProgram` keeps a reference-counted
+  copy that slots share (EFX copy semantics: deleting the effect leaves the slot's copy running).
+- **ABI for custom kernels** (`dsp/gp_loop.asm`): before the first frame the library stops the kernel for two
+  frames, writes the code to P:$100 through the P window and reads it back (if the window did not take it,
+  it restarts the GP from the bootstrap image, which holds the code too; `apu_gp_debug_code_restarts`
+  counts it), zeroes X:$E0..$BFF and the declared scratch, then writes KIN $E0 (= $1440, bins 2/3), KSCR
+  $E1 (= $2000), KSCRN $E2, KPARAM0..31 $E8..$107, K_RHEAD = 0, K_WHEAD = FIFO2, and switches the kernel on.
+  The kernel sets up its descriptors and chain heads itself on its first call; its X starts at KOWN $108;
+  Y is its own and not initialised.
+- **Parameters**: `alEffecti` stores -0x800000..0xFFFFFF (read back sign-extended), `alEffectf` -1..1 as Q23.
+  Attaching the effect again with the same image sends only the changed words, in one mailbox post (one
+  frame); a different image reloads the kernel. Switching back to a reverb puts its code back the same way.
+- **Example**: `dsp/gp_kecho.asm` (154 words), a stereo echo: delay 32..16384 samples (param 0, raw),
+  feedback and wet (params 1/2, Q23), two 64 KiB lines, 4 descriptors. It sets the next frame's read offsets
+  from the write offset every frame, so a new delay applies on the next frame. `tests/test_gp_programs.py` [5]
+  runs it in the simulator: the echo lands exactly DELAY samples late on each ear, feedback repeats it, a
+  delay through the mailbox applies from the next frame, and the clamp holds (about 1600 instructions a frame).
 
 ### 3.7 Filters
 

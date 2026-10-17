@@ -85,6 +85,24 @@ static uint32_t s_scratch_req;                       /* apu_gp_debug_set_scratch
 static uint32_t s_scratch_bytes = SCRATCH_BYTES;     /* in use */
 static bool s_reverb_on;
 static uint32_t s_reverb_pre;                        /* pre-delay line length laid out */
+static bool s_custom_on;                             /* a custom kernel runs (apu_gp_kernel_set) */
+static uint32_t s_p_kernel_words;                    /* code words at P:$100 (the scratch image holds the same) */
+static uint32_t s_image_end;                         /* P words the bootstrap image holds (program_loaded checks them) */
+static uint32_t s_params[APU_GP_KERNEL_PARAMS];      /* the running custom kernel's parameters */
+static uint32_t s_idle_base;                         /* START_FRAME polls of a frame without the kernel */
+static uint32_t s_code_restarts;                     /* GP restarts because the P window did not take a kernel */
+#define IDLE_NONE 0x7FFFFFu                          /* X:IDLMIN reset value */
+
+static void loop_x_init(uintptr_t bar0);
+
+/* What apu_gp_init() allocates: the reverb's delay lines for the default program */
+static uint32_t scratch_bytes_for_init(void) {
+    if (s_scratch_req) {
+        return s_scratch_req;
+    }
+    return (s_image == NULL) ? ((APU_REVERB_SCRATCH_BASE + apu_reverb_scratch_bytes() + 4095u) & ~4095u)
+                             : SCRATCH_BYTES;
+}
 
 void apu_gp_debug_set_program(const uint32_t *words, uint32_t count) {
     if (words && count > 0u && count <= SCRATCH_BYTES / 4u) {
@@ -126,8 +144,8 @@ static inline uint32_t reg_rd(uintptr_t bar0, uint32_t off) {
  */
 static bool program_loaded(uintptr_t bar0) {
 #if defined(OPENAL_TARGET_XBOX)
-    uint32_t attempt, i, spin, words;
-    const uint32_t *image = image_words(&words);
+    uint32_t attempt, i, spin, words = s_image_end;
+    const uint32_t *image = s_scratch;                   /* the bootstrap image (P:0 at scratch offset 0) */
     for (attempt = 0; attempt < 3u; attempt++) {
         bool ok = true;
         for (spin = 0; spin < 2000u; spin++) {
@@ -147,8 +165,34 @@ static bool program_loaded(uintptr_t bar0) {
     return false;
 #else
     (void)bar0;
+    (void)s_image_end;
     return true;
 #endif
+}
+
+/* The loop's X words after a (re)start: both FIFO descriptors, counters, mailbox, idle meter */
+static void loop_x_init(uintptr_t bar0) {
+    static const uint32_t desc[7] = {
+        DESC_EOL,
+        DESC_INTERLEAVE | DESC_TO_MEMORY | DESC_BUF_FIFO0 | DESC_FMT_16BIT | DESC_DSP_STEP(APU_GP_FRAME),
+        (APU_GP_FRAME << 4) | (2u - 1u),     /* 32 frames, 2 channels */
+        MIXBIN_X_BASE,                       /* bins 0 and 1 */
+        0u, 0u, 0u,                          /* scratch offset/base/size: unused for FIFOs */
+    };
+    uint32_t i;
+    for (i = 0; i < 7u; i++) {
+        uint32_t v = (i == 1u) ? ((desc[1] & ~DESC_DSP_STEP(0x3FFu)) | DESC_DSP_STEP(s_dsp_step)) : desc[i];
+        reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * i, v);
+        /* the mix descriptor: the same from OUT L/R, for every kernel */
+        reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * (GP_LOOP_FIFO2 + i), (i == 3u) ? GP_LOOP_OUTL : v);
+    }
+    for (i = FRAME_COUNTER_X; i < CLEAR_X_END; i++) {
+        reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * i, 0);   /* frame counter, loop words (mailbox 0/0), OUT L/R */
+    }
+    reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * GP_LOOP_K_WHEAD, GP_LOOP_FIFO2);
+    reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * GP_LOOP_IDLE, 0);
+    reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * GP_LOOP_IDLMIN, IDLE_NONE);
+    s_mb_seq = 0;
 }
 
 static void free_all(void) {
@@ -161,22 +205,14 @@ static void free_all(void) {
 }
 
 int apu_gp_init(uintptr_t bar0) {
-    static const uint32_t desc[7] = {
-        DESC_EOL,
-        DESC_INTERLEAVE | DESC_TO_MEMORY | DESC_BUF_FIFO0 | DESC_FMT_16BIT | DESC_DSP_STEP(APU_GP_FRAME),
-        (APU_GP_FRAME << 4) | (2u - 1u),     /* 32 frames, 2 channels */
-        MIXBIN_X_BASE,                       /* bins 0 and 1 */
-        0u, 0u, 0u,                          /* scratch offset/base/size: unused for FIFOs */
-    };
     uint32_t i, pages;
 
     if (s_ready) {
         return 0;
     }
-    s_scratch_bytes = s_scratch_req ? s_scratch_req
-                    : (s_image == NULL ? (APU_REVERB_SCRATCH_BASE + apu_reverb_scratch_bytes() + 4095u) & ~4095u
-                                                  : SCRATCH_BYTES);
+    s_scratch_bytes = scratch_bytes_for_init();
     s_reverb_on = false;
+    s_custom_on = false;
     s_fifo_bytes = s_fifo_req;
     s_scratch = (uint32_t *)apu_mem_alloc_table(s_scratch_bytes, &s_scratch_phys);
     s_scratch_sge = (uint32_t *)apu_mem_alloc_table(4096, &s_scratch_sge_phys);
@@ -196,6 +232,8 @@ int apu_gp_init(uintptr_t bar0) {
         for (i = 0; i < words; i++) {
             s_scratch[i] = image[i] & 0xFFFFFFu;
         }
+        s_image_end = words;
+        s_p_kernel_words = (s_image == NULL) ? GP_KFREEVERB_WORDS : 0u;
     }
     memset(s_fifo, 0, s_fifo_bytes);
 #if defined(OPENAL_TARGET_XBOX)
@@ -243,14 +281,7 @@ int apu_gp_init(uintptr_t bar0) {
      * while the core is held in reset (RST = 0), so it is written after the
      * release; the program waits for the first START_FRAME, and frame
      * generation only starts after this returns. */
-    for (i = 0; i < 7u; i++) {
-        reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * i,
-               (i == 1u) ? ((desc[1] & ~DESC_DSP_STEP(0x3FFu)) | DESC_DSP_STEP(s_dsp_step)) : desc[i]);
-    }
-    for (i = FRAME_COUNTER_X; i < CLEAR_X_END; i++) {
-        reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * i, 0);   /* frame counter, loop words (mailbox 0/0), OUT L/R */
-    }
-    s_mb_seq = 0;
+    loop_x_init(bar0);
     s_ready = true;
     return 0;
 }
@@ -292,6 +323,13 @@ static void write_words(uintptr_t bar0, const apu_reverb_word_t *w, uint32_t n) 
 }
 
 #define XREG(n) (MCPX_APU_GP_XMEM + 4u * (n))
+#define GP_X_END          0xC00u      /* the kernel's X ends below $C00 */
+#define KERNEL_INPUT_BIN  2u          /* every slot sends to bins 2/3 (EFX_PLAN.md 3.2) */
+
+static void kernel_stop(uintptr_t bar0);
+static void idle_calibrate(uintptr_t bar0);
+static bool kernel_code_loaded(const uint32_t *code, uint32_t words);
+static int load_code(uintptr_t bar0, const uint32_t *code, uint32_t words);
 
 /* The loop has applied every mailbox posted so far (about 20 ms of register reads at most) */
 static bool mailbox_idle(uintptr_t bar0) {
@@ -385,12 +423,14 @@ int apu_gp_reverb_set(uintptr_t bar0, const apu_reverb_params_t *p, bool on) {
         }
         return 0;
     }
-    if (s_reverb_on) {
-        reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * REVERB_FLAGS_X, 0);
-        s_reverb_on = false;
-    }
+    kernel_stop(bar0);
     /* Off for a frame so no chain is in flight, then the layout, empty lines, on */
     wait_frames(bar0, 2u);
+    idle_calibrate(bar0);
+    if (!kernel_code_loaded(gp_kfreeverb_words, GP_KFREEVERB_WORDS) &&
+        load_code(bar0, gp_kfreeverb_words, GP_KFREEVERB_WORDS) != 0) {
+        return -1;
+    }
     n = apu_reverb_layout(p, words);
     write_words(bar0, words, n);
     memset((uint8_t *)s_scratch + APU_REVERB_SCRATCH_BASE, 0, apu_reverb_scratch_bytes());
@@ -403,6 +443,194 @@ int apu_gp_reverb_set(uintptr_t bar0, const apu_reverb_params_t *p, bool on) {
 bool apu_gp_reverb_on(void) {
     return s_ready && s_reverb_on;
 }
+
+/* ---------------------------------------------------------------- custom kernels */
+
+/* Stop whichever kernel runs (the loop skips it from its next frame) */
+static void kernel_stop(uintptr_t bar0) {
+    if (s_reverb_on || s_custom_on) {
+        reg_wr(bar0, XREG(REVERB_FLAGS_X), 0);
+    }
+    s_reverb_on = false;
+    s_custom_on = false;
+}
+
+/* The idle polls of a frame without the kernel: the 0 % of apu_gp_load() */
+static void idle_calibrate(uintptr_t bar0) {
+    uint32_t v = reg_rd(bar0, XREG(GP_LOOP_IDLE)) & 0xFFFFFFu;
+    if (v) {
+        s_idle_base = v;
+    }
+}
+
+static bool kernel_code_loaded(const uint32_t *code, uint32_t words) {
+    uint32_t i;
+    if (s_p_kernel_words != words) {
+        return false;
+    }
+    for (i = 0; i < words; i++) {
+        if (s_scratch[GP_LOOP_KERNEL + i] != (code[i] & 0xFFFFFFu)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/*
+ * Code for P:$100 with the kernel stopped (the loop never calls it then): into
+ * the bootstrap image and through the P window. If the window did not take it,
+ * restart the GP, whose bootstrap then loads the image.
+ */
+static int load_code(uintptr_t bar0, const uint32_t *code, uint32_t words) {
+    uint32_t i, end = (words > s_p_kernel_words) ? words : s_p_kernel_words;
+    bool ok = true;
+    for (i = 0; i < end; i++) {
+        uint32_t v = (i < words) ? (code[i] & 0xFFFFFFu) : 0u;   /* old code beyond the new: NOP */
+        s_scratch[GP_LOOP_KERNEL + i] = v;
+        reg_wr(bar0, MCPX_APU_GP_PMEM + 4u * (GP_LOOP_KERNEL + i), v);
+    }
+    s_p_kernel_words = words;
+    s_image_end = GP_LOOP_KERNEL + words;
+#if defined(OPENAL_TARGET_XBOX)
+    for (i = 0; i < words; i++) {
+        if ((reg_rd(bar0, MCPX_APU_GP_PMEM + 4u * (GP_LOOP_KERNEL + i)) & 0xFFFFFFu) != (code[i] & 0xFFFFFFu)) {
+            ok = false;
+        }
+    }
+    if (!ok) {
+        s_code_restarts++;
+        reg_wr(bar0, MCPX_APU_GPRST, 0);
+        reg_wr(bar0, MCPX_APU_GPRST, 3u);
+        s_loaded = program_loaded(bar0);
+        loop_x_init(bar0);
+        ok = s_loaded;
+    }
+#endif
+    return ok ? 0 : -1;
+}
+
+uint32_t apu_gp_debug_code_restarts(void) {
+    return s_code_restarts;
+}
+
+uint32_t apu_gp_kernel_scratch_max(void) {
+    uint32_t bytes = s_ready ? s_scratch_bytes : scratch_bytes_for_init();
+    return (bytes > APU_REVERB_SCRATCH_BASE) ? bytes - APU_REVERB_SCRATCH_BASE : 0u;
+}
+
+int apu_gp_kernel_parse(const uint32_t *image, uint32_t count, apu_gp_kernel_t *out) {
+    uint32_t i;
+    if (!image || !out || count <= APU_GP_IMAGE_HEADER || count - APU_GP_IMAGE_HEADER > APU_GP_KERNEL_MAX_WORDS) {
+        return -1;
+    }
+    if (image[0] != APU_GP_IMAGE_MAGIC || image[1] != APU_GP_IMAGE_ABI ||
+        image[2] > apu_gp_kernel_scratch_max() || image[3] > APU_GP_KERNEL_MAX_DESCRIPTORS) {
+        return -1;
+    }
+    for (i = APU_GP_IMAGE_HEADER; i < count; i++) {
+        if (image[i] > 0xFFFFFFu) {
+            return -1;
+        }
+    }
+    out->code = image + APU_GP_IMAGE_HEADER;
+    out->words = count - APU_GP_IMAGE_HEADER;
+    out->scratch_bytes = image[2];
+    out->descriptors = image[3];
+    return 0;
+}
+
+int apu_gp_kernel_set(uintptr_t bar0, const apu_gp_kernel_t *k, const uint32_t params[APU_GP_KERNEL_PARAMS], bool on) {
+    apu_reverb_word_t w[APU_GP_KERNEL_PARAMS];
+    uint32_t i, n = 0;
+
+    if (!s_ready || s_image != NULL) {
+        return -1;
+    }
+    if (!on) {
+        if (s_custom_on) {
+            kernel_stop(bar0);
+        }
+        return 0;
+    }
+    if (!k || !params || k->scratch_bytes > apu_gp_kernel_scratch_max()) {
+        return -1;
+    }
+    if (s_custom_on && kernel_code_loaded(k->code, k->words)) {
+        /* The same kernel: only the parameters that changed, in one frame */
+        for (i = 0; i < APU_GP_KERNEL_PARAMS; i++) {
+            if (params[i] != s_params[i]) {
+                w[n].addr = (uint16_t)(GP_LOOP_KPARAM + i);
+                w[n].value = params[i] & 0xFFFFFFu;
+                n++;
+            }
+        }
+        if (n && apu_gp_mailbox(bar0, w, n) < 0) {
+            write_words(bar0, w, n);
+        }
+        memcpy(s_params, params, sizeof(s_params));
+        return 0;
+    }
+    kernel_stop(bar0);
+    wait_frames(bar0, 2u);
+    idle_calibrate(bar0);
+    if (!kernel_code_loaded(k->code, k->words) && load_code(bar0, k->code, k->words) != 0) {
+        return -1;
+    }
+    /* The ABI: kernel X zeroed, then its words; no chains until the kernel sets them */
+    for (i = GP_LOOP_KX_BASE; i < GP_X_END; i++) {
+        reg_wr(bar0, XREG(i), 0);
+    }
+    reg_wr(bar0, XREG(GP_LOOP_KIN), MIXBIN_X_BASE + 32u * KERNEL_INPUT_BIN);
+    reg_wr(bar0, XREG(GP_LOOP_KSCR), APU_REVERB_SCRATCH_BASE);
+    reg_wr(bar0, XREG(GP_LOOP_KSCRN), k->scratch_bytes);
+    for (i = 0; i < APU_GP_KERNEL_PARAMS; i++) {
+        reg_wr(bar0, XREG(GP_LOOP_KPARAM + i), params[i] & 0xFFFFFFu);
+    }
+    reg_wr(bar0, XREG(GP_LOOP_K_RHEAD), 0);
+    reg_wr(bar0, XREG(GP_LOOP_K_WHEAD), GP_LOOP_FIFO2);
+    reg_wr(bar0, XREG(GP_LOOP_OUTLP), 0);     /* no output lowpass (the reverb's extra) */
+    for (i = 0; i < 4u; i++) {
+        reg_wr(bar0, XREG(GP_LOOP_OUTST + i), 0);
+    }
+    memset((uint8_t *)s_scratch + APU_REVERB_SCRATCH_BASE, 0, k->scratch_bytes);
+    memcpy(s_params, params, sizeof(s_params));
+    reg_wr(bar0, XREG(REVERB_FLAGS_X), 1u);
+    s_custom_on = true;
+    return 0;
+}
+
+bool apu_gp_kernel_on(void) {
+    return s_ready && s_custom_on;
+}
+
+static uint32_t load_pct(uint32_t idle) {
+    if (s_idle_base == 0u || idle >= s_idle_base) {
+        return 0;
+    }
+    return (uint32_t)(((uint64_t)(s_idle_base - idle) * 100u) / s_idle_base);
+}
+
+void apu_gp_load(uintptr_t bar0, uint32_t *last_pct, uint32_t *peak_pct) {
+    uint32_t idle, low, last = 0, peak = 0;
+    if (s_ready && s_image == NULL) {
+        idle = reg_rd(bar0, XREG(GP_LOOP_IDLE)) & 0xFFFFFFu;
+        low = reg_rd(bar0, XREG(GP_LOOP_IDLMIN)) & 0xFFFFFFu;
+        if (peak_pct) {
+            reg_wr(bar0, XREG(GP_LOOP_IDLMIN), IDLE_NONE);   /* the peak restarts */
+        }
+        if (!s_reverb_on && !s_custom_on) {
+            idle_calibrate(bar0);
+        }
+        last = load_pct(idle);
+        peak = (low == IDLE_NONE) ? last : load_pct(low);
+        if (peak < last) {
+            peak = last;
+        }
+    }
+    if (last_pct) *last_pct = last;
+    if (peak_pct) *peak_pct = peak;
+}
+
 
 bool apu_gp_ready(void) {
     return s_ready;

@@ -388,13 +388,13 @@ class Gp:
             bit, mem, target = dsp56asm.split_operands(ops)
             pm = dsp56asm.parse_mem(mem)
             v = self.mem_read(pm[0], self.ea(pm[1], symbols, False)[0])
-            b = (v >> dsp56asm.evaluate(bit[1:], symbols, 2)) & 1
+            bit_no = dsp56asm.evaluate(bit[1:], symbols, 2)
+            b = (v >> bit_no) & 1
+            if bit_no == 1 and b == 0 and pm[1].lower().startswith('$ffffc5'):
+                self.waiting = True         # the START_FRAME poll: the frame is over
+                return
             if (b == 0) == (mn == 'jclr'):
-                t = dsp56asm.evaluate(target, symbols, 2)
-                if t == here and mn == 'jclr' and pm[1].lower().startswith('$ffffc5'):
-                    self.waiting = True     # the START_FRAME poll: the frame is over
-                    return
-                nxt, jumped = t, True
+                nxt, jumped = dsp56asm.evaluate(target, symbols, 2), True
         elif mn in ('bset', 'bclr', 'bchg'):
             bit, mem = dsp56asm.split_operands(ops)
             pm = dsp56asm.parse_mem(mem)
