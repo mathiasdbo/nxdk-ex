@@ -253,7 +253,7 @@ uint32_t apu_vp_voice_position(uint32_t handle);
  */
 uint32_t apu_vp_service(uintptr_t bar0);
 
-/** TSC cycles spent in apu_vp_service() since boot. */
+/** TSC cycles spent in apu_vp_service() since apu_vp_init(). */
 uint64_t apu_vp_service_cycles(void);
 
 /**

@@ -21,6 +21,8 @@
 #include "al_listener.h"
 #include "apu_spatial.h"
 
+static void update_stats_reset(void);
+
 /*
  * ============================================================================
  * Internal State & Global Hardware Tracking
@@ -200,6 +202,7 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
         }
 #endif
 
+        update_stats_reset();   /* AL_XBOX_stats run from the open */
         s_vp_route_a = false;
 #ifdef OPENAL_APU_REAL_MMIO
         s_vp_route_a = (apu_base == NV_PAPU_BASE);
@@ -861,6 +864,12 @@ AL_API void AL_APIENTRY alXboxGetHardwareStatus(ALenum param, ALint *value) {
 static ALuint s_update_calls;
 static unsigned long long s_update_cycles;
 static ALuint s_update_max;
+
+static void update_stats_reset(void) {
+    s_update_calls = 0;
+    s_update_cycles = 0;
+    s_update_max = 0;
+}
 
 AL_API void AL_APIENTRY alXboxUpdateVoices(void) {
     /*
