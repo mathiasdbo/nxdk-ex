@@ -11,6 +11,11 @@ MMIO_SRCS = $(wildcard $(CURDIR)/mmio/*.c)
 
 SRCS = $(CURDIR)/main.c $(MMIO_SRCS)
 
+# make ENGINE_PHASES=11 runs phase 11 (zero-copy output) alone
+ifeq ($(ENGINE_PHASES),11)
+CFLAGS += -DENGINE_ONLY_ZERO_COPY
+endif
+
 CFLAGS += -I$(NXDK_DIR)/lib/openal/include -I$(NXDK_DIR)/lib/openal/src
 
 include $(NXDK_DIR)/Makefile

@@ -6,8 +6,8 @@
  * a DSP56300 program, written for this library, that copies the
  * front-left/right mixbins (bins 0 and 1, where the HRTF submixes land) to GP
  * output FIFO 0 every 32-sample frame as interleaved 16-bit stereo. The FIFO is
- * a ring in system RAM, so the CPU can forward the APU's mix to the AC97 codec
- * (apu_gp_fifo_read(), apu_ac97.c).
+ * a ring in system RAM, which the AC97 codec plays in place (zero-copy) or the
+ * CPU copies to it (apu_gp_fifo_read(), apu_ac97.c).
  *
  *   P:0 08F484 000001   movep #1,x:$FFFFC4   frame complete (releases one latched start)
  *   P:2 0A8581 000002   jclr #1,x:$FFFFC5,$2 wait for START_FRAME
@@ -40,7 +40,8 @@
 extern "C" {
 #endif
 
-#define APU_GP_FIFO_BYTES   (64u * 1024u)   /* output ring: 16384 stereo frames, ~341 ms */
+#define APU_GP_FIFO_BYTES   (64u * 1024u)   /* largest (and default) output ring: 16384 stereo frames, ~341 ms */
+#define APU_GP_FIFO_BYTES_ZC (8u * 1024u)   /* the ring the AC97 reads directly (apu_ac97.c zero-copy): ~43 ms, the codec ~21 ms behind */
 #define APU_GP_FRAME        32u             /* samples per APU frame */
 
 typedef struct {
@@ -56,6 +57,17 @@ typedef struct {
  * @return 0 on success, negative on allocation failure.
  */
 int apu_gp_init(uintptr_t bar0);
+
+/**
+ * Size of the output ring from the next apu_gp_init(), in bytes (whole 4 KiB
+ * pages, 4 KiB .. APU_GP_FIFO_BYTES; default APU_GP_FIFO_BYTES).
+ */
+void apu_gp_set_fifo_bytes(uint32_t bytes);
+
+/** Size of the ring in use, its physical address (contiguous), and the byte offset the DSP writes next (0 before apu_gp_init()). */
+uint32_t apu_gp_fifo_bytes(void);
+uint32_t apu_gp_fifo_phys(void);
+uint32_t apu_gp_fifo_write_pos(uintptr_t bar0);
 
 /** Hold the GP in reset and free its memory. */
 void apu_gp_deinit(uintptr_t bar0);

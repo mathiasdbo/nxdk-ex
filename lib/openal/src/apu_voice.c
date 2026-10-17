@@ -12,7 +12,6 @@
 static uintptr_t s_apu_base = NV_PAPU_BASE;
 static NVAPU_VOICE_CONTEXT_3D *s_voice_contexts = NULL;
 static uint32_t s_voice_contexts_phys = 0;
-static bool s_subsystem_initialized = false;
 static uint32_t s_stop_calls = 0;
 
 /*
@@ -212,7 +211,6 @@ int apu_voice_subsystem_init(uintptr_t apu_base, void *context_array_virt, uint3
             apu_voice_context_reset(&s_voice_contexts[i]);   /* alc_context.c allocates all of them */
         }
         s_vp_hw = true;
-        s_subsystem_initialized = true;
         return 0;
     }
 #endif
@@ -235,7 +233,6 @@ int apu_voice_subsystem_init(uintptr_t apu_base, void *context_array_virt, uint3
     apu_write32(s_apu_base, NV_PAPU_VP_PAUSE_0, 0u);
     apu_write32(s_apu_base, NV_PAPU_VP_PAUSE_1, 0u);
 
-    s_subsystem_initialized = true;
     return 0;
 }
 
@@ -248,7 +245,6 @@ void apu_voice_subsystem_deinit(uintptr_t apu_base)
         s_vp_hw = false;
         s_voice_contexts = NULL;
         s_voice_contexts_phys = 0u;
-        s_subsystem_initialized = false;
         return;
     }
 
@@ -263,7 +259,6 @@ void apu_voice_subsystem_deinit(uintptr_t apu_base)
 
     s_voice_contexts = NULL;
     s_voice_contexts_phys = 0u;
-    s_subsystem_initialized = false;
 }
 
 void apu_voice_context_reset(NVAPU_VOICE_CONTEXT_3D *ctx)

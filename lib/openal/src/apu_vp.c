@@ -731,7 +731,11 @@ int apu_vp_init(uintptr_t bar0) {
         }
     }
 
-    /* GP program that forwards bins 0/1 to output FIFO 0 (steps 8, 14, 15) */
+    /* GP program that forwards bins 0/1 to output FIFO 0 (steps 8, 14, 15).
+     * The AC97 reads its ring directly unless the copy mode is forced: then
+     * the large ring of the copy path (apu_ac97.h) */
+    apu_gp_set_fifo_bytes((s_dbg & APU_VP_DBG_AC97_COPY) ? APU_GP_FIFO_BYTES : APU_GP_FIFO_BYTES_ZC);
+    apu_ac97_set_zero_copy(!(s_dbg & APU_VP_DBG_AC97_COPY));
     if (apu_gp_init(bar0) != 0) {
         free_tables();
         return -1;

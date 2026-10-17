@@ -11,6 +11,8 @@
  *      rest wait or stop; then restarts at random priorities
  *   6  buffer churn: 600 buffers of random sizes created, played and deleted
  *      (the APU's sample space must be reclaimed)
+ *   7-10 CPU time and the output callback, static buffers, ADPCM, streamed ADPCM
+ *  11  zero-copy output: the codec reads the GP ring; copy mode under an output callback
  * E:\openal_engine_N.txt (a new N each run) gets the results. The APU frame counter is checked
  * after every phase: if it stops, the log says so.
  */
@@ -378,6 +380,14 @@ static void AL_APIENTRY output_cb(ALshort *samples, ALsizei frames, ALvoid *user
     s_cb_calls++;
 }
 
+/* A sine of `hz` with a whole number of cycles per `frames` (exact phase from the index) */
+static void fill_tone(int16_t *dst, uint32_t frames, float hz) {
+    uint32_t i;
+    for (i = 0; i < frames; i++) {
+        dst[i] = (int16_t)(8000.0f * sinf(TWO_PI * hz * (float)(i % 48000u) / 48000.0f));
+    }
+}
+
 static void stats_window(const char *what, uint32_t ms) {
     ALXBOXSTATS a, b;
     uint32_t c0 = s_cb_calls, f0 = s_cb_frames;
@@ -436,13 +446,8 @@ static void glitch_window(const char *what, uint32_t ms) {
 }
 
 static void phase_stats(void) {
-    float ph = 0.0f;
-    uint32_t i;
     ALuint b, s;
-    for (i = 0; i < 48000u; i++) {
-        ph += TWO_PI * 480.0f / 48000.0f;
-        s_pcm[i] = (int16_t)(8000.0f * sinf(ph));
-    }
+    fill_tone(s_pcm, 48000u, 480.0f);   /* exact phase per sample: a float phase sum is ~1 rad off after 1 s, a click per loop */
     b = make_buffer(s_pcm, 48000u, 48000);
     s = make_source(b);
     alSourcei(s, AL_LOOPING, AL_TRUE);
@@ -516,14 +521,6 @@ static void scan_log(const char *what) {
           (unsigned long)s_scan.loud, (unsigned long)s_scan.peak,
           (unsigned long)(s_scan.frames ? (uint64_t)s_scan.crossings * 48000u / s_scan.frames : 0),
           (unsigned long)s_scan.jumps, (unsigned long)s_scan.gaps);
-}
-
-/* A sine of `hz` with a whole number of cycles per `frames` (exact phase from the index) */
-static void fill_tone(int16_t *dst, uint32_t frames, float hz) {
-    uint32_t i;
-    for (i = 0; i < frames; i++) {
-        dst[i] = (int16_t)(8000.0f * sinf(TWO_PI * hz * (float)(i % 48000u) / 48000.0f));
-    }
 }
 
 /* Breaks in the physical pages of a static buffer's list (0 = contiguous) */
@@ -845,6 +842,64 @@ static void phase_adpcm_stream(void) {
     check_apu("adpcm stream");
 }
 
+/* 11: zero-copy output. The codec reads the GP ring directly; an output
+ * callback needs the samples on the CPU, so installing one switches to the
+ * copy mode (the A/B of the output thread's cost) and removing it switches
+ * back. Not measurable on the CPU: listen for clicks in the 480 Hz tone. */
+static void AL_APIENTRY noop_cb(ALshort *samples, ALsizei frames, ALvoid *user) {
+    (void)samples;
+    (void)frames;
+    (void)user;
+}
+
+static uint32_t s_zc_t;   /* seconds into phase 11 */
+
+static void zc_slice(const char *what) {
+    ALXBOXSTATS a, b;
+    double hz;
+    memset(&a, 0, sizeof(a));
+    a.size = sizeof(a);
+    b = a;
+    alXboxGetStats(&a);
+    run_for(10000);
+    alXboxGetStats(&b);
+    s_zc_t += 10u;
+    hz = b.cycle_hz ? (double)b.cycle_hz : 733333333.0;
+    logf_("   %3lu s %s (%s): output %lu us/s, %lu passes, longest %lu us; entries +%lu; lead %lu..%lu now %lu frames; "
+          "slips %lu und %lu pad %lu\n",
+          (unsigned long)s_zc_t, what, b.output_zero_copy ? "zero-copy" : "copy",
+          (unsigned long)((double)(b.output_cycles - a.output_cycles) * 1e6 / hz / 10.0),
+          (unsigned long)(b.output_passes - a.output_passes), (unsigned long)((double)b.output_max_cycles * 1e6 / hz),
+          (unsigned long)(b.ac97_buffers - a.ac97_buffers), (unsigned long)b.output_lead_min,
+          (unsigned long)b.output_lead_max, (unsigned long)b.output_lead_last, (unsigned long)b.output_slips,
+          (unsigned long)b.ac97_underruns, (unsigned long)b.ac97_padded);
+    save_log();
+}
+
+static void phase_zero_copy(void) {
+    uint32_t i;
+    ALuint b, s;
+    ALXBOXSTATS st;
+    fill_tone(s_pcm, 48000u, 480.0f);   /* exact phase per sample (see phase 7) */
+    b = make_buffer(s_pcm, 48000u, 48000);
+    s = make_source(b);
+    alSourcei(s, AL_LOOPING, AL_TRUE);
+    memset(&st, 0, sizeof(st));
+    st.size = sizeof(st);
+    alXboxGetStats(&st);
+    logf_("-- 11 zero-copy output: 60 s zero-copy, 60 s copy under a no-op callback, 300 s zero-copy (480 Hz, listen "
+          "for clicks); now %s\n", st.output_zero_copy ? "zero-copy" : "COPY (zero-copy not active)");
+    alSourcePlay(s);
+    s_zc_t = 0;
+    for (i = 0; i < 6u; i++) zc_slice("zero-copy");
+    alXboxOutputCallback(noop_cb, NULL);
+    for (i = 0; i < 6u; i++) zc_slice("callback ");
+    alXboxOutputCallback(NULL, NULL);
+    for (i = 0; i < 30u; i++) zc_slice("zero-copy");
+    free_source(s, b);
+    check_apu("zero-copy");
+}
+
 int main(void) {
     ALCdevice *dev;
     ALCcontext *ctx;
@@ -858,6 +913,17 @@ int main(void) {
         for (;;) Sleep(1000);
     }
     ctx = alcCreateContext(dev, NULL);
+    if (ctx && !apu_ac97_active()) {
+        /* xemu: its front end works, so the library leaves the output to the
+         * emulated APU and the AC97 path never runs. Start again the way a
+         * console does (apu_clock_probe does the same) */
+        logf_("AC97 inactive (front end works: xemu?), reopening with APU_VP_DBG_NO_FE_PROBE\n");
+        alcDestroyContext(ctx);
+        alcCloseDevice(dev);
+        apu_vp_debug_set_flags(APU_VP_DBG_NO_FE_PROBE);
+        dev = alcOpenDevice(NULL);
+        ctx = dev ? alcCreateContext(dev, NULL) : NULL;
+    }
     alcMakeContextCurrent(ctx);
     logf_("backend: %s; extensions: %s\n", apu_voice_hw_backend() ? "MCPX APU" : "null (no sound)",
           (const char *)alGetString(AL_EXTENSIONS));
@@ -879,6 +945,9 @@ int main(void) {
     }
     check_apu("start");
 
+#if defined(ENGINE_ONLY_ZERO_COPY)   /* make ENGINE_PHASES=11: phase 11 alone (a quick xemu run) */
+    phase_zero_copy();
+#else
     phase_loop_points();
     phase_direct();
     phase_offsets();
@@ -889,6 +958,8 @@ int main(void) {
     phase_static();
     phase_adpcm();
     phase_adpcm_stream();
+    phase_zero_copy();
+#endif
     logf_("done\n");
     save_log();
     for (;;) {

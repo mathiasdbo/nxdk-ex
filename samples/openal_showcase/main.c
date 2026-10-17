@@ -98,10 +98,11 @@ static void log_tick(const showcase_app_t *app, const showcase_perf_t *perf, boo
         uint32_t gp = apu_gp_frames((uintptr_t)NV_PAPU_BASE);
         apu_ac97_get_stats(&as);
         /* nxdk's printf has no %f: times in 1/100 ms, fps in 1/10 */
-        log_line("t %6lu ms mode %d fps %ld/10 audio %ld/100 ms scene %ld/100 ms voices %2u GP %7lu AC97 %6lu und %lu pad %lu\n",
+        log_line("t %6lu ms mode %d fps %ld/10 audio %ld/100 ms scene %ld/100 ms voices %2u GP %7lu AC97 %s %6lu und %lu pad %lu slips %lu\n",
                  (unsigned long)(now - t0), app->current_mode, (long)(perf->fps * 10.0f),
                  (long)(perf->audio_ms * 100.0f), (long)(perf->scene_ms * 100.0f), (unsigned)perf->voices,
-                 (unsigned long)gp, (unsigned long)as.chunks, (unsigned long)as.underruns, (unsigned long)as.padded);
+                 (unsigned long)gp, as.zero_copy ? "zero-copy" : "copy", (unsigned long)as.chunks,
+                 (unsigned long)as.underruns, (unsigned long)as.padded, (unsigned long)as.slips);
         {   /* the orbit source (mode 1, helicopter loop): its voice as the VP sees it */
             ALsource *o = al_source_get(app->src_orbit);
             ALint st = 0, off = 0;
@@ -240,7 +241,7 @@ int main(void) {
             apu_ac97_stats_t as;
             apu_ac97_get_stats(&as);
             perf.voices = apu_active_voices();
-            perf.underruns = as.underruns + as.padded;   /* both are audible gaps */
+            perf.underruns = as.underruns + as.padded + as.slips;   /* all audible: a gap, or a 2.7 ms piece skipped or repeated */
         }
 #ifdef SHOWCASE_LOG
         log_tick(&app, &perf, apu_ok);
