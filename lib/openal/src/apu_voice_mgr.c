@@ -12,6 +12,19 @@
  */
 static int s_hw_voice_owner[APU_VOICE_MAX_SLOTS];
 
+/* A bit per owned slot: the per-frame tick walks these, not all 128 slots
+ * (the owner table is 16 cache lines, cold after a game frame) */
+static uint32_t s_owned[APU_VOICE_MAX_SLOTS / 32u];
+
+static void set_owner(uint32_t v, int id) {
+    s_hw_voice_owner[v] = id;
+    if (id > 0) {
+        s_owned[v >> 5] |= 1u << (v & 31u);
+    } else {
+        s_owned[v >> 5] &= ~(1u << (v & 31u));
+    }
+}
+
 /* Per-update standby candidate priorities, indexed by source id - 1 (0 = not a candidate) */
 static float s_promo_priority[AL_MAX_SOURCES];
 
@@ -23,7 +36,7 @@ static float s_promo_priority[AL_MAX_SOURCES];
 
 void apu_voice_mgr_init(void) {
     for (uint32_t v = 0; v < APU_VOICE_MAX_SLOTS; v++) {
-        s_hw_voice_owner[v] = AL_HW_VOICE_INVALID;
+        set_owner(v, AL_HW_VOICE_INVALID);
     }
 }
 
@@ -39,7 +52,7 @@ void apu_voice_mgr_deinit(void) {
             }
             al_source_voice_lost(al_source_get((ALuint)s_hw_voice_owner[v]));
             apu_voice_stop(apu_base, v);
-            s_hw_voice_owner[v] = AL_HW_VOICE_INVALID;
+            set_owner(v, AL_HW_VOICE_INVALID);
         }
     }
 }
@@ -118,7 +131,7 @@ int apu_voice_mgr_allocate(ALsource *src) {
     for (uint32_t v = 0; v < apu_voice_slot_count(); v++) {
         int owner_id = s_hw_voice_owner[v];
         if (owner_id <= 0) {
-            s_hw_voice_owner[v] = (int)src->id;
+            set_owner(v, (int)src->id);
             src->hw_voice_idx = (int)v;
             return (int)v;
         }
@@ -129,7 +142,7 @@ int apu_voice_mgr_allocate(ALsource *src) {
                 al_source_voice_lost(owner);
                 owner->hw_voice_idx = AL_HW_VOICE_INVALID;
             }
-            s_hw_voice_owner[v] = (int)src->id;
+            set_owner(v, (int)src->id);
             src->hw_voice_idx = (int)v;
             return (int)v;
         }
@@ -138,7 +151,7 @@ int apu_voice_mgr_allocate(ALsource *src) {
         if (!al_source_voice_loops(owner) && apu_voice_is_active(apu_base, v) == 0) {
             owner->state = AL_STOPPED;
             owner->hw_voice_idx = AL_HW_VOICE_INVALID;
-            s_hw_voice_owner[v] = (int)src->id;
+            set_owner(v, (int)src->id);
             src->hw_voice_idx = (int)v;
             return (int)v;
         }
@@ -227,7 +240,7 @@ int apu_voice_mgr_allocate(ALsource *src) {
         /*
          * 5. Assign hardware voice slot to the higher-priority preemptor.
          */
-        s_hw_voice_owner[victim_voice] = (int)src->id;
+        set_owner(victim_voice, (int)src->id);
         src->hw_voice_idx = victim_voice;
         return victim_voice;
     }
@@ -264,7 +277,7 @@ void apu_voice_mgr_release(ALsource *src) {
         apu_voice_stop(al_source_get_apu_base(), v);
 
         if (s_hw_voice_owner[v] == (int)src->id) {
-            s_hw_voice_owner[v] = AL_HW_VOICE_INVALID;
+            set_owner(v, AL_HW_VOICE_INVALID);
         }
         src->hw_voice_idx = AL_HW_VOICE_INVALID;
     } else {
@@ -292,29 +305,34 @@ void apu_voice_mgr_update(uintptr_t apu_base) {
         active1 = apu_read32(base, NV_PAPU_VP_ACTIVE_1);
     }
 
-    /* 1. Reap phase: detect completed one-shot hardware voices */
-    for (uint32_t v = 0; v < APU_VOICE_MAX_SLOTS; v++) {
-        int owner_id = s_hw_voice_owner[v];
-        if (owner_id <= 0) {
-            continue;
-        }
+    /* 1. Reap phase: detect completed one-shot hardware voices. A looping
+     * voice (a stream's among them) never ends by itself: its record, in
+     * uncached memory, is not read */
+    for (uint32_t w = 0; w < APU_VOICE_MAX_SLOTS / 32u; w++) {
+        uint32_t bits = s_owned[w];
+        while (bits != 0u) {
+            const uint32_t v = w * 32u + (uint32_t)__builtin_ctz(bits);
+            int owner_id = s_hw_voice_owner[v];
+            ALsource *owner;
+            bits &= bits - 1u;
 
-        ALsource *owner = al_source_get((ALuint)owner_id);
-        if (!owner) {
-            s_hw_voice_owner[v] = AL_HW_VOICE_INVALID;
-            continue;
-        }
+            owner = al_source_get((ALuint)owner_id);
+            if (!owner) {
+                set_owner(v, AL_HW_VOICE_INVALID);
+                continue;
+            }
 
-        uint32_t is_active = hw ? (uint32_t)apu_voice_is_active(base, v) :
-                             (v < 32u) ? (active0 & (1u << v)) : (active1 & (1u << (v - 32u)));
-        if (is_active == 0 && !al_source_voice_loops(owner)) {
-            owner->state = AL_STOPPED;
-            owner->hw_voice_idx = AL_HW_VOICE_INVALID;
-            s_hw_voice_owner[v] = AL_HW_VOICE_INVALID;
-        } else if (owner->state != AL_PLAYING && owner->state != AL_PAUSED) {
-            al_source_voice_lost(owner);
-            owner->hw_voice_idx = AL_HW_VOICE_INVALID;
-            s_hw_voice_owner[v] = AL_HW_VOICE_INVALID;
+            if (!al_source_voice_loops(owner) &&
+                (hw ? !apu_voice_is_active(base, v) :
+                 (v < 32u) ? !(active0 & (1u << v)) : !(active1 & (1u << (v - 32u))))) {
+                owner->state = AL_STOPPED;
+                owner->hw_voice_idx = AL_HW_VOICE_INVALID;
+                set_owner(v, AL_HW_VOICE_INVALID);
+            } else if (owner->state != AL_PLAYING && owner->state != AL_PAUSED) {
+                al_source_voice_lost(owner);
+                owner->hw_voice_idx = AL_HW_VOICE_INVALID;
+                set_owner(v, AL_HW_VOICE_INVALID);
+            }
         }
     }
 
@@ -323,8 +341,9 @@ void apu_voice_mgr_update(uintptr_t apu_base) {
      * then take the best remaining candidate (ties: lowest source id). */
     bool candidates_ready = false;
     const ALuint id_end = al_source_id_end();
-    for (uint32_t v = 0; v < apu_voice_slot_count(); v++) {
-        if (s_hw_voice_owner[v] != AL_HW_VOICE_INVALID) {
+    const uint32_t slots = apu_voice_slot_count();
+    for (uint32_t v = 0; v < slots; v++) {
+        if (s_owned[v >> 5] & (1u << (v & 31u))) {
             continue;
         }
 
@@ -355,7 +374,7 @@ void apu_voice_mgr_update(uintptr_t apu_base) {
 
         ALsource *best_candidate = al_source_get(best_id);
         s_promo_priority[best_id - 1] = 0.0f;
-        s_hw_voice_owner[v] = (int)best_candidate->id;
+        set_owner(v, (int)best_candidate->id);
         best_candidate->hw_voice_idx = (int)v;
         /* Promoted candidate restores saved_prd_index and saved_sample_pos_frac,
          * clears them, configures 3D voice context, unpauses, and triggers playback. */
