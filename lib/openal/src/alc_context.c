@@ -21,6 +21,8 @@
 #include "al_listener.h"
 #include "apu_spatial.h"
 
+static void update_stats_reset(void);
+
 /*
  * ============================================================================
  * Internal State & Global Hardware Tracking
@@ -200,6 +202,7 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
         }
 #endif
 
+        update_stats_reset();   /* AL_XBOX_stats run from the open */
         s_vp_route_a = false;
 #ifdef OPENAL_APU_REAL_MMIO
         s_vp_route_a = (apu_base == NV_PAPU_BASE);
@@ -862,6 +865,12 @@ static ALuint s_update_calls;
 static unsigned long long s_update_cycles;
 static ALuint s_update_max;
 
+static void update_stats_reset(void) {
+    s_update_calls = 0;
+    s_update_cycles = 0;
+    s_update_max = 0;
+}
+
 AL_API void AL_APIENTRY alXboxUpdateVoices(void) {
     /*
      * The tick reads APU state. With no device open the source subsystem
@@ -913,6 +922,11 @@ AL_API void AL_APIENTRY alXboxGetStats(ALXBOXSTATS *stats) {
     s.ac97_underruns = a.underruns;
     s.ac97_padded = a.padded;
     s.output_threaded = a.threaded ? AL_TRUE : AL_FALSE;
+    s.output_fifo_cycles = a.fifo_cycles;
+    s.output_queue_cycles = a.queue_cycles;
+    s.output_scrub_cycles = a.thread_hook_cycles;
+    al_source_tick_cycles(&s.update_stream_cycles, &s.update_voice_cycles);
+    s.update_service_cycles = apu_vp_service_cycles();
     n = (stats->size < sizeof(s)) ? stats->size : (ALuint)sizeof(s);
     s.size = stats->size;
     memcpy(stats, &s, n);

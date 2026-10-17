@@ -253,6 +253,9 @@ uint32_t apu_vp_voice_position(uint32_t handle);
  */
 uint32_t apu_vp_service(uintptr_t bar0);
 
+/** TSC cycles spent in apu_vp_service() since apu_vp_init(). */
+uint64_t apu_vp_service_cycles(void);
+
 /**
  * Pages of the 2048-page sample space (APU_VP_SGE_ENTRIES) mapped for buffers
  * that playing, paused or just-stopped voices use. Buffers are mapped when a

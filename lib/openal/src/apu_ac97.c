@@ -72,13 +72,16 @@ static void free_slots(void) {
 static void queue_block(void) {
     apu_ac97_output_fn fn = s_out_fn;
     int16_t *dst = s_slot[s_next % SLOTS];
+    uint64_t t1;
     if (fn) {
         uint64_t t0 = apu_platform_cycles();
         fn(s_stage, APU_AC97_CHUNK_FRAMES, s_out_user);
         s_stats.hook_cycles += apu_platform_cycles() - t0;
     }
+    t1 = apu_platform_cycles();
     memcpy(dst, s_stage, CHUNK_BYTES);
     XAudioProvideSamples((unsigned char *)dst, (unsigned short)CHUNK_BYTES, 0);
+    s_stats.queue_cycles += apu_platform_cycles() - t1;
     s_next++;
     s_fill = 0;
     s_stats.chunks++;
@@ -89,7 +92,7 @@ static void pump_once(uintptr_t bar0) {
     volatile uint8_t *pb = ac97_regs();
     bool halted = (pb[AC97_PO_SR] & AC97_SR_DCH) != 0;
     DWORD now = GetTickCount();
-    uint32_t guard;
+    uint32_t guard, queued, queued0;
 
     if (s_stats.pumps != 0u && now - s_last_pump > s_stats.max_gap_ms) {
         s_stats.max_gap_ms = now - s_last_pump;
@@ -97,20 +100,36 @@ static void pump_once(uintptr_t bar0) {
     s_last_pump = now;
     s_stats.pumps++;
 
+    /* The codec's queue is read once for the fill and counted here as
+     * buffers go on it: each register read is a bus transaction. The codec
+     * may take one buffer (10.7 ms) off it during the pass, so the count can
+     * be one high: the fill then stops with APU_AC97_AHEAD - 1 queued, still
+     * more than a 4 ms pass needs */
+    queued = (pb[AC97_PO_LVI] - pb[AC97_PO_CIV]) & 31u;
+    queued0 = queued;
     for (guard = 0; guard < SLOTS; guard++) {
-        if (((pb[AC97_PO_LVI] - pb[AC97_PO_CIV]) & 31u) >= APU_AC97_AHEAD && !halted) {
+        uint64_t t0;
+        if (queued >= APU_AC97_AHEAD && !halted) {
             break;   /* enough queued: leave the rest in the GP ring */
         }
+        t0 = apu_platform_cycles();
         s_fill += apu_gp_fifo_read(bar0, s_stage + 2u * s_fill, APU_AC97_CHUNK_FRAMES - s_fill);
+        s_stats.fifo_cycles += apu_platform_cycles() - t0;
         if (s_fill < APU_AC97_CHUNK_FRAMES) {
             break;   /* the GP has not written a whole buffer yet */
         }
         queue_block();
+        queued++;
     }
     /* The GP is not delivering (stalled, or the pump ran too rarely) and the
      * codec is on its last buffer: top the queue up with the partial buffer
-     * padded with silence, rather than let it run dry and replay old buffers */
-    if (((pb[AC97_PO_LVI] - pb[AC97_PO_CIV]) & 31u) == 0u) {
+     * padded with silence, rather than let it run dry and replay old buffers.
+     * A buffer queued in this pass is still on the queue; with none, the
+     * snapshot may be stale, so the queue is read again */
+    if (queued == queued0) {
+        queued = (pb[AC97_PO_LVI] - pb[AC97_PO_CIV]) & 31u;
+    }
+    if (queued == 0u) {
         memset(s_stage + 2u * s_fill, 0, (APU_AC97_CHUNK_FRAMES - s_fill) * 4u);
         queue_block();
         s_stats.padded++;
@@ -126,7 +145,9 @@ static void timed_pass(uintptr_t bar0, void (*hook)(void)) {
     uint64_t t0 = apu_platform_cycles(), dt;
     pump_once(bar0);
     if (hook) {
+        uint64_t t1 = apu_platform_cycles();
         hook();
+        s_stats.thread_hook_cycles += apu_platform_cycles() - t1;
     }
     dt = apu_platform_cycles() - t0;
     s_stats.cycles += dt;
@@ -138,7 +159,9 @@ static void timed_pass(uintptr_t bar0, void (*hook)(void)) {
 static DWORD WINAPI pump_thread(LPVOID arg) {
     (void)arg;
     while (!s_quit) {
-        timed_pass(s_thread_bar0, s_hook);
+        /* The scrub every second pass (8 ms): it only guards against an
+         * application that stops feeding a stream, with half a ring of slack */
+        timed_pass(s_thread_bar0, (s_stats.pumps & 1u) ? s_hook : NULL);
         Sleep(APU_AC97_PUMP_MS);
     }
     return 0;
