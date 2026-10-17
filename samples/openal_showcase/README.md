@@ -97,7 +97,7 @@ The status panel says which output is in use.
 
 **APU (default build, `SHOWCASE_BACKEND=apu`).** The OpenAL library is compiled into the sample with `-DOPENAL_APU_REAL_MMIO` (one wrapper per library source in `apu/`, as in `samples/openal_vp`). `alcOpenDevice()` then brings up the MCPX APU, and every source that holds a voice slot plays on a hardware Voice Processor voice. The library writes the voice records itself; see `lib/openal/src/apu_vp.h`.
 
-- **On a console:** the GP DSP copies the mix to a FIFO, and `alXboxUpdateVoices()` forwards it to the AC97. HRTF needs front-end methods, which do not run on hardware, so 3D sources are panned by volume and the 5.1 pan is folded to stereo.
+- **On a console:** the GP DSP writes the mix to a ring in memory, and the AC97 plays it from there: the library's output thread only queues pieces of the ring, no samples pass through the CPU (zero-copy; an output callback, which the showcase does not install, switches to copying). HRTF needs front-end methods, which do not run on hardware, so 3D sources are panned by volume and the 5.1 pan is folded to stereo.
 - **On xemu:** sources use the HRTF stage. With "Real-time DSP processing" off, xemu plays the VP output itself.
 - **Status panel:** the "mix" time is the library's frame tick, and "src" counts active VP voices.
 - **Voices:** a console plays at most 64 sources at once (VP handles 64..127; the VP stops all audio for good on a handle above 127). Mode 4 goes past that: the voice manager steals the lowest-priority voice.
@@ -135,4 +135,4 @@ Or FTP `openal_showcase.xbe` to your Xbox console dashboard (`E:\Games\OpenAL Sh
 **Note:** the default build plays through the APU on both xemu and a console (section 4). Build with `make SHOWCASE_BACKEND=cpu` for the software mixer only.
 
 ### Log file
-On the console the showcase writes `E:\openal_showcase.txt` (every 5 s and on exit; fetch it over FTP as `HDD0-E/openal_showcase.txt`): one line a second with the mode, frame rate, audio and scene CPU time, active voices and, with the APU, the GP frame count and AC97 chunks, underruns and padded chunks. If the GP frame counter stops, it adds `APU STALLED` and the driver's last voice operations.
+On the console the showcase writes `E:\openal_showcase.txt` (every 5 s and on exit; fetch it over FTP as `HDD0-E/openal_showcase.txt`): one line a second with the mode, frame rate, audio and scene CPU time, active voices and, with the APU, the GP frame count, the output mode (`zero-copy` or `copy`), AC97 entries, underruns, padded chunks and slips. If the GP frame counter stops, it adds `APU STALLED` and the driver's last voice operations.

@@ -216,7 +216,7 @@ int main(void) {
     save_log();
     apu_gp_debug_set_program(gp_reverb_words, GP_REVERB_WORDS);
     apu_gp_debug_set_scratch_bytes(APU_REVERB_SCRATCH_BASE + apu_reverb_scratch_bytes());
-    apu_vp_debug_set_flags(APU_VP_DBG_NO_AC97);
+    apu_vp_debug_set_flags(APU_VP_DBG_NO_AC97 | APU_VP_DBG_AC97_COPY);   /* the 64 KiB ring, copy output */
     if (apu_vp_init(BAR0) != 0) {
         logf_("apu_vp_init failed\n");
         save_log();

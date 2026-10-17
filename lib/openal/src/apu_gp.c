@@ -43,11 +43,12 @@ void apu_gp_debug_set_dsp_step(uint32_t words) {
 #define SCRATCH_BYTES     (0x800u * 4u)   /* bootstrap image: P:0..$7FF */
 #define SCRATCH_MAX_BYTES (512u * 4096u)  /* one 4 KiB SGE table page: 512 entries */
 #define CLEAR_X_END       0x40u           /* X:$10..$3F (counter, program parameters) start at 0 */
-#define FIFO_FRAMES       (APU_GP_FIFO_BYTES / 4u)
 
 static uint32_t *s_scratch;  static uint32_t s_scratch_phys;
 static uint32_t *s_scratch_sge; static uint32_t s_scratch_sge_phys;
 static uint8_t *s_fifo;      static uint32_t s_fifo_phys;
+static uint32_t s_fifo_req = APU_GP_FIFO_BYTES;    /* apu_gp_set_fifo_bytes() */
+static uint32_t s_fifo_bytes = APU_GP_FIFO_BYTES;  /* in use */
 static uint32_t *s_fifo_sge; static uint32_t s_fifo_sge_phys;
 static uint32_t s_read;       /* byte offset of the next unread frame */
 static uint32_t s_frames_read;
@@ -152,9 +153,10 @@ int apu_gp_init(uintptr_t bar0) {
                     : (s_image == gp_reverb_words ? (APU_REVERB_SCRATCH_BASE + apu_reverb_scratch_bytes() + 4095u) & ~4095u
                                                   : SCRATCH_BYTES);
     s_reverb_on = false;
+    s_fifo_bytes = s_fifo_req;
     s_scratch = (uint32_t *)apu_mem_alloc_table(s_scratch_bytes, &s_scratch_phys);
     s_scratch_sge = (uint32_t *)apu_mem_alloc_table(4096, &s_scratch_sge_phys);
-    s_fifo = (uint8_t *)apu_mem_alloc_table(APU_GP_FIFO_BYTES, &s_fifo_phys);
+    s_fifo = (uint8_t *)apu_mem_alloc_table(s_fifo_bytes, &s_fifo_phys);
     s_fifo_sge = (uint32_t *)apu_mem_alloc_table(4096, &s_fifo_sge_phys);
     if (!s_scratch || !s_scratch_sge || !s_fifo || !s_fifo_sge) {
         free_all();
@@ -167,14 +169,14 @@ int apu_gp_init(uintptr_t bar0) {
     for (i = 0; i < s_image_words; i++) {
         s_scratch[i] = s_image[i] & 0xFFFFFFu;
     }
-    memset(s_fifo, 0, APU_GP_FIFO_BYTES);
+    memset(s_fifo, 0, s_fifo_bytes);
 #if defined(OPENAL_TARGET_XBOX)
     /* Read the ring through the CPU cache: the APU's DMA writes are seen by the
      * cache (openal_engine phase 7: no stale data over 3 s, against 8.3 ms of
      * CPU per second for 64-bit uncached reads, 5.0 ms cached). Zeroed while
      * still uncached, so no dirty line can later be written back over the
      * GP's output; after this the CPU only reads it. */
-    MmSetAddressProtect(s_fifo, APU_GP_FIFO_BYTES, PAGE_READWRITE);
+    MmSetAddressProtect(s_fifo, s_fifo_bytes, PAGE_READWRITE);
 #endif
 
     /* SGE tables: one entry per 4 KiB page (dword 0 = physical page) */
@@ -184,7 +186,7 @@ int apu_gp_init(uintptr_t bar0) {
         s_scratch_sge[2u * i] = s_scratch_phys + i * 4096u;
     }
     memset(s_fifo_sge, 0, 4096);
-    for (i = 0; i < APU_GP_FIFO_BYTES / 4096u; i++) {
+    for (i = 0; i < s_fifo_bytes / 4096u; i++) {
         s_fifo_sge[2u * i] = s_fifo_phys + i * 4096u;
     }
 
@@ -195,11 +197,11 @@ int apu_gp_init(uintptr_t bar0) {
     reg_wr(bar0, MCPX_APU_GPSADDR, s_scratch_sge_phys);
     reg_wr(bar0, MCPX_APU_GPSMAXSGE, pages - 1u);
     reg_wr(bar0, MCPX_APU_GPFADDR, s_fifo_sge_phys);
-    reg_wr(bar0, MCPX_APU_GPFMAXSGE, APU_GP_FIFO_BYTES / 4096u - 1u);
+    reg_wr(bar0, MCPX_APU_GPFMAXSGE, s_fifo_bytes / 4096u - 1u);
 
     /* Step 15: output FIFO 0, base <= cur < end */
     reg_wr(bar0, MCPX_APU_GPOFBASE0, 0);
-    reg_wr(bar0, MCPX_APU_GPOFEND0, APU_GP_FIFO_BYTES);
+    reg_wr(bar0, MCPX_APU_GPOFEND0, s_fifo_bytes);
     reg_wr(bar0, MCPX_APU_GPOFCUR0, 0);
     s_read = 0;
     s_frames_read = 0;
@@ -308,14 +310,14 @@ bool apu_gp_program_loaded(void) {
 }
 
 static uint32_t fifo_cur(uintptr_t bar0) {
-    return (reg_rd(bar0, MCPX_APU_GPOFCUR0) & 0xFFFFFFu) % APU_GP_FIFO_BYTES;
+    return (reg_rd(bar0, MCPX_APU_GPOFCUR0) & 0xFFFFFFu) % s_fifo_bytes;
 }
 
 uint32_t apu_gp_fifo_available(uintptr_t bar0) {
     if (!s_ready) {
         return 0;
     }
-    return ((fifo_cur(bar0) + APU_GP_FIFO_BYTES - s_read) % APU_GP_FIFO_BYTES) / 4u;
+    return ((fifo_cur(bar0) + s_fifo_bytes - s_read) % s_fifo_bytes) / 4u;
 }
 
 /* How the ring is read. Uncached, a console's output thread spent 23.6 ms of
@@ -330,7 +332,7 @@ void apu_gp_debug_set_fifo_read(uint32_t mode) {
 void apu_gp_debug_set_fifo_cached(bool on) {
 #if defined(OPENAL_TARGET_XBOX)
     if (s_fifo) {
-        MmSetAddressProtect(s_fifo, APU_GP_FIFO_BYTES, on ? PAGE_READWRITE : (PAGE_READWRITE | PAGE_NOCACHE));
+        MmSetAddressProtect(s_fifo, s_fifo_bytes, on ? PAGE_READWRITE : (PAGE_READWRITE | PAGE_NOCACHE));
     }
 #else
     (void)on;
@@ -376,10 +378,10 @@ uint32_t apu_gp_fifo_read(uintptr_t bar0, int16_t *out, uint32_t frames) {
         return 0;
     }
     avail = apu_gp_fifo_available(bar0);
-    if (avail > FIFO_FRAMES - FIFO_FRAMES / 8u) {
+    if (avail > (s_fifo_bytes / 4u) - (s_fifo_bytes / 4u) / 8u) {
         /* The writer is about to lap the reader (the reader stalled): jump
          * close behind the writer and continue from there */
-        s_read = (fifo_cur(bar0) + APU_GP_FIFO_BYTES / 2u) % APU_GP_FIFO_BYTES;   /* half a ring behind */
+        s_read = (fifo_cur(bar0) + s_fifo_bytes / 2u) % s_fifo_bytes;   /* half a ring behind */
         s_resyncs++;
         avail = apu_gp_fifo_available(bar0);
     }
@@ -387,11 +389,11 @@ uint32_t apu_gp_fifo_read(uintptr_t bar0, int16_t *out, uint32_t frames) {
     /* The ring is uncached memory, and on the console each read of it is a bus
      * transaction: read whole frames (32 bits), not single samples */
     for (i = 0; i < n;) {
-        uint32_t idx = s_read / 4u, seg = FIFO_FRAMES - idx;
+        uint32_t idx = s_read / 4u, seg = (s_fifo_bytes / 4u) - idx;
         if (seg > n - i) seg = n - i;
         copy_frames((uint32_t *)(void *)(out + 2u * i), (const volatile uint32_t *)(const void *)s_fifo + idx, seg);
         i += seg;
-        s_read = (s_read + 4u * seg) % APU_GP_FIFO_BYTES;
+        s_read = (s_read + 4u * seg) % s_fifo_bytes;
     }
     s_frames_read += n;
     return n;
@@ -422,4 +424,23 @@ uint8_t *apu_gp_debug_fifo(void) {
 
 const uint32_t *apu_gp_debug_scratch(void) {
     return s_ready ? s_scratch : NULL;
+}
+
+void apu_gp_set_fifo_bytes(uint32_t bytes) {
+    bytes &= ~4095u;
+    if (bytes < 4096u) bytes = 4096u;
+    if (bytes > APU_GP_FIFO_BYTES) bytes = APU_GP_FIFO_BYTES;
+    s_fifo_req = bytes;
+}
+
+uint32_t apu_gp_fifo_bytes(void) {
+    return s_ready ? s_fifo_bytes : 0;
+}
+
+uint32_t apu_gp_fifo_phys(void) {
+    return s_ready ? s_fifo_phys : 0;
+}
+
+uint32_t apu_gp_fifo_write_pos(uintptr_t bar0) {
+    return s_ready ? fifo_cur(bar0) : 0;
 }

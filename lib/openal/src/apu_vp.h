@@ -189,6 +189,7 @@ void apu_vp_debug_set_map_guard(uint32_t pages);
 #define APU_VP_DBG_NO_AC97_THREAD  32u   /* pump the AC97 from apu_vp_service(), no thread (next apu_vp_init()) */
 #define APU_VP_DBG_HANDLES_HIGH    64u   /* a console allocates handles 64..127 only, as before handles 0..63 were used */
 #define APU_VP_DBG_NO_HRTF        128u   /* a console does not set up its HRTF stage (next apu_vp_init()) */
+#define APU_VP_DBG_AC97_COPY      256u   /* the CPU copies the GP ring (64 KiB) to the AC97 instead of zero-copy (next apu_vp_init()) */
 void apu_vp_debug_set_flags(uint32_t flags);
 
 /** Copy up to `max` of the most recent operations, oldest first. @return count. */

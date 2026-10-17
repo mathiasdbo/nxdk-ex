@@ -334,6 +334,11 @@ typedef struct ALXBOXSTATS {
     unsigned long long update_stream_cycles;  /* bringing streams up to date */
     unsigned long long update_voice_cycles;   /* the voice manager and the APU service */
     unsigned long long update_service_cycles; /* of it, the APU service (apu_vp_service) */
+    ALuint output_zero_copy;             /* AL_TRUE while the codec reads the APU's mix directly (no copy) */
+    ALuint output_slips;                 /* zero-copy: 2.67 ms pieces repeated or skipped to keep the APU ahead */
+    ALuint output_lead_min;              /* zero-copy: frames the APU's mix is ahead of the codec, least / most / last */
+    ALuint output_lead_max;
+    ALuint output_lead_last;
 } ALXBOXSTATS;
 
 AL_API void AL_APIENTRY alXboxGetStats(ALXBOXSTATS *stats);

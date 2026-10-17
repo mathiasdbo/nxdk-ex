@@ -66,6 +66,7 @@ int main(void) {
     printf("    -> complete / wait / acknowledge / DMA / count / jmp, as run on hardware [PASS]\n");
 
     printf("[2] Bring-up through apu_vp_init()...\n");
+    apu_vp_debug_set_flags(APU_VP_DBG_AC97_COPY);   /* the copy path's 64 KiB ring (zero-copy: test_ac97_zero_copy.c) */
     assert(apu_vp_init(base) == 0);
     assert(apu_gp_ready());
     assert(reg(MCPX_APU_GPRST) == 3u);                          /* out of reset: bootstrap ran */

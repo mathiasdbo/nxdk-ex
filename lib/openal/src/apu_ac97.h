@@ -2,20 +2,36 @@
 #define APU_AC97_H
 
 /*
- * Forwards the APU mix (GP output FIFO 0, apu_gp.c) to the AC97 codec through
- * nxdk's XAudio driver. On a real console this is how the VP/GP output becomes
- * audible: the GP writes interleaved 16-bit stereo into a ring in RAM and the
- * CPU queues it on the AC97 PCM-out DMA (verified with samples/apu_probe round
- * 17). No XAudio callback is used (it stops after the first underrun, see
- * samples/openal_showcase/showcase_audio.c).
+ * Sends the APU mix (GP output FIFO 0, apu_gp.c: interleaved 16-bit stereo in
+ * a ring in RAM) to the AC97 codec. On a real console this is how the VP/GP
+ * output becomes audible (verified with samples/apu_probe round 17). Two modes:
  *
- * The descriptor list is kept filled by a pump thread that runs every few
- * milliseconds (APU_AC97_PUMP_MS), so the sound keeps playing while the game
- * does not call the library (loading screens, long frames). The thread is the
- * only code that touches the AC97 and the GP FIFO read position;
- * apu_ac97_pump() from apu_vp_service() does nothing while it runs. Without
- * the thread (apu_ac97_set_thread(false) before the start) the pump runs
- * from apu_vp_service() every frame, as before.
+ * Zero-copy (the default): the AC97's buffer lists (PCM out and S/PDIF) point
+ * straight into the GP's ring, cut into APU_AC97_ZC_PIECE_BYTES pieces; the 32
+ * entries form a queue of pieces (twice round an 8 KiB ring, ~85 ms). The codec
+ * starts half a ring behind the GP's write position (~21 ms) and the two
+ * clocks are locked on a console (samples/apu_clock_probe: 0.02 ppm), so the
+ * CPU never touches the samples: each pass refills the entries played since
+ * the last one and checks the distance between the GP and the codec. If it
+ * leaves the middle half of the ring, a piece is played twice or skipped
+ * (stats.slips). No interrupts are used.
+ *
+ * Copy: the CPU copies the ring into its own AC97 buffers. Used while an
+ * output hook is installed (it needs the samples on the CPU) and with
+ * apu_ac97_set_zero_copy(false). Under a hook the ring stays the 8 KiB one,
+ * so a pump gap of more than ~37 ms (7/8 of it) loses audio, where the 64 KiB
+ * ring (APU_VP_DBG_AC97_COPY) bridged ~300 ms: the thread pumps every 4-6 ms,
+ * a pump from apu_vp_service() alone needs a frame rate above ~30 fps. No XAudio callback is used (it stops after
+ * the first underrun, see samples/openal_showcase/showcase_audio.c).
+ *
+ * Both are kept going by a pump thread that runs every few milliseconds
+ * (APU_AC97_PUMP_MS), so the sound keeps playing while the game does not call
+ * the library (loading screens, long frames); the thread also runs the
+ * library's hook (al_stream_scrub_tick). The thread is the only code that
+ * touches the AC97 and the GP FIFO read position; apu_ac97_pump() from
+ * apu_vp_service() does nothing while it runs. Without the thread
+ * (apu_ac97_set_thread(false) before the start) the pump runs from
+ * apu_vp_service() every frame, as before.
  *
  * On the host build every function is a no-op.
  */
@@ -28,9 +44,10 @@ extern "C" {
 #endif
 
 #define APU_AC97_CHUNK_FRAMES 512u   /* 10.7 ms per AC97 buffer */
-#define APU_AC97_PRIME        4u     /* silent buffers queued at start: the GP-to-codec lead (~43 ms) */
-#define APU_AC97_AHEAD        8u     /* most buffers queued ahead of the one playing (~85 ms) */
+#define APU_AC97_PRIME        4u     /* copy mode: silent buffers queued at start, the GP-to-codec lead (~43 ms) */
+#define APU_AC97_AHEAD        8u     /* copy mode: most buffers queued ahead of the one playing (~85 ms) */
 #define APU_AC97_PUMP_MS      4u     /* pump thread period */
+#define APU_AC97_ZC_PIECE_BYTES 512u /* zero-copy: one buffer-list entry, 128 frames (2.67 ms) */
 
 typedef struct {
     uint32_t chunks;        /* buffers handed to the AC97 */
@@ -46,6 +63,11 @@ typedef struct {
     uint64_t queue_cycles;  /* of which copying blocks to the codec's buffers and queueing them */
     uint64_t thread_hook_cycles;   /* of which in the thread hook (scrubbing played stream data) */
     uint32_t cycle_hz;      /* rate of the cycle counter, measured since the start (0 until 10 ms have passed) */
+    bool zero_copy;         /* the codec reads the GP ring directly */
+    uint32_t slips;         /* zero-copy: pieces played twice or skipped to keep the distance */
+    uint32_t lead_min;      /* zero-copy: frames the GP is ahead of the codec, least, most and last seen */
+    uint32_t lead_max;
+    uint32_t lead_last;
 } apu_ac97_stats_t;
 
 /*
@@ -54,9 +76,16 @@ typedef struct {
  * queued on the AC97; it may change the samples in place. It runs in the pump
  * thread (or from apu_ac97_pump() without the thread), so it must be quick and
  * must not call the library. NULL removes it.
+ *
+ * The hook needs the copy mode: installing one while zero-copy output runs
+ * restarts the output in copy mode (a short gap), removing it goes back.
  */
 typedef void (*apu_ac97_output_fn)(int16_t *samples, uint32_t frames, void *user);
 void apu_ac97_set_output_hook(apu_ac97_output_fn fn, void *user);
+
+/** Zero-copy output (default true) while no output hook is installed: from the next apu_ac97_start() or hook
+ *  change on. apu_vp_init() sets it with the ring size (off with APU_VP_DBG_AC97_COPY). */
+void apu_ac97_set_zero_copy(bool on);
 
 /** Use the pump thread (default true) from the next apu_ac97_start() on. */
 void apu_ac97_set_thread(bool on);
@@ -84,7 +113,24 @@ void apu_ac97_halt_dma(void);
 void apu_ac97_stop(void);
 
 bool apu_ac97_active(void);
+
+/** The output runs in zero-copy mode. */
+bool apu_ac97_zero_copy(void);
 void apu_ac97_get_stats(apu_ac97_stats_t *out);
+
+/*
+ * Zero-copy arithmetic (byte offsets in a ring of `ring` bytes; exposed for the
+ * host tests).
+ *   first_piece: the piece the codec starts with, half a ring behind the
+ *                GP's write position `w`.
+ *   lead:        bytes the GP has written that the codec has not read.
+ *   slip:        -1 to play a piece again (the codec is catching up with the
+ *                GP), +1 to skip one (the GP is about to overwrite unread
+ *                data), 0 while the lead is in the middle half of the ring.
+ */
+uint32_t apu_ac97_zc_first_piece(uint32_t w, uint32_t ring);
+uint32_t apu_ac97_zc_lead(uint32_t w, uint32_t r, uint32_t ring);
+int apu_ac97_zc_slip(uint32_t lead, uint32_t ring);
 
 #ifdef __cplusplus
 }

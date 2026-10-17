@@ -927,25 +927,45 @@ AL_API void AL_APIENTRY alXboxGetStats(ALXBOXSTATS *stats) {
     s.output_scrub_cycles = a.thread_hook_cycles;
     al_source_tick_cycles(&s.update_stream_cycles, &s.update_voice_cycles);
     s.update_service_cycles = apu_vp_service_cycles();
+    s.output_zero_copy = a.zero_copy ? AL_TRUE : AL_FALSE;
+    s.output_slips = a.slips;
+    s.output_lead_min = a.lead_min;
+    s.output_lead_max = a.lead_max;
+    s.output_lead_last = a.lead_last;
     n = (stats->size < sizeof(s)) ? stats->size : (ALuint)sizeof(s);
     s.size = stats->size;
     memcpy(stats, &s, n);
 }
 
-/* The output hook's C signature and the AL one differ only in the integer types */
-static ALXBOXOUTPUTPROC s_output_fn;
+/* The output hook's C signature and the AL one differ only in the integer
+ * types. The function and its argument travel together in one of two slots,
+ * so a new callback replaces the old one in a single apu_ac97 call (which
+ * also decides the output mode: one restart at most, apu_ac97.h) and is
+ * never called with the old argument */
+typedef struct {
+    ALXBOXOUTPUTPROC fn;
+    ALvoid *user;
+} output_slot_t;
+
+static output_slot_t s_output_slot[2];
+static unsigned s_output_slot_i;
 
 static void output_trampoline(int16_t *samples, uint32_t frames, void *user) {
-    ALXBOXOUTPUTPROC fn = s_output_fn;
-    if (fn) {
-        fn((ALshort *)samples, (ALsizei)frames, user);
+    const output_slot_t *slot = (const output_slot_t *)user;
+    if (slot && slot->fn) {   /* the pump may read the hook just as it is removed (fn and user are two loads) */
+        slot->fn((ALshort *)samples, (ALsizei)frames, slot->user);
     }
 }
 
 AL_API void AL_APIENTRY alXboxOutputCallback(ALXBOXOUTPUTPROC fn, ALvoid *user) {
-    apu_ac97_set_output_hook(NULL, NULL);
-    s_output_fn = fn;
-    if (fn) {
-        apu_ac97_set_output_hook(output_trampoline, user);
+    output_slot_t *slot;
+    if (!fn) {
+        apu_ac97_set_output_hook(NULL, NULL);
+        return;
     }
+    s_output_slot_i ^= 1u;   /* not the slot the output thread may be using */
+    slot = &s_output_slot[s_output_slot_i];
+    slot->fn = fn;
+    slot->user = user;
+    apu_ac97_set_output_hook(output_trampoline, slot);
 }
