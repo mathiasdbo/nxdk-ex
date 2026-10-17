@@ -1551,6 +1551,18 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
   locked: GP emulator-timed, AC97 host-audio-timed, 18-47 ppm, and the codec plays in bursts of up to ~1000
   frames. The probe reopens with `APU_VP_DBG_NO_FE_PROBE` there, since xemu's front end otherwise leaves the
   output to the emulated APU.)
+* **Zero-copy output** (`openal_engine` phase 11, the default output since this change): the AC97's buffer
+  list points at 512-byte pieces of an 8 KiB GP ring, and the output thread only requeues played entries.
+  Over 420 s on the console: 60 s zero-copy, 60 s copy mode (a no-op output callback), 300 s zero-copy again.
+  Every 10 s window had 0 slips, 0 underruns and 0 padded buffers, ~3755 entries per 10 s (48 kHz), and a
+  lead over the codec of 1008..1112 frames (~22 ms). The output thread took 1.27 ms of CPU per second in
+  zero-copy mode against 5.06 ms/s in copy mode (about 0.063 ms per 60 Hz frame saved). The 480 Hz tone was
+  clean by ear, and phase 7's six mode switches ran without an underrun. `openal_showcase` (98 s, all six
+  modes, 60 fps) ran in zero-copy with 0 underruns, padded chunks and slips. Two console-only faults were
+  fixed on the way: a codec cold reset (`XAudioInit`) on every mode switch left the codec silent and the next
+  switch hung (it is now done once), and the test tone's float phase sum clicked once per loop (now
+  `fill_tone`). In xemu, whose codec is neither locked nor smooth, zero-copy ran without underruns but slipped
+  (35 slips in 6 min), and the refill must not follow the S/PDIF DMA, which xemu does not run.
 * Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
   from a spherical-head model (Brown-Duda head-shadow shelf per ear as a 31-tap int8 FIR, Woodworth ITD in
   s6.9; 32 azimuths x elevations -30/0/30/60; no measured data, no pinna cues). `apu_vp_init()` uploads it with
