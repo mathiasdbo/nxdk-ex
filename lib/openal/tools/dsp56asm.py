@@ -5,7 +5,7 @@ library use. Encodings follow the instruction formats of Motorola's public
 DSP56300 Family Manual; every program is also decoded with xemu's public
 interpreter before it runs on a console (see docs/GP_REVERB_PLAN.md).
 
-Usage: dsp56asm.py source.asm -o out.h [--name NAME] [--hex out.hex] [--list out.lst] [--kernel]
+Usage: dsp56asm.py source.asm -o out.h [--name NAME] [--hex out.hex] [--list out.lst] [--kernel | --image]
 
 Source syntax (one statement per line, ';' starts a comment):
     NAME    equ  expr
@@ -568,6 +568,11 @@ def assemble(text):
     return mem, symbols, exported, listing
 
 
+IMAGE_ORIGIN = 0x100      # dsp/gp_loop.asm KERNEL
+IMAGE_MAGIC = 0x47504B    # 'GPK' (AL_XBOX_GP_IMAGE_MAGIC)
+IMAGE_ABI = 1
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('source')
@@ -576,6 +581,9 @@ def main():
     ap.add_argument('--hex')
     ap.add_argument('--list')
     ap.add_argument('--kernel', action='store_true', help='the image starts at its first org (NAME_ORIGIN)')
+    ap.add_argument('--image', action='store_true',
+                    help='a custom kernel for alXboxEffectProgram: org p:$100, K_SCRATCH_BYTES and K_DESCRIPTORS '
+                         'equates; emits NAME_image[] (header + code)')
     args = ap.parse_args()
     with open(args.source, encoding='utf-8') as f:
         text = f.read()
@@ -588,7 +596,13 @@ def main():
         print('no code', file=sys.stderr)
         return 1
     origin = min(mem)
-    if origin != 0 and not args.kernel:
+    if args.image:
+        missing = [k for k in ('K_SCRATCH_BYTES', 'K_DESCRIPTORS') if k not in symbols]
+        if origin != IMAGE_ORIGIN or missing:
+            print('a custom kernel starts at P:$%X and defines K_SCRATCH_BYTES and K_DESCRIPTORS' % IMAGE_ORIGIN,
+                  file=sys.stderr)
+            return 1
+    elif origin != 0 and not args.kernel:
         print('program must start at P:0 (a kernel image takes --kernel)', file=sys.stderr)
         return 1
     size = max(mem) + 1 - origin
@@ -604,8 +618,15 @@ def main():
     for s in exported:
         if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', s):
             out.append('#define %s_%s 0x%Xu' % (up, s.upper(), symbols[s] & 0xFFFFFF))
-    out += ['', 'static const uint32_t %s_words[%s_WORDS] = {' % (name, up)]
-    for i in range(0, size, 8):
+    if args.image:
+        # AL/alext.h: magic 'GPK', ABI version, scratch bytes, descriptors a frame, then the code at P:$100
+        header = [IMAGE_MAGIC, IMAGE_ABI, symbols['K_SCRATCH_BYTES'] & 0xFFFFFF, symbols['K_DESCRIPTORS'] & 0xFFFFFF]
+        words = header + words
+        out.append('#define %s_IMAGE_WORDS %du' % (up, len(words)))
+        out += ['', 'static const uint32_t %s_image[%s_IMAGE_WORDS] = {' % (name, up)]
+    else:
+        out += ['', 'static const uint32_t %s_words[%s_WORDS] = {' % (name, up)]
+    for i in range(0, len(words), 8):
         out.append('    ' + ' '.join('0x%06Xu,' % w for w in words[i:i + 8]))
     out += ['};', '', '#endif', '']
     with open(args.output, 'w', encoding='utf-8', newline='\n') as f:

@@ -145,12 +145,68 @@ void apu_gp_debug_set_burn(uintptr_t bar0, uint32_t cycles);
  * The reverb, kernel 0 of the default image (apu_reverb.h). `on` with new
  * parameters: if only gains change they go through the mailbox (one frame); a
  * new pre-delay (or switching on) stops the kernel for a frame, lays the delay
- * lines out again and empties them. Returns -1 if the GP runs another program.
+ * lines out again and empties them. Switching on stops a custom kernel and puts
+ * the reverb's code back in P memory. Returns -1 if the GP runs another program.
  */
 int apu_gp_reverb_set(uintptr_t bar0, const struct apu_reverb_params_s *p, bool on);
 
 /** The reverb is running. */
 bool apu_gp_reverb_on(void);
+
+/*
+ * Custom kernels (AL_XBOX_gp_program, EFX_PLAN.md 3.6; the ABI in dsp/gp_loop.asm).
+ * An image is APU_GP_IMAGE_HEADER words (magic, ABI version, scratch bytes,
+ * DMA descriptors a frame) and the code loaded at P:$100, as
+ * tools/dsp56asm.py --image writes it.
+ */
+#define APU_GP_IMAGE_MAGIC            0x47504Bu   /* 'GPK' */
+#define APU_GP_IMAGE_ABI              1u
+#define APU_GP_IMAGE_HEADER           4u
+#define APU_GP_KERNEL_MAX_WORDS       0x700u      /* P:$100..$7FF */
+#define APU_GP_KERNEL_MAX_DESCRIPTORS 60u
+#define APU_GP_KERNEL_PARAMS          32u
+
+typedef struct {
+    const uint32_t *code;       /* the words for P:$100 on */
+    uint32_t words;
+    uint32_t scratch_bytes;     /* from scratch byte $2000 */
+    uint32_t descriptors;
+} apu_gp_kernel_t;
+
+/**
+ * Check an image: magic, ABI, code size, 24-bit words, descriptors, and scratch
+ * within apu_gp_kernel_scratch_max(). Fills `out` (pointing into `image`).
+ * Returns 0, or -1 if the image is not usable.
+ */
+int apu_gp_kernel_parse(const uint32_t *image, uint32_t count, apu_gp_kernel_t *out);
+
+/** Scratch bytes a kernel may use: the open device's space above $2000, else what the next apu_gp_init() allocates. */
+uint32_t apu_gp_kernel_scratch_max(void);
+
+/**
+ * Run kernel `k` in place of the reverb (`on`), or stop it. A kernel already
+ * running with the same code only gets its changed parameters, through the
+ * mailbox (one frame). Otherwise the kernel stops for two frames, the code is
+ * written to P:$100 (read back; on a mismatch the GP restarts from the
+ * bootstrap image, which holds it too), the kernel's X is set up (ABI) and its
+ * scratch zeroed, and it starts. Returns 0, -1 if the GP cannot run it.
+ */
+int apu_gp_kernel_set(uintptr_t bar0, const apu_gp_kernel_t *k, const uint32_t params[APU_GP_KERNEL_PARAMS], bool on);
+
+/** A custom kernel is running. */
+bool apu_gp_kernel_on(void);
+
+/**
+ * How much of the GP's frame the effect takes, in percent (100: frames late),
+ * the last frame's and the most since the last call asking for the peak
+ * (`peak_pct` not NULL). Measured from the
+ * loop's START_FRAME polls against a frame without the kernel (taken when an
+ * effect starts); 0 on the host or before an effect has run.
+ */
+void apu_gp_load(uintptr_t bar0, uint32_t *last_pct, uint32_t *peak_pct);
+
+/** Times a kernel load restarted the GP because the P window did not take the code (diagnostics). */
+uint32_t apu_gp_debug_code_restarts(void);
 
 /** Output ring and bootstrap scratch image (host tests). */
 uint8_t *apu_gp_debug_fifo(void);

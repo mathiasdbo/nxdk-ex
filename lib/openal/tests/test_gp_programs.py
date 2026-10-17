@@ -11,6 +11,11 @@ tools/dsp56sim.py, against apu_reverb.c's host reference.
   3  mailbox: pairs posted while the kernel runs land together at the start of
      the next frame, and MB_ACK follows MB_SEQ; an empty post is acknowledged too
   4  burn: X:BURN cycles of nop run (the step count grows by that much)
+  5  custom kernel (phase8-04, EFX_PLAN.md 3.6): the example echo
+     (dsp/gp_kecho.asm) loaded the way apu_gp.c loads a custom kernel; the
+     echo lands exactly DELAY samples late on each ear, feedback repeats it,
+     a DELAY posted through the mailbox applies from the next frame, and
+     DELAY is clamped to 32
 
 Run by tests/run_tests.py with NXDK_AL_CLANG and NXDK_AL_LIB set (the
 reference helper tests/gpsim_reverb_ref.c is linked against the library).
@@ -27,6 +32,7 @@ import dsp56sim  # noqa: E402
 
 LOOP = open(os.path.join(OPENAL, 'dsp', 'gp_loop.asm'), encoding='utf-8').read()
 KERNEL = open(os.path.join(OPENAL, 'dsp', 'gp_kfreeverb.asm'), encoding='utf-8').read()
+ECHO = open(os.path.join(OPENAL, 'dsp', 'gp_kecho.asm'), encoding='utf-8').read()
 
 COPY_DESC = [0x4000, 1 | 2 | (1 << 10) | (32 << 14), (32 << 4) | 1, 0x1400, 0, 0, 0]   # apu_gp.c
 
@@ -166,6 +172,78 @@ def test_burn(gp):
     print('[4] burn: X:BURN nops per frame [PASS]')
 
 
+def load_custom(gp, params, scratch_bytes):
+    """What apu_gp.c does for a custom kernel: kernel X zeroed, ABI words, chain heads, kernel on."""
+    s = gp.symbols
+    for a in range(s['KX_BASE'], 0xC00):
+        gp.x[a] = 0
+    gp.x[s['KIN']] = 0x1400 + 32 * 2
+    gp.x[s['KSCR']] = 0x2000
+    gp.x[s['KSCRN']] = scratch_bytes
+    for i, v in enumerate(params):
+        gp.x[s['KPARAM'] + i] = v & 0xFFFFFF
+    gp.x[s['K_RHEAD']] = 0
+    gp.x[s['K_WHEAD']] = s['FIFO2']
+    for i, v in enumerate([0x4000, 1 | 2 | (1 << 10) | (32 << 14), (32 << 4) | 1, s['OUTL'], 0, 0, 0]):
+        gp.x[s['FIFO2'] + i] = v
+    gp.x[s['FLAGS']] = 1
+
+
+def run_echo(gp, frames, impulses):
+    """impulses: {(bin, absolute sample): value}; returns the FIFO's left and right streams (16-bit)."""
+    left, right = [], []
+    for f in range(frames):
+        bins = {b: [0] * 32 for b in range(4)}
+        for (b, t), v in impulses.items():
+            if t // 32 == f:
+                bins[b][t % 32] = v
+        fifo = gp.frame(bins)
+        left += fifo[0::2]
+        right += fifo[1::2]
+    return left, right
+
+
+def hits(stream):
+    return [(t, v) for t, v in enumerate(stream) if v]
+
+
+def test_echo():
+    gp = dsp56sim.Gp(LOOP, extra=(ECHO,))
+    for i, v in enumerate(COPY_DESC):
+        gp.x[i] = v
+    gp.run_until_wait()
+    s = gp.symbols
+    # delay 100, no feedback, wet 0.5: a 0.5 click on bin 2 at sample 5, on bin 3 at 40
+    load_custom(gp, [100, 0, 0x400000], s['K_SCRATCH_BYTES'])
+    left, right = run_echo(gp, 12, {(2, 5): 0x400000, (3, 40): 0x400000})
+    assert hits(left) == [(105, 0x2000)], 'echo left: %s' % hits(left)
+    assert hits(right) == [(140, 0x2000)], 'echo right: %s' % hits(right)
+    # feedback 0.5: the echo repeats every DELAY samples at half the level
+    gp = dsp56sim.Gp(LOOP, extra=(ECHO,))
+    for i, v in enumerate(COPY_DESC):
+        gp.x[i] = v
+    gp.run_until_wait()
+    load_custom(gp, [100, 0x400000, 0x400000], s['K_SCRATCH_BYTES'])
+    left, _ = run_echo(gp, 12, {(2, 5): 0x400000})
+    assert hits(left) == [(105, 0x2000), (205, 0x1000), (305, 0x800)], 'feedback: %s' % hits(left)
+    # a new delay through the mailbox at frame 12 (sample 384); a click at 400 echoes 37 later
+    gp.x[s['MBOX']] = s['KPARAM']
+    gp.x[s['MBOX'] + 1] = 37
+    gp.x[s['MB_N']] = 1
+    gp.x[s['MB_SEQ']] = 1
+    left, _ = run_echo(gp, 6, {(2, 400 - 384): 0x400000})
+    tail = [(t + 384, v) for t, v in hits(left)]
+    assert (437, 0x2000) in tail and all(t != 500 for t, _ in tail), 'live delay change: %s' % tail
+    # below the minimum: 32 samples
+    gp.x[s['MBOX'] + 1] = 3
+    gp.x[s['MB_SEQ']] = 2
+    left, _ = run_echo(gp, 8, {(2, 100): 0x400000})
+    assert (132, 0x2000) in hits(left), 'delay clamp: %s' % hits(left)
+    assert gp.x[s['TMOUT']] == 0, 'a DMA wait timed out'
+    print('[5] custom kernel (echo): exact delay per ear, feedback, live delay via the mailbox, clamp; '
+          '%d instructions per frame [PASS]' % gp.frame_steps)
+
+
 def main():
     test_copy()
     with tempfile.TemporaryDirectory(prefix='gpsim_') as tmp:
@@ -176,6 +254,7 @@ def main():
           '%d instructions per frame [PASS]' % steps)
     gp = test_mailbox()
     test_burn(gp)
+    test_echo()
     print('=== GP programs on the host: all passed ===')
 
 

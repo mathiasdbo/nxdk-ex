@@ -3,6 +3,9 @@
 ; The library's half of every GP program: it owns the frame, the output and the
 ; mailbox, and calls one effect kernel (P:KERNEL, e.g. dsp/gp_kfreeverb.asm).
 ; Every frame:
+;   idle     polls of START_FRAME while waiting for it into X:IDLE, the
+;            smallest since the CPU last reset it into X:IDLMIN (the CPU's
+;            measure of the GP's load: no cycle counter is known on the GP)
 ;   mailbox  if X:MB_SEQ differs from X:MB_ACK, apply the X:MB_N (address,
 ;            value) pairs at X:MBOX, then MB_ACK = MB_SEQ: a change of several
 ;            words lands in one frame
@@ -20,6 +23,15 @@
 ; Kernel ABI: P:KERNEL..$7FF, X:KX_BASE..$BFF, all of Y, scratch from byte
 ; $2000 (below it the bootstrap image), at most 60 DMA descriptors per frame
 ; across its two chains; it may use every register and must return with rts.
+; Custom kernels (AL_XBOX_gp_program, EFX_PLAN.md 3.6) also get, from the
+; library, before their first frame: X:KX_BASE..$BFF zeroed, then KIN (X
+; address of the input pair's left bin, the right one 32 words on), KSCR (byte
+; offset of their scratch), KSCRN (its size in bytes, zeroed), KPARAM0..31
+; (the effect's parameters; later changes arrive through the mailbox, all of
+; one change in one frame), K_RHEAD = 0 and K_WHEAD = FIFO2. Y is not
+; initialised. The kernel sets up its own descriptors and chain heads (its
+; write chain ending at FIFO2), typically on its first call; its own X starts
+; at KOWN.
 
 CNT     equ     $10             ; frame counter (apu_gp_frames)
 FLAGS   equ     $11             ; bit 0: kernel on
@@ -34,21 +46,37 @@ K_RHEAD equ     $19             ; kernel read chain (0: none)
 K_WHEAD equ     $1A             ; kernel write chain (ends at FIFO2)
 OUTLP   equ     $1B             ; output lowpass coefficient
 OUTST   equ     $1C             ; its 4 states: L stage 1, L stage 2, R stage 1, R stage 2
+IDLE    equ     $07             ; START_FRAME polls before this frame (0: the frame was late)
 FIFO2   equ     $08             ; mix descriptor: OUT L/R to FIFO 0
+IDLMIN  equ     $0F             ; smallest IDLE since the CPU wrote $7FFFFF
 OUTL    equ     $20             ; OUT R at $40 (FIFO stride 32)
 OUTR    equ     $40
 MBOX    equ     $60             ; 64 pairs, to $DF
 MB_MAX  equ     64
 KX_BASE equ     $E0             ; the kernel's X memory starts here
+KIN     equ     $E0             ; custom kernels: input pair address
+KSCR    equ     $E1             ; custom kernels: scratch byte offset
+KSCRN   equ     $E2             ; custom kernels: scratch bytes
+KPARAM  equ     $E8             ; custom kernels: 32 parameters, to $107
+KOWN    equ     $108            ; custom kernels: their own X from here
 KERNEL  equ     $100            ; the kernel's entry point and P origin
 BIN0    equ     $1400           ; bin 1 follows at $1420
 LIMIT   equ     4000            ; polls before a wait gives up
 
         org     p:0
 frame   movep   #1,x:$FFFFC4            ; frame complete
-wait    jclr    #1,x:$FFFFC5,wait       ; wait for START_FRAME
-        movep   #2,x:$FFFFC5            ; acknowledge it
+        clr     b
+wait    jset    #1,x:$FFFFC5,start      ; wait for START_FRAME, counting polls
+        add     #1,b
+        jmp     wait
+start   movep   #2,x:$FFFFC5            ; acknowledge it
         movep   #$80,x:$FFFFC5          ; clear end-of-list
+        move    b1,x:IDLE
+        move    x:IDLMIN,x0
+        cmp     x0,b
+        jge     idle_ok
+        move    b1,x:IDLMIN
+idle_ok
 
 ; mailbox
         move    x:MB_SEQ,a

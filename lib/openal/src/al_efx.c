@@ -15,6 +15,7 @@
 #include <float.h>
 #include <math.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <AL/alext.h>
@@ -229,11 +230,104 @@ static bool check_names(ALsizei n, const ALuint *ids, bool *used, size_t stride,
     return true;
 }
 
+/* ------------------------------------------------------------------ GP programs (AL_XBOX_gp_program) */
+
+struct al_efx_program_s {
+    uint32_t refs;
+    uint32_t count;
+    apu_gp_kernel_t kernel;     /* points into words */
+    uint32_t words[1];          /* count words, allocated with the structure */
+};
+
+static al_efx_program_t *program_ref(al_efx_program_t *p) {
+    if (p) p->refs++;
+    return p;
+}
+
+static void program_unref(al_efx_program_t *p) {
+    if (p && --p->refs == 0u) free(p);
+}
+
+/* dst = src with the image's references counted (slots copy effects) */
+static void props_assign(al_efx_effect_props_t *dst, const al_efx_effect_props_t *src) {
+    al_efx_program_t *old = dst->program;
+    *dst = *src;
+    program_ref(dst->program);
+    program_unref(old);
+}
+
+static void props_release(al_efx_effect_props_t *p) {
+    program_unref(p->program);
+    p->program = NULL;
+}
+
+static bool gp_param_index(const al_efx_effect_props_t *p, ALenum param, uint32_t *n) {
+    if (p->type != AL_EFFECT_XBOX_GP_PROGRAM || param < AL_XBOX_GP_PARAM0 ||
+        param >= AL_XBOX_GP_PARAM0 + (ALenum)AL_EFX_GP_PARAMS) {
+        return false;
+    }
+    *n = (uint32_t)(param - AL_XBOX_GP_PARAM0);
+    return true;
+}
+
+static int32_t sx24(uint32_t v) {
+    return (v & 0x800000u) ? (int32_t)(v | 0xFF000000u) : (int32_t)v;
+}
+
+AL_API void AL_APIENTRY alXboxEffectProgram(ALuint effect, const ALuint *words, ALsizei count, ALuint flags) {
+    effect_t *e = get_effect(effect);
+    al_efx_program_t *p;
+    apu_gp_kernel_t k;
+    if (!e) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+    if (e->props.type != AL_EFFECT_XBOX_GP_PROGRAM) {
+        alSetError(AL_INVALID_OPERATION);
+        return;
+    }
+    if (flags != 0u || count < 0 || (count > 0 && !words)) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    if (count == 0) {
+        props_release(&e->props);   /* no image: the effect runs nothing */
+        return;
+    }
+    if (apu_gp_kernel_parse((const uint32_t *)words, (uint32_t)count, &k) != 0) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    p = (al_efx_program_t *)malloc(sizeof(*p) + ((size_t)count - 1u) * sizeof(uint32_t));
+    if (!p) {
+        alSetError(AL_OUT_OF_MEMORY);
+        return;
+    }
+    p->refs = 1u;
+    p->count = (uint32_t)count;
+    memcpy(p->words, words, (size_t)count * sizeof(uint32_t));
+    (void)apu_gp_kernel_parse(p->words, p->count, &p->kernel);
+    props_release(&e->props);
+    e->props.program = p;
+}
+
+bool al_efx_slot_kernel(const al_efx_slot_t *slot, apu_gp_kernel_t *k, const uint32_t **params) {
+    if (!slot || slot->props.type != AL_EFFECT_XBOX_GP_PROGRAM || !slot->props.program) {
+        return false;
+    }
+    if (k) *k = slot->props.program->kernel;
+    if (params) *params = slot->props.params;
+    return true;
+}
+
+
 /* ------------------------------------------------------------------ effects */
 
 static void effect_set_type(al_efx_effect_props_t *p, ALenum type) {
+    props_release(p);
     p->type = type;
     reverb_defaults(&p->reverb);
+    memset(p->params, 0, sizeof(p->params));
 }
 
 AL_API void AL_APIENTRY alGenEffects(ALsizei n, ALuint *effects) {
@@ -242,6 +336,7 @@ AL_API void AL_APIENTRY alGenEffects(ALsizei n, ALuint *effects) {
     for (k = 0; k < n; k++) {
         effect_t *e = &s_effects[effects[k] - 1u];
         e->in_use = true;
+        e->props.program = NULL;
         effect_set_type(&e->props, AL_EFFECT_NULL);
     }
 }
@@ -251,7 +346,10 @@ AL_API void AL_APIENTRY alDeleteEffects(ALsizei n, const ALuint *effects) {
     if (!check_names(n, effects, &s_effects[0].in_use, sizeof(effect_t), AL_EFX_MAX_EFFECTS)) return;
     /* A slot keeps its copy of the effect (the extension's copy semantics) */
     for (k = 0; k < n; k++) {
-        if (effects[k] != 0u) s_effects[effects[k] - 1u].in_use = false;
+        if (effects[k] != 0u) {
+            s_effects[effects[k] - 1u].in_use = false;
+            props_release(&s_effects[effects[k] - 1u].props);
+        }
     }
 }
 
@@ -267,12 +365,24 @@ AL_API void AL_APIENTRY alEffecti(ALuint effect, ALenum param, ALint value) {
         return;
     }
     if (param == AL_EFFECT_TYPE) {
-        if (value != AL_EFFECT_NULL && value != AL_EFFECT_REVERB && value != AL_EFFECT_EAXREVERB) {
+        if (value != AL_EFFECT_NULL && value != AL_EFFECT_REVERB && value != AL_EFFECT_EAXREVERB &&
+            value != AL_EFFECT_XBOX_GP_PROGRAM) {
             alSetError(AL_INVALID_VALUE);
             return;
         }
         effect_set_type(&e->props, value);
         return;
+    }
+    {
+        uint32_t n;
+        if (gp_param_index(&e->props, param, &n)) {
+            if (value < -0x800000 || value > 0xFFFFFF) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            e->props.params[n] = (uint32_t)value & 0xFFFFFFu;
+            return;
+        }
     }
     d = find_param(e->props.type, param);
     if (!d || d->kind != P_BOOL) {
@@ -300,6 +410,17 @@ AL_API void AL_APIENTRY alEffectf(ALuint effect, ALenum param, ALfloat value) {
     if (!e) {
         alSetError(AL_INVALID_NAME);
         return;
+    }
+    {
+        uint32_t n;
+        if (gp_param_index(&e->props, param, &n)) {
+            if (!isfinite(value) || value < -1.0f || value > 1.0f) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            e->props.params[n] = apu_reverb_q23(value) & 0xFFFFFFu;
+            return;
+        }
     }
     d = find_param(e->props.type, param);
     if (!d || d->kind != P_FLOAT) {
@@ -351,6 +472,13 @@ AL_API void AL_APIENTRY alGetEffecti(ALuint effect, ALenum param, ALint *value) 
         *value = e->props.type;
         return;
     }
+    {
+        uint32_t n;
+        if (gp_param_index(&e->props, param, &n)) {
+            *value = sx24(e->props.params[n]);
+            return;
+        }
+    }
     d = find_param(e->props.type, param);
     if (!d || d->kind != P_BOOL) {
         alSetError(AL_INVALID_ENUM);
@@ -373,6 +501,13 @@ AL_API void AL_APIENTRY alGetEffectf(ALuint effect, ALenum param, ALfloat *value
     if (!e) {
         alSetError(AL_INVALID_NAME);
         return;
+    }
+    {
+        uint32_t n;
+        if (gp_param_index(&e->props, param, &n)) {
+            *value = (ALfloat)sx24(e->props.params[n]) / 8388608.0f;
+            return;
+        }
     }
     d = find_param(e->props.type, param);
     if (!d || d->kind != P_FLOAT) {
@@ -400,6 +535,7 @@ AL_API void AL_APIENTRY alGetEffectfv(ALuint effect, ALenum param, ALfloat *valu
     }
     alGetEffectf(effect, param, values);
 }
+
 
 /* ------------------------------------------------------------------ filters */
 
@@ -519,7 +655,7 @@ AL_API void AL_APIENTRY alGenAuxiliaryEffectSlots(ALsizei n, ALuint *slots) {
     if (!gen_names(n, slots, &s_slots[0].in_use, sizeof(al_efx_slot_t), AL_EFX_MAX_SLOTS)) return;
     for (k = 0; k < n; k++) {
         al_efx_slot_t *s = &s_slots[slots[k] - 1u];
-        memset(s, 0, sizeof(*s));
+        memset(s, 0, sizeof(*s));   /* (a deleted slot released its image) */
         s->in_use = true;
         effect_set_type(&s->props, AL_EFFECT_NULL);
         s->gain = AL_EFFECTSLOT_DEFAULT_GAIN;
@@ -537,7 +673,10 @@ AL_API void AL_APIENTRY alDeleteAuxiliaryEffectSlots(ALsizei n, const ALuint *sl
         }
     }
     for (k = 0; k < n; k++) {
-        if (slots[k] != 0u) s_slots[slots[k] - 1u].in_use = false;
+        if (slots[k] != 0u) {
+            s_slots[slots[k] - 1u].in_use = false;
+            props_release(&s_slots[slots[k] - 1u].props);
+        }
     }
     if (n > 0) {
         al_source_effects_changed();   /* an active slot may have gone */
@@ -573,7 +712,7 @@ AL_API void AL_APIENTRY alAuxiliaryEffectSloti(ALuint slot, ALenum param, ALint 
                 return;
             }
             if (e) {
-                s->props = e->props;
+                props_assign(&s->props, &e->props);
             } else {
                 effect_set_type(&s->props, AL_EFFECT_NULL);
             }
@@ -877,6 +1016,9 @@ void al_efx_reverb_params(const al_efx_slot_t *slot, apu_reverb_params_t *out) {
 }
 
 void al_efx_reset(void) {
+    uint32_t i;
+    for (i = 0; i < AL_EFX_MAX_EFFECTS; i++) props_release(&s_effects[i].props);
+    for (i = 0; i < AL_EFX_MAX_SLOTS; i++) props_release(&s_slots[i].props);
     memset(s_effects, 0, sizeof(s_effects));
     memset(s_filters, 0, sizeof(s_filters));
     memset(s_slots, 0, sizeof(s_slots));

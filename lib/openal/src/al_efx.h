@@ -15,6 +15,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "apu_gp.h"
 #include "apu_reverb.h"
 
 #ifdef __cplusplus
@@ -25,6 +26,10 @@ extern "C" {
 #define AL_EFX_MAX_FILTERS  256u
 #define AL_EFX_MAX_SLOTS    4u
 #define AL_EFX_MAX_SENDS    2
+#define AL_EFX_GP_PARAMS    32u     /* AL_XBOX_GP_PARAMS */
+
+/* An AL_XBOX_gp_program image (al_efx.c): shared, never changed, freed with its last user */
+typedef struct al_efx_program_s al_efx_program_t;
 
 /* Reverb parameters: AL_EFFECT_REVERB uses a subset of AL_EFFECT_EAXREVERB's */
 typedef struct {
@@ -39,8 +44,10 @@ typedef struct {
 
 /* An effect's state: what an effect object holds and what a slot copies */
 typedef struct {
-    ALenum type;                /* AL_EFFECT_NULL, AL_EFFECT_REVERB, AL_EFFECT_EAXREVERB */
+    ALenum type;                /* AL_EFFECT_NULL, AL_EFFECT_REVERB, AL_EFFECT_EAXREVERB, AL_EFFECT_XBOX_GP_PROGRAM */
     al_efx_reverb_t reverb;
+    al_efx_program_t *program;  /* AL_EFFECT_XBOX_GP_PROGRAM: the image, NULL before alXboxEffectProgram */
+    uint32_t params[AL_EFX_GP_PARAMS];   /* AL_XBOX_GP_PARAM0 + n, 24-bit */
 } al_efx_effect_props_t;
 
 /* A filter's state (copied into a source when set) */
@@ -120,6 +127,12 @@ float al_efx_onepole_for_gain(float gain_hf, float hz);
 
 /** Room rolloff of a source's send to `slot`: the source's plus, with the slot's send-auto flag, the effect's. */
 ALfloat al_efx_room_rolloff(const al_efx_source_t *s, const al_efx_slot_t *slot);
+
+/**
+ * The kernel of a slot holding AL_EFFECT_XBOX_GP_PROGRAM with an image: fills
+ * `k` (pointing into the image) and `params`. False for any other slot.
+ */
+bool al_efx_slot_kernel(const al_efx_slot_t *slot, apu_gp_kernel_t *k, const uint32_t **params);
 
 #ifdef __cplusplus
 }
