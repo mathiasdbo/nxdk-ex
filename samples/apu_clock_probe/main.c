@@ -227,6 +227,9 @@ int main(void) {
 
     XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
     logf_("apu_clock_probe: APU frame clock vs AC97 codec clock, %u s\n", PROBE_SECONDS);
+    /* The measurement counts the copy path's buffers (the zero-copy output
+     * has its own lead in AL_XBOX_stats) */
+    apu_vp_debug_set_flags(APU_VP_DBG_AC97_COPY);
     dev = alcOpenDevice(NULL);
     ctx = dev ? alcCreateContext(dev, NULL) : NULL;
     if (ctx && !apu_ac97_active()) {
@@ -236,7 +239,7 @@ int main(void) {
         logf_("   AC97 inactive (front end works: xemu?), reopening with APU_VP_DBG_NO_FE_PROBE\n");
         alcDestroyContext(ctx);
         alcCloseDevice(dev);
-        apu_vp_debug_set_flags(APU_VP_DBG_NO_FE_PROBE);
+        apu_vp_debug_set_flags(APU_VP_DBG_AC97_COPY | APU_VP_DBG_NO_FE_PROBE);
         dev = alcOpenDevice(NULL);
         ctx = dev ? alcCreateContext(dev, NULL) : NULL;
     }
