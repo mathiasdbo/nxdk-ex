@@ -34,6 +34,9 @@ static bool s_ready;
 static bool s_fe_ok;                            /* front-end methods execute (xemu, not hardware) */
 static uint8_t s_list[APU_VP_MAX_HANDLES];      /* list each handle is linked on, LIST_NONE if none */
 static uint8_t s_paused[APU_VP_MAX_HANDLES];    /* taken off its list by apu_vp_voice_pause() */
+static uint32_t s_listed[APU_VP_MAX_HANDLES / 32u]; /* a bit per handle on a list: the service walks only these */
+static uint32_t s_service_calls;
+static uint64_t s_service_cycles;                /* in apu_vp_service() since boot (apu_vp_service_cycles) */
 static apu_vp_fe_stats_t s_fe_stats;
 static uint32_t s_soft_end[APU_VP_MAX_HANDLES];  /* data frames of a one-shot looping on its silent tail, 0 = none */
 static uint32_t s_retired_at[APU_VP_MAX_HANDLES]; /* XGSCNT when the handle left its list */
@@ -370,6 +373,7 @@ static void link_voice(uintptr_t bar0, uint32_t h, uint8_t list) {
     wc_flush();
     reg_wr(bar0, s_list_heads[list], h);
     s_list[h] = list;
+    s_listed[h >> 5] |= 1u << (h & 31u);
     trace(bar0, 'L', h, head);   /* a = the old head, now our next */
 }
 
@@ -383,6 +387,7 @@ static void unlink_voice(uintptr_t bar0, uint32_t h) {
         return;
     }
     s_list[h] = LIST_NONE;
+    s_listed[h >> 5] &= ~(1u << (h & 31u));
     /* The VP may still be processing this record in the current frame: keep
      * the handle out of apu_vp_alloc_handle() for a while */
     s_retired_at[h] = reg_rd(bar0, MCPX_APU_XGSCNT);
@@ -416,11 +421,14 @@ static bool soft_ended(uint32_t h) {
 }
 
 uint32_t apu_vp_service(uintptr_t bar0) {
-    uint32_t served = 0, h;
+    uint32_t served = 0, h, w;
+    uint64_t t0;
 
     if (!s_ready) {
         return 0;
     }
+    t0 = apu_platform_cycles();
+    s_service_calls++;
     /* xemu traps on an inactive voice still in a list (FETFORCE1 bit 15) and
      * halts the frames until released; only the last idle handle of a frame is
      * reported, so loop while trapped */
@@ -433,32 +441,36 @@ uint32_t apu_vp_service(uintptr_t bar0) {
         reg_wr(bar0, MCPX_APU_ISTS, MCPX_APU_ISTS_FETINTSTS);
         served++;
     }
-    /* A voice set looping past its loop end gets the loop end once it has
-     * wrapped back before it (apu_vp_voice_set_loop) */
-    for (h = 0; h < APU_VP_MAX_HANDLES; h++) {
-        uint32_t c;
-        if (s_pending_ebo[h] == 0u || s_list[h] == LIST_NONE) {
-            continue;
-        }
-        c = *voice_dw(h, MCPX_VOICE_PAR_OFFSET) & 0xFFFFFFu;
-        if (c >= s_loop_start[h] && c + LOOP_MARGIN_FRAMES < s_pending_ebo[h]) {
-            *voice_dw(h, MCPX_VOICE_PAR_NEXT) = s_pending_ebo[h];
-            s_pending_ebo[h] = 0;
-        }
-    }
-    /* One-shots that ended: the VP cleared ACTIVE_VOICE, or (real console) CBO
-     * passed the data into the silent tail; take them off their list */
-    for (h = 0; h < APU_VP_MAX_HANDLES && !(s_dbg & APU_VP_DBG_NO_END_SCAN); h++) {
-        if (s_list[h] == LIST_NONE) {
-            continue;
-        }
-        if (soft_ended(h)) {
-            /* Only unlink: a state write could land while the VP processes the
-             * record in this frame (apu_vp_voice_active() ignores unlisted voices) */
-            trace(bar0, 'E', h, *voice_dw(h, MCPX_VOICE_PAR_OFFSET) & 0xFFFFFFu);   /* a = CBO */
-            unlink_voice(bar0, h);
-        } else if (!record_active(h)) {
-            unlink_voice(bar0, h);
+    /* Only the listed handles (a few, against 256 slots):
+     * - a voice set looping past its loop end gets the loop end once it has
+     *   wrapped back before it (apu_vp_voice_set_loop);
+     * - a one-shot that ended (the VP cleared ACTIVE_VOICE, or, on the real
+     *   console, CBO passed the data into the silent tail) leaves its list.
+     * Each check reads the voice record in uncached memory. */
+    for (w = 0; w < APU_VP_MAX_HANDLES / 32u; w++) {
+        uint32_t bits = s_listed[w];
+        while (bits != 0u) {
+            uint32_t c;
+            h = w * 32u + (uint32_t)__builtin_ctz(bits);
+            bits &= bits - 1u;
+            if (s_pending_ebo[h] != 0u) {
+                c = *voice_dw(h, MCPX_VOICE_PAR_OFFSET) & 0xFFFFFFu;
+                if (c >= s_loop_start[h] && c + LOOP_MARGIN_FRAMES < s_pending_ebo[h]) {
+                    *voice_dw(h, MCPX_VOICE_PAR_NEXT) = s_pending_ebo[h];
+                    s_pending_ebo[h] = 0;
+                }
+            }
+            if (s_dbg & APU_VP_DBG_NO_END_SCAN) {
+                continue;
+            }
+            if (soft_ended(h)) {
+                /* Only unlink: a state write could land while the VP processes the
+                 * record in this frame (apu_vp_voice_active() ignores unlisted voices) */
+                trace(bar0, 'E', h, *voice_dw(h, MCPX_VOICE_PAR_OFFSET) & 0xFFFFFFu);   /* a = CBO */
+                unlink_voice(bar0, h);
+            } else if (!record_active(h)) {
+                unlink_voice(bar0, h);
+            }
         }
     }
     /* Real console: a front-end message (FECTL bit 15, seen with FEDECMETH
@@ -475,8 +487,10 @@ uint32_t apu_vp_service(uintptr_t bar0) {
         }
     }
     /* Stall detector: the GP counts 1500 frames a second; if it has not moved
-     * while XGSCNT advanced by several frames, keep the trace as it is */
-    if (!s_fe_ok && !s_trace_stopped && !(s_dbg & APU_VP_DBG_NO_STALL_DETECT)) {
+     * while XGSCNT advanced by several frames, keep the trace as it is. Two
+     * register reads: every 8th pass (about 100 ms at one tick a frame) */
+    if (!s_fe_ok && !s_trace_stopped && !(s_dbg & APU_VP_DBG_NO_STALL_DETECT) &&
+        (s_service_calls & 7u) == 0u) {
         uint32_t gp = apu_gp_frames(bar0), xgs = reg_rd(bar0, MCPX_APU_XGSCNT);
         if (gp != s_stall_gp) {
             s_stall_gp = gp;
@@ -487,7 +501,12 @@ uint32_t apu_vp_service(uintptr_t bar0) {
         }
     }
     apu_ac97_pump(bar0);
+    s_service_cycles += apu_platform_cycles() - t0;
     return served;
+}
+
+uint64_t apu_vp_service_cycles(void) {
+    return s_service_cycles;
 }
 
 /*
@@ -647,6 +666,7 @@ int apu_vp_init(uintptr_t bar0) {
     memset(s_notify, 0, APU_VP_NOTIFY_BYTES);
     memset(s_sge_used, 0, sizeof(s_sge_used));
     memset(s_list, LIST_NONE, sizeof(s_list));
+    memset(s_listed, 0, sizeof(s_listed));
     memset(s_paused, 0, sizeof(s_paused));
     s_map_count = 0;
 

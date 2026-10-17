@@ -333,6 +333,7 @@ typedef struct ALXBOXSTATS {
     /* update_cycles split (the rest: the reverb check, the call itself) */
     unsigned long long update_stream_cycles;  /* bringing streams up to date */
     unsigned long long update_voice_cycles;   /* the voice manager and the APU service */
+    unsigned long long update_service_cycles; /* of it, the APU service (apu_vp_service) */
 } ALXBOXSTATS;
 
 AL_API void AL_APIENTRY alXboxGetStats(ALXBOXSTATS *stats);
