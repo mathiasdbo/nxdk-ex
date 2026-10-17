@@ -34,6 +34,7 @@
  */
 
 #include <stdbool.h>
+#include "apu_reverb.h"
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -107,8 +108,11 @@ void apu_gp_debug_set_dsp_step(uint32_t words);
 /**
  * Program image for the next apu_gp_init() (diagnostics and alternative
  * programs): `count` DSP words loaded at P:0, at most 0x800. NULL restores the
- * default, dsp/gp_reverb.asm (the copy program while its reverb is off). The program must end each frame like the copy program and
- * keep the frame counter at X:$10 (apu_vp_init checks it).
+ * default: the frame loop dsp/gp_loop.asm at P:0 and kernel 0, the reverb
+ * (dsp/gp_kfreeverb.asm), at P:$100 (the copy program while the kernel is off).
+ * The program must end each frame like the copy program and keep the frame
+ * counter at X:$10 (apu_vp_init checks it). The mailbox, the burn and the
+ * reverb need the default image.
  */
 void apu_gp_debug_set_program(const uint32_t *words, uint32_t count);
 
@@ -123,13 +127,25 @@ void apu_gp_debug_set_scratch_bytes(uint32_t bytes);
 /** Size of the scratch space in use (0 before apu_gp_init()). */
 uint32_t apu_gp_scratch_bytes(void);
 
-struct apu_reverb_params_s;
+/**
+ * Mailbox of the frame loop (EFX_PLAN.md 3.4): the `n` (address, value) X words
+ * (at most 64) land together at the start of one frame. Waits for the previous
+ * post to be applied first (at most ~20 ms). Returns 0, 1 if the GP took no
+ * frames (the words were written directly), -1 without the default image.
+ */
+int apu_gp_mailbox(uintptr_t bar0, const apu_reverb_word_t *w, uint32_t n);
+
+/** Frames from an empty mailbox post to the loop's acknowledgement (diagnostics; 0xFFFFFFFF on failure). */
+uint32_t apu_gp_debug_mailbox_frames(uintptr_t bar0);
+
+/** Cycles of nop the loop adds to every frame while the kernel runs (diagnostics: headroom; 0 = none). */
+void apu_gp_debug_set_burn(uintptr_t bar0, uint32_t cycles);
 
 /**
- * The reverb of the GP program (dsp/gp_reverb.asm, apu_reverb.h). `on` with new
- * parameters: if only gains change they are written live; a new pre-delay (or
- * switching on) stops the reverb for a frame, lays the delay lines out again and
- * empties them. Returns -1 if the GP runs another program.
+ * The reverb, kernel 0 of the default image (apu_reverb.h). `on` with new
+ * parameters: if only gains change they go through the mailbox (one frame); a
+ * new pre-delay (or switching on) stops the kernel for a frame, lays the delay
+ * lines out again and empties them. Returns -1 if the GP runs another program.
  */
 int apu_gp_reverb_set(uintptr_t bar0, const struct apu_reverb_params_s *p, bool on);
 

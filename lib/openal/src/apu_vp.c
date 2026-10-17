@@ -592,7 +592,7 @@ static void register_shutdown(uintptr_t bar0, bool on) {
  */
 #define HRTF_TARGET_BYTES   (APU_HRTF_ENTRIES * APU_HRTF_HW_ENTRY_DWORDS * 4u)   /* 8 KiB */
 #define HRTF_CURRENT_BYTES  (APU_VP_MAX_HANDLES * 128u)                          /* 32 KiB */
-#define HRTF_UNUSED_BIN     31u
+#define HRTF_UNUSED_BIN     30u   /* not 31, the multipass bin (XEMU_VERIFICATION C2.A11) */
 #define HRTF_SUBMIX_STEREO  (0u | (HRTF_UNUSED_BIN << 8) | (1u << 16) | (HRTF_UNUSED_BIN << 24))
 
 static uint32_t *s_hrtf_target;  static uint32_t s_hrtf_target_phys;

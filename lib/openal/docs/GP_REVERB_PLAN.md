@@ -148,7 +148,9 @@ limit; DMA cost is what phase 0 measures. The program is a few hundred words, we
   and `do x:aa`, `rep`, `mpy`/`mac`/`macr`, `add`/`sub`/`tfr`/`clr`/`asl`/`asr`, `bset`/`bclr` on SR,
   `ori #,mr`). Encodings from the Motorola manual's opcode appendix. It emits a C header with the word array
   and the symbol addresses (parameter block, debug words). Self-test: the current 13-word program must
-  reassemble bit-exact. Source lives in `lib/openal/dsp/gp_reverb.asm`.
+  reassemble bit-exact. Source lived in `lib/openal/dsp/gp_reverb.asm`; since the EFX work (EFX_PLAN.md
+  3.3) it is the frame loop `dsp/gp_loop.asm` plus the reverb kernel `dsp/gp_kfreeverb.asm`, with the X map
+  moved (kernel words from X:$E0) and the arithmetic unchanged.
 - **Host reference** `apu_reverb_ref.c`: the same algorithm in C with the DSP's arithmetic (24-bit samples,
   56-bit accumulation, `macr` rounding, saturation). Host tests check the parameter-to-coefficient maths and
   produce the expected output for console captures.

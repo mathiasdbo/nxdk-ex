@@ -39,6 +39,10 @@ ifeq ($(TESTS),)
 $(error no test_*.c found in $(TESTS_DIR))
 endif
 
+# Python tests: the GP programs on tools/dsp56sim.py (they link tests/gpsim_*.c with the library)
+PY_TESTS := $(sort $(wildcard $(TESTS_DIR)/test_*.py))
+PYTHON ?= python3
+
 LIB_SRCS := $(wildcard $(OPENAL_DIR)/src/*.c)
 LIB_OBJS := $(patsubst $(OPENAL_DIR)/src/%.c,$(BUILD_DIR)/lib/%.o,$(LIB_SRCS))
 LIBOPENAL := $(BUILD_DIR)/libopenal.a
@@ -61,14 +65,19 @@ all: $(addprefix $(BUILD_DIR)/,$(TESTS))
 # "make test_foo" builds a single test binary
 $(TESTS): %: $(BUILD_DIR)/%
 
-test: all
+test: all $(LIBOPENAL)
 	@pass=0; \
 	for t in $(TESTS); do \
 		echo "[ RUN      ] $$t"; \
 		(cd $(TESTS_DIR) && $(BUILD_DIR)/$$t) || { echo "[  FAILED  ] $$t"; exit 1; }; \
 		pass=$$((pass + 1)); \
 	done; \
-	echo "All $$pass of $(words $(TESTS)) tests (every tests/test_*.c) passed successfully!"
+	for t in $(PY_TESTS); do \
+		echo "[ RUN      ] $$(basename $$t)"; \
+		(cd $(TESTS_DIR) && NXDK_AL_CLANG=$(CC) NXDK_AL_LIB=$(LIBOPENAL) $(PYTHON) $$t) || { echo "[  FAILED  ] $$t"; exit 1; }; \
+		pass=$$((pass + 1)); \
+	done; \
+	echo "All $$pass of $(words $(TESTS) $(PY_TESTS)) tests (every tests/test_*.c and test_*.py) passed successfully!"
 
 $(BUILD_DIR)/lib/%.o: $(OPENAL_DIR)/src/%.c $(HEADERS)
 	@mkdir -p $(dir $@)

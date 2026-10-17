@@ -1,6 +1,7 @@
 /*
  * Reverb on the GP, on a console (reverb plan phase 3, lib/openal/docs/GP_REVERB_PLAN.md).
- * Clean-room: our own GP program (lib/openal/dsp/gp_reverb.asm) and our own sounds.
+ * Clean-room: our own GP program (lib/openal/dsp/gp_loop.asm with the reverb kernel
+ * dsp/gp_kfreeverb.asm) and our own sounds.
  *
  *   1-2  decay: a click into the send only (no dry), reverb at T60 1 s and 3 s
  *        without damping; energy 0.1-0.2 s after the onset against 0.6-0.7 s
@@ -25,7 +26,8 @@
 
 #include "apu_ac97.h"
 #include "apu_gp.h"
-#include "apu_gp_reverb.h"
+#include "apu_gp_kfreeverb.h"
+#include "apu_gp_loop.h"
 #include "apu_hardware.h"
 #include "apu_mem.h"
 #include "apu_reverb.h"
@@ -79,7 +81,7 @@ static uint32_t frame_rate(uint32_t ms) {
 static uint8_t *s_scr;
 
 static void reverb_off(void) {
-    XW(GP_REVERB_FLAGS) = 0;
+    XW(GP_LOOP_FLAGS) = 0;
     Sleep(3);
 }
 
@@ -90,9 +92,9 @@ static void reverb_on(const apu_reverb_params_t *p) {
     n = apu_reverb_layout(p, w);
     for (i = 0; i < n; i++) XW(w[i].addr) = w[i].value;
     memset(s_scr + APU_REVERB_SCRATCH_BASE, 0, apu_reverb_scratch_bytes());
-    XW(GP_REVERB_SPMAX) = 0;
-    XW(GP_REVERB_TMOUT) = 0;
-    XW(GP_REVERB_FLAGS) = 1;
+    XW(GP_LOOP_SPMAX) = 0;
+    XW(GP_LOOP_TMOUT) = 0;
+    XW(GP_LOOP_FLAGS) = 1;
 }
 
 /* ---------------------------------------------------------------- sounds */
@@ -214,7 +216,7 @@ int main(void) {
     XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
     logf_("\n=== apu_gp_reverb round 2 (8 combs and 4 allpasses per ear)\n");
     save_log();
-    apu_gp_debug_set_program(gp_reverb_words, GP_REVERB_WORDS);
+    apu_gp_debug_set_program(NULL, 0);   /* the default image: the frame loop and the reverb kernel */
     apu_gp_debug_set_scratch_bytes(APU_REVERB_SCRATCH_BASE + apu_reverb_scratch_bytes());
     apu_vp_debug_set_flags(APU_VP_DBG_NO_AC97 | APU_VP_DBG_AC97_COPY);   /* the 64 KiB ring, copy output */
     if (apu_vp_init(BAR0) != 0) {
@@ -241,7 +243,7 @@ int main(void) {
         }
     }
     logf_("program loaded %s (%u words), scratch %lu bytes, %lu frames/s\n", apu_gp_program_loaded() ? "yes" : "NO",
-          (unsigned)GP_REVERB_WORDS, (unsigned long)apu_gp_scratch_bytes(), (unsigned long)frame_rate(200));
+          (unsigned)GP_LOOP_WORDS, (unsigned)GP_KFREEVERB_WORDS, (unsigned long)apu_gp_scratch_bytes(), (unsigned long)frame_rate(200));
     save_log();
 
     logf_("1-2 decay (click into the send only, no damping)\n");
@@ -258,8 +260,8 @@ int main(void) {
         reverb_on(&p);
         Sleep(300);
         logf_("  reverb on: %lu frames/s, waits last %lu polls, max %lu, timeouts %lu\n",
-              (unsigned long)frame_rate(500), (unsigned long)(XW(GP_REVERB_SPINS) & 0xFFFFFFu),
-              (unsigned long)(XW(GP_REVERB_SPMAX) & 0xFFFFFFu), (unsigned long)(XW(GP_REVERB_TMOUT) & 0xFFFFFFu));
+              (unsigned long)frame_rate(500), (unsigned long)(XW(GP_LOOP_SPINS) & 0xFFFFFFu),
+              (unsigned long)(XW(GP_LOOP_SPMAX) & 0xFFFFFFu), (unsigned long)(XW(GP_LOOP_TMOUT) & 0xFFFFFFu));
     }
     save_log();
 
@@ -294,7 +296,7 @@ int main(void) {
             apu_ac97_get_stats(&st);
             logf_("  after 64 s: AC97 underruns %lu, padded %lu; GP waits max %lu polls, timeouts %lu\n",
                   (unsigned long)st.underruns, (unsigned long)st.padded,
-                  (unsigned long)(XW(GP_REVERB_SPMAX) & 0xFFFFFFu), (unsigned long)(XW(GP_REVERB_TMOUT) & 0xFFFFFFu));
+                  (unsigned long)(XW(GP_LOOP_SPMAX) & 0xFFFFFFu), (unsigned long)(XW(GP_LOOP_TMOUT) & 0xFFFFFFu));
             save_log();
         }
     }

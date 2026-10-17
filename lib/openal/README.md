@@ -90,8 +90,9 @@ See the table in `docs/ENGINE_INTEGRATION.md` section 2. In short:
 - **Threads:** use the library from one thread. Its own output thread touches only the output path and
   already-played stream data.
 - **Old model microcode:** `src/apu_gp_ucode.h` holds the original model's GP microcode, which is not valid
-  DSP56300. Only the null backend still writes it, into its RAM stand-in. The console runs `dsp/gp_reverb.asm`,
-  assembled with `tools/dsp56asm.py`.
+  DSP56300. Only the null backend still writes it, into its RAM stand-in. The console runs the frame loop
+  `dsp/gp_loop.asm` with kernel 0, the reverb `dsp/gp_kfreeverb.asm`, assembled with `tools/dsp56asm.py`
+  and checked on the host with `tools/dsp56sim.py` (`tests/test_gp_programs.py`).
 
 ## Tests
 

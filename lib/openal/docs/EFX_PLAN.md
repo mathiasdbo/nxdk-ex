@@ -1,6 +1,8 @@
 # ALC_EXT_EFX on the APU: implementation plan
 
-Branch `feat/openal-efx`. Status: draft, nothing implemented. Workflow phase 8 (`.agents/workflow/state.json`).
+Branch `feat/openal-efx`. Workflow phase 8 (`.agents/workflow/state.json`). Status: phase8-01 (EFX objects)
+and phase8-02 (frame loop, kernel, mailbox) done on the host; phase8-00 (console probe) built, waiting for the
+console; phases 03-05 to do.
 
 ## 1. Goal
 
@@ -80,7 +82,8 @@ Also from the tree:
 
 ### 3.3 GP program: frame loop + one kernel
 
-`gp_reverb.asm` today is the whole program. It is split into a library-owned **frame loop** and a **kernel**:
+`gp_reverb.asm` was the whole program. It is split into a library-owned **frame loop** and a **kernel**
+(done: `dsp/gp_loop.asm`, `dsp/gp_kfreeverb.asm`; the map below):
 - Loop (library): wait for the frame start, acknowledge, apply the mailbox, run the input/output DMA chain,
   copy bins 0/1 into the staging pair, `jsr` the kernel (or skip it), write the staging pair to FIFO 0.
 - Kernel ABI: fixed P origin and size, its own X/Y window and scratch byte range, the address of its input bin
@@ -90,12 +93,33 @@ Also from the tree:
 - The Freeverb becomes the first kernel; the copy program becomes "loop, no kernel". The output of the split
   reverb must match today's host reference bit for bit.
 
+As built:
+
+| Where | What |
+|---|---|
+| P:$000-$0FF | the loop (108 words) |
+| P:$100-$7FF | the kernel (the reverb: 101 words); entry at $100, returns with `rts` |
+| X:$00 / X:$08 | copy descriptor (bins 0/1) / mix descriptor (OUT L/R), both to FIFO 0 |
+| X:$10-$1F | CNT, FLAGS (bit 0 kernel on), BURN, SPINS, SPMAX, TMOUT, MB_SEQ, MB_ACK, MB_N, K_RHEAD, K_WHEAD, OUTLP, OUTST[4] |
+| X:$20 / X:$40 | OUT L / OUT R (32 words each): the dry bins 0/1, the kernel adds to them, then the output lowpass |
+| X:$60-$DF | mailbox: 64 (address, value) pairs |
+| X:$E0-$BFF, all of Y | the kernel; the reverb: KIN (input pair address) at $E0, coefficients $E1-$E5, tables, chains at $1B0, blocks from $340 to $97F |
+| scratch from byte $2000 | the kernel's delay lines |
+
+The kernel's read chain (K_RHEAD, 0 = none) runs before the dry copy; its write chain (K_WHEAD) must end at
+the mix descriptor. The reverb uses 50 descriptors of the 60 a kernel may have. `tools/dsp56sim.py` runs
+the loop and kernel on the host: `tests/test_gp_programs.py` checks the reverb against apu_reverb.c's
+reference word for word (the old program matched it the same way first), and the mailbox and burn. On the
+host simulator the loop plus the reverb is about 10800 instructions a frame (the old program 10500).
+
 ### 3.4 Mailbox
 
-The CPU writes a parameter block to a shadow area plus a sequence word; at the top of the next frame the loop
-copies the block to the live area when the sequence changed. All words of one change land in the same frame
-(latency: up to one frame, 0.67 ms, plus the CPU's write). Descriptor changes (pre-delay) go through the same
-path, which removes the "wet to zero for a frame" workaround.
+The CPU writes up to 64 (address, value) pairs and their count, then a sequence word; at the top of the next
+frame the loop applies the pairs when the sequence changed and acknowledges it (MB_ACK). All words of one
+change land in the same frame (latency: up to one frame, 0.67 ms, plus the CPU's write;
+`apu_gp_debug_mailbox_frames` measures it on a console). The reverb's gain changes use it. A new pre-delay
+still restarts the kernel (off for a frame, new layout, empty lines): its descriptors' offsets are written
+back by the DMA every frame, so a live change would need the GP to compute the new offset.
 
 ### 3.5 `AL_EFFECT_REVERB` / `AL_EFFECT_EAXREVERB` on the Freeverb
 

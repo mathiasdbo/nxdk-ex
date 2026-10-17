@@ -8,7 +8,8 @@
 #include "apu_mem.h"
 #include "mcpx_apu_regs.h"
 #include "../dsp/gp_copy.h"   /* dsp/gp_copy.asm through tools/dsp56asm.py */
-#include "apu_gp_reverb.h"
+#include "apu_gp_loop.h"        /* dsp/gp_loop.asm */
+#include "apu_gp_kfreeverb.h"   /* dsp/gp_kfreeverb.asm */
 #include "apu_reverb.h"
 
 /* Scratch space of the default program: its image and the reverb's delay lines */
@@ -23,6 +24,7 @@
 #define BAR0_SIZE 0x80000u
 
 static uint8_t *s_bar0;
+static apu_reverb_word_t s_words[APU_REVERB_MAX_WORDS];
 static uint32_t reg(uint32_t off) { return *(volatile uint32_t *)(s_bar0 + off); }
 static void set_reg(uint32_t off, uint32_t v) { *(volatile uint32_t *)(s_bar0 + off) = v; }
 
@@ -75,10 +77,17 @@ int main(void) {
     assert(reg(MCPX_APU_GPOFBASE0) == 0 && reg(MCPX_APU_GPOFEND0) == APU_GP_FIFO_BYTES);
     assert(reg(MCPX_APU_GPOFCUR0) < reg(MCPX_APU_GPOFEND0));
     scratch = apu_gp_debug_scratch();
-    for (i = 0; i < GP_REVERB_WORDS; i++) {
-        assert(scratch[i] == gp_reverb_words[i]);                   /* the default program: dsp/gp_reverb.asm */
+    /* The default program: the frame loop at P:0, kernel 0 (the reverb) at P:$100, NOP elsewhere */
+    for (i = 0; i < GP_LOOP_WORDS; i++) {
+        assert(scratch[i] == gp_loop_words[i]);
     }
-    assert(scratch[GP_REVERB_WORDS] == 0 && scratch[0x7FF] == 0);   /* rest of P:0..$7FF is NOP */
+    for (i = GP_LOOP_WORDS; i < GP_KFREEVERB_ORIGIN; i++) {
+        assert(scratch[i] == 0);
+    }
+    for (i = 0; i < GP_KFREEVERB_WORDS; i++) {
+        assert(scratch[GP_KFREEVERB_ORIGIN + i] == gp_kfreeverb_words[i]);
+    }
+    assert(scratch[GP_KFREEVERB_ORIGIN + GP_KFREEVERB_WORDS] == 0 && scratch[0x7FF] == 0);
     assert(reg(MCPX_APU_GP_XMEM + 0x40u) == 0 && apu_gp_frames(base) == 0);   /* frame counter cleared */
     set_reg(MCPX_APU_GP_XMEM + 0x40u, 0x1000123u);
     assert(apu_gp_frames(base) == 0x000123u);                    /* 24-bit DSP word */
@@ -154,7 +163,7 @@ int main(void) {
         apu_gp_debug_set_program(NULL, 0);
         apu_gp_debug_set_scratch_bytes(0);
         assert(apu_vp_init(base) == 0);
-        assert(apu_gp_scratch_bytes() == DEFAULT_SCRATCH && apu_gp_debug_scratch()[0] == gp_reverb_words[0]);
+        assert(apu_gp_scratch_bytes() == DEFAULT_SCRATCH && apu_gp_debug_scratch()[0] == gp_loop_words[0]);
         apu_vp_deinit(base);
     }
     printf("    -> the assembled copy program matches; custom image and scratch size load [PASS]\n");
@@ -165,27 +174,35 @@ int main(void) {
         static const uint32_t image[3] = { 0x08F484u, 0x000001u, 0x0C0000u };
         uint32_t w0;
         assert(apu_vp_init(base) == 0);
-        assert(!apu_gp_reverb_on() && reg(MCPX_APU_GP_XMEM + 4u * GP_REVERB_FLAGS) == 0);
+        assert(!apu_gp_reverb_on() && reg(MCPX_APU_GP_XMEM + 4u * GP_LOOP_FLAGS) == 0);
         assert(apu_reverb_preset(3, &p) == 0);                       /* hall */
         assert(apu_gp_reverb_set(base, &p, true) == 0 && apu_gp_reverb_on());
-        assert(reg(MCPX_APU_GP_XMEM + 4u * GP_REVERB_FLAGS) == 1u);
-        assert(reg(MCPX_APU_GP_XMEM + 4u * GP_REVERB_RCHAIN) == GP_REVERB_RCHAIN + 16u);   /* chains written */
-        w0 = reg(MCPX_APU_GP_XMEM + 4u * (GP_REVERB_WCHAIN + 4u));
+        assert(reg(MCPX_APU_GP_XMEM + 4u * GP_LOOP_FLAGS) == 1u);
+        assert(reg(MCPX_APU_GP_XMEM + 4u * GP_KFREEVERB_RCHAIN) == GP_KFREEVERB_RCHAIN + 16u);   /* chains written */
+        assert(reg(MCPX_APU_GP_XMEM + 4u * GP_LOOP_K_RHEAD) == GP_KFREEVERB_RCHAIN);
+        assert(reg(MCPX_APU_GP_XMEM + 4u * GP_LOOP_K_WHEAD) == GP_KFREEVERB_WCHAIN);
+        w0 = reg(MCPX_APU_GP_XMEM + 4u * (GP_KFREEVERB_WCHAIN + 4u));
         assert(w0 == 4u * 1200u);                                    /* 25 ms pre-delay */
-        p.gain = 0.25f;                                              /* gains only: written live */
-        set_reg(MCPX_APU_GP_XMEM + 4u * (GP_REVERB_WCHAIN + 4u), 0x777u);
+        p.gain = 0.25f;                                              /* gains only: through the mailbox */
+        set_reg(MCPX_APU_GP_XMEM + 4u * (GP_KFREEVERB_WCHAIN + 4u), 0x777u);
         assert(apu_gp_reverb_set(base, &p, true) == 0);
-        assert(reg(MCPX_APU_GP_XMEM + 4u * GP_REVERB_WET) == 0x200000u);
-        assert(reg(MCPX_APU_GP_XMEM + 4u * (GP_REVERB_WCHAIN + 4u)) == 0x777u);   /* layout untouched */
+        assert(reg(MCPX_APU_GP_XMEM + 4u * GP_KFREEVERB_WET) == 0x200000u);
+        assert(reg(MCPX_APU_GP_XMEM + 4u * (GP_KFREEVERB_WCHAIN + 4u)) == 0x777u);   /* layout untouched */
+        assert(reg(MCPX_APU_GP_XMEM + 4u * GP_LOOP_MB_SEQ) == 1u && reg(MCPX_APU_GP_XMEM + 4u * GP_LOOP_MB_ACK) == 1u);
+        assert(reg(MCPX_APU_GP_XMEM + 4u * GP_LOOP_MB_N) == apu_reverb_coefficients(&p, s_words));
+        assert(reg(MCPX_APU_GP_XMEM + 4u * (GP_LOOP_MBOX + 2u * 2u)) == GP_KFREEVERB_WET);   /* pair 2: the wet gain */
+        assert(reg(MCPX_APU_GP_XMEM + 4u * (GP_LOOP_MBOX + 2u * 2u + 1u)) == 0x200000u);
         p.pre_delay = 0.05f;                                         /* new pre-delay: laid out again */
         assert(apu_gp_reverb_set(base, &p, true) == 0);
-        assert(reg(MCPX_APU_GP_XMEM + 4u * (GP_REVERB_WCHAIN + 4u)) == 4u * 2400u);
+        assert(reg(MCPX_APU_GP_XMEM + 4u * (GP_KFREEVERB_WCHAIN + 4u)) == 4u * 2400u);
         assert(apu_gp_reverb_set(base, &p, false) == 0 && !apu_gp_reverb_on());
-        assert(reg(MCPX_APU_GP_XMEM + 4u * GP_REVERB_FLAGS) == 0);
+        assert(reg(MCPX_APU_GP_XMEM + 4u * GP_LOOP_FLAGS) == 0);
+        assert(apu_gp_mailbox(base, s_words, GP_LOOP_MB_MAX + 1u) == -1);   /* more than the mailbox holds */
         apu_vp_deinit(base);
         apu_gp_debug_set_program(image, 3);                          /* another program: no reverb */
         assert(apu_vp_init(base) == 0);
         assert(apu_gp_reverb_set(base, &p, true) == -1 && !apu_gp_reverb_on());
+        assert(apu_gp_mailbox(base, s_words, 1u) == -1);              /* no mailbox in another program */
         apu_vp_deinit(base);
         apu_gp_debug_set_program(NULL, 0);
     }
