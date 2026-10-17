@@ -241,6 +241,14 @@ AL_API void AL_APIENTRY alSourceUnqueueBuffers(ALuint source, ALsizei nb, ALuint
 /* AL_XBOX_reverb: the reverb is enabled and running on the GP */
 bool al_reverb_active(void);
 
+/** The GP effect or its slot changed (AL_XBOX_REVERB on/off, an EFX slot's effect, gain or send-auto flag):
+ * re-apply it and update every voice's sends. */
+void al_source_effects_changed(void);
+
+/** Host tests: the GP effect's parameters (false: none runs), and a source's send gains as they would reach its voice. */
+bool al_source_debug_gp_effect(apu_reverb_params_t *p);
+bool al_source_debug_sends(ALuint source, float out[APU_VOICE_SENDS]);
+
 #ifdef __cplusplus
 }
 #endif

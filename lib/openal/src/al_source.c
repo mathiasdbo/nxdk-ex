@@ -386,6 +386,54 @@ static NVAPU_VOICE_CONTEXT_3D *source_live_context(const ALsource *src) {
     return apu_voice_get_context((uint32_t)src->hw_voice_idx);
 }
 
+
+/*
+ * Effect sends (EFX_PLAN.md 3.2). The GP runs one effect, so only sends to it
+ * are heard: AL_XBOX_REVERB_SEND on send 0 while AL_XBOX_REVERB is on (the
+ * dry gain times the send, as before), else each EFX send whose slot holds the
+ * active effect. An EFX send's gain is the source's gain with distance
+ * attenuation by the room rolloff (the source's plus the effect's), the cone
+ * when AL_AUXILIARY_SEND_FILTER_GAIN_AUTO is on, within AL_MIN_GAIN /
+ * AL_MAX_GAIN, times the listener gain; AL_EFFECTSLOT_GAIN is applied on the
+ * GP. (Filters are AL_FILTER_NULL for now: gain 1.)
+ */
+static bool s_reverb_enabled;
+
+static float efx_send_gain(const ALsource *src, const AL_SPATIAL_CALC *calc, const al_efx_slot_t *slot) {
+    float g = src->gain;
+    if (!src->direct) {
+        g *= apu_calc_distance_gain(calc->distance, src->reference_distance, src->max_distance,
+                                    al_efx_room_rolloff(&src->efx, slot), apu_spatial_get_distance_model());
+        if (src->efx.send_gain_auto) {
+            g *= calc->cone_gain;
+        }
+    }
+    if (g < src->min_gain) g = src->min_gain;
+    if (g > src->max_gain) g = src->max_gain;
+    g *= al_listener_get_gain();
+    return (g < 0.0f) ? 0.0f : ((g > 1.0f) ? 1.0f : g);
+}
+
+static void source_sends(const ALsource *src, const AL_SPATIAL_CALC *calc, float out[APU_VOICE_SENDS]) {
+    ALuint active = al_efx_active_slot();
+    uint32_t n;
+    for (n = 0; n < APU_VOICE_SENDS; n++) {
+        out[n] = 0.0f;
+    }
+    if (s_reverb_enabled) {
+        out[0] = calc->effective_gain * src->reverb_send;
+        return;
+    }
+    if (active == 0u) {
+        return;
+    }
+    for (n = 0; n < APU_VOICE_SENDS && n < (uint32_t)AL_EFX_MAX_SENDS; n++) {
+        if (src->efx.send[n].slot == active) {
+            out[n] = efx_send_gain(src, calc, al_efx_slot(active));
+        }
+    }
+}
+
 /*
  * Refresh the requested voice context fields from a single spatial
  * computation. Paused sources are updated too so that a resume is current.
@@ -427,7 +475,11 @@ static void source_update_hw(const ALsource *src, unsigned fields) {
     }
     apu_voice_set_direction((uint32_t)src->hw_voice_idx, calc.local_pos);
     apu_voice_set_direct((uint32_t)src->hw_voice_idx, src->direct, src->direct_gain[0], src->direct_gain[1]);
-    apu_voice_set_send((uint32_t)src->hw_voice_idx, src->reverb_send);
+    {
+        float sends[APU_VOICE_SENDS];
+        source_sends(src, &calc, sends);
+        apu_voice_set_sends((uint32_t)src->hw_voice_idx, sends);
+    }
     /* Hardware backend: apply the new pitch and volumes to the running voice */
     apu_voice_commit(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx);
 }
@@ -531,7 +583,11 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
     }
     src->has_offset = false;
     apu_voice_set_direct(hw_voice_idx, src->direct, src->direct_gain[0], src->direct_gain[1]);
-    apu_voice_set_send(hw_voice_idx, src->reverb_send);
+    {
+        float sends[APU_VOICE_SENDS];
+        source_sends(src, &calc, sends);
+        apu_voice_set_sends(hw_voice_idx, sends);
+    }
     apu_voice_setup(hw_voice_idx, &ctx);
     if (src->stream) {
         /* The voice starts at ring index 0 from the stream's read position */
@@ -940,6 +996,8 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
         default:
             if (!al_efx_source_setf(&src->efx, param, value)) {
                 alSetError(AL_INVALID_ENUM);
+            } else {
+                source_update_hw(src, SRC_HW_SPATIAL);
             }
             break;
     }
@@ -1146,6 +1204,8 @@ AL_API void AL_APIENTRY alSourcei(ALuint source, ALenum param, ALint value) {
         default:
             if (!al_efx_source_seti(&src->efx, param, value)) {
                 alSetError(AL_INVALID_ENUM);
+            } else {
+                source_update_hw(src, SRC_HW_SPATIAL);
             }
             break;
     }
@@ -1161,6 +1221,7 @@ AL_API void AL_APIENTRY alSource3i(ALuint source, ALenum param, ALint v1, ALint 
             return;
         }
         al_efx_source_set3i(&src->efx, param, v1, v2, v3);
+        source_update_hw(src, SRC_HW_SPATIAL);
         return;
     }
     alSource3f(source, param, (ALfloat)v1, (ALfloat)v2, (ALfloat)v3);
@@ -1937,14 +1998,15 @@ AL_API void AL_APIENTRY alGetBooleanv(ALenum param, ALboolean *values) {
 }
 
 /*
- * AL_XBOX_reverb: one reverb for the mix on the GP DSP. The settings live here;
- * reverb_apply() hands them to the GP program when a device is up and the
- * console route is in use (on xemu's front-end route bin 2 is a surround bin).
- * alXboxUpdateVoices() re-applies them after a device (re)open.
+ * The GP's one effect: AL_XBOX_reverb (one reverb for the mix; its settings
+ * live here) or, with it off, the reverb of the EFX slot holding the active
+ * effect (al_efx.c). reverb_apply() hands the parameters to the GP program
+ * when a device is up and the console route is in use (on xemu's front-end
+ * route bins 2/3 are surround bins). alXboxUpdateVoices() re-applies them
+ * after a device (re)open.
  */
 static apu_reverb_params_t s_reverb;
 static bool s_reverb_init;
-static bool s_reverb_enabled;
 
 static void reverb_params(void) {
     if (!s_reverb_init) {
@@ -1953,22 +2015,62 @@ static void reverb_params(void) {
     }
 }
 
-static void reverb_apply(void) {
+/* The parameters of the GP effect, false if there is none */
+static bool gp_effect(apu_reverb_params_t *p) {
+    const al_efx_slot_t *slot;
     reverb_params();
+    if (s_reverb_enabled) {
+        *p = s_reverb;
+        return true;
+    }
+    slot = al_efx_slot(al_efx_active_slot());
+    if (slot && (slot->props.type == AL_EFFECT_REVERB || slot->props.type == AL_EFFECT_EAXREVERB)) {
+        al_efx_reverb_params(slot, p);
+        return true;
+    }
+    *p = s_reverb;
+    return false;
+}
+
+static void reverb_apply(void) {
+    apu_reverb_params_t p;
+    bool on = gp_effect(&p);
     if (!apu_gp_ready() || apu_vp_front_end_ok()) {
         return;
     }
-    (void)apu_gp_reverb_set(al_source_get_apu_base(), &s_reverb, s_reverb_enabled);
+    (void)apu_gp_reverb_set(al_source_get_apu_base(), &p, on);
 }
 
 static void reverb_sync(void) {
-    if (s_reverb_enabled && !apu_gp_reverb_on()) {
+    apu_reverb_params_t p;
+    if (gp_effect(&p) && !apu_gp_reverb_on()) {
         reverb_apply();
     }
 }
 
 bool al_reverb_active(void) {
-    return s_reverb_enabled && apu_gp_reverb_on();
+    apu_reverb_params_t p;
+    return gp_effect(&p) && apu_gp_reverb_on();
+}
+
+bool al_source_debug_gp_effect(apu_reverb_params_t *p) {
+    return gp_effect(p);
+}
+
+bool al_source_debug_sends(ALuint source, float out[APU_VOICE_SENDS]) {
+    AL_SPATIAL_CALC calc;
+    ALsource *src = al_source_get(source);
+    if (!src || !out) {
+        return false;
+    }
+    al_source_calc_spatial(src, &calc);
+    source_sends(src, &calc, out);
+    return true;
+}
+
+void al_source_effects_changed(void) {
+    reverb_apply();
+    al_source_update_all_spatial();   /* who sends where */
 }
 
 AL_API void AL_APIENTRY alXboxReverbPreset(ALint preset) {
@@ -2045,7 +2147,7 @@ AL_API void AL_APIENTRY alEnable(ALenum capability) {
             return;
         }
         s_reverb_enabled = true;
-        reverb_apply();
+        al_source_effects_changed();
         return;
     }
     alSetError(AL_INVALID_ENUM);
@@ -2058,7 +2160,7 @@ AL_API void AL_APIENTRY alDisable(ALenum capability) {
     }
     if (capability == AL_XBOX_REVERB) {
         s_reverb_enabled = false;
-        reverb_apply();
+        al_source_effects_changed();
         return;
     }
     alSetError(AL_INVALID_ENUM);

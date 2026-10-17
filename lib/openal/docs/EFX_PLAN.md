@@ -66,19 +66,22 @@ Also from the tree:
 
 ### 3.2 Slots, bins and sends
 
-- Slot k (0..3) owns the bin pair **2+2k / 3+2k** (bins 2..9). A send is two voice outputs: send 0 = outputs
-  4/5, send 1 = outputs 6/7. Stereo voices put left on the even output, right on the odd one; mono voices feed
-  both at -3 dB. Mono-input kernels (the reverb) read L + R; stereo-input kernels (Half-Life) read the pair.
+- A send is two voice outputs: send 0 = outputs 4/5, send 1 = outputs 6/7. Stereo voices put left on the even
+  output, right on the odd one; mono voices feed both. Each output carries half the send's gain, so L + R, which
+  mono-input kernels (the reverb) read, is the send; stereo-input kernels (Half-Life) read the pair.
+- **As built (phase8-03):** with one effect per device every send goes to the kernel's input pair, **bins 2/3**,
+  whatever its slot; a send whose slot does not hold the active effect is muted. Moving a send or an effect
+  between slots therefore only changes volumes, which a playing voice takes live, so nothing waits for the
+  live-`VBIN` probe. The per-slot pairs (slot k on bins 2+2k / 3+2k) come with several kernels.
 - Send volume = source gain x distance attenuation with `AL_ROOM_ROLLOFF_FACTOR` (and the effect's room
   rolloff, as the spec adds them) x send-filter gain. `AL_AUXILIARY_SEND_FILTER_GAIN_AUTO` follows the spec;
   the HF parts (`AL_AIR_ABSORPTION_FACTOR`, `AL_CONE_OUTER_GAINHF`, `*_GAINHF_AUTO`) are stored and wait for
   filters. `AL_METERS_PER_UNIT` on the listener is stored (used by air absorption later).
 - `AL_EFFECTSLOT_GAIN` is the kernel's wet gain on the GP (one word, live). `AL_EFFECTSLOT_AUXILIARY_SEND_AUTO`
   is stored and honoured with the source auto flags.
-- Volume changes are live (as `AL_XBOX_REVERB_SEND` is today). A **bin change** (a send moved to another slot,
-  or a slot's effect detached) on a playing voice depends on probe step 3 (phase8-00): live `VBIN` rewrite if it works,
-  otherwise the change applies at the next `alSourcePlay` (documented). Sources without a hardware voice
-  just store it.
+- Volume changes are live (as `AL_XBOX_REVERB_SEND` is). `AL_XBOX_REVERB` on: send 0 is
+  `AL_XBOX_REVERB_SEND` x the dry gain (the old level exactly) and EFX sends are silent; off: the EFX sends to
+  the active slot. Sources without a hardware voice just store everything.
 
 ### 3.3 GP program: frame loop + one kernel
 
