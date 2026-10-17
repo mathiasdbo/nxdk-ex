@@ -1542,6 +1542,15 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
     played at the expected rates with no gaps; a 4800 Hz PCM tone at `AL_PITCH` 1/64 came out at 75 Hz.
   * Streamed ADPCM (`openal_engine` phase 10): a 480 Hz tone in 192-block chunks, four queued and refilled for
     3 s (12 refills), played at 480 Hz with no gap and the source never stopped.
+* **APU and AC97 clocks** (`samples/apu_clock_probe`, the gate for a zero-copy output where the AC97 reads the
+  GP ring directly): once a second, the frames the GP generated (frame counter x 32) against the frames the
+  codec played (buffers queued, CIV, LVI and PICB). Over 421 s the difference stayed within -16..+8 frames (the
+  GP counts in 32-frame steps), slope 0.02 ppm, no jumps, 0 underruns, 0 padded buffers: the two clocks are
+  locked. Against the performance counter the GP ran at 48000.018 Hz and the codec at 47999.999 Hz. PICB counts
+  down within a buffer, as on an ICH, so CIV + PICB gives the codec's read position. (In xemu the two are not
+  locked: GP emulator-timed, AC97 host-audio-timed, 18-47 ppm, and the codec plays in bursts of up to ~1000
+  frames. The probe reopens with `APU_VP_DBG_NO_FE_PROBE` there, since xemu's front end otherwise leaves the
+  output to the emulated APU.)
 * Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
   from a spherical-head model (Brown-Duda head-shadow shelf per ear as a 31-tap int8 FIR, Woodworth ITD in
   s6.9; 32 azimuths x elevations -30/0/30/60; no measured data, no pinna cues). `apu_vp_init()` uploads it with
