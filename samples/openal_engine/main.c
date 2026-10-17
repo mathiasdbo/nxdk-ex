@@ -380,6 +380,14 @@ static void AL_APIENTRY output_cb(ALshort *samples, ALsizei frames, ALvoid *user
     s_cb_calls++;
 }
 
+/* A sine of `hz` with a whole number of cycles per `frames` (exact phase from the index) */
+static void fill_tone(int16_t *dst, uint32_t frames, float hz) {
+    uint32_t i;
+    for (i = 0; i < frames; i++) {
+        dst[i] = (int16_t)(8000.0f * sinf(TWO_PI * hz * (float)(i % 48000u) / 48000.0f));
+    }
+}
+
 static void stats_window(const char *what, uint32_t ms) {
     ALXBOXSTATS a, b;
     uint32_t c0 = s_cb_calls, f0 = s_cb_frames;
@@ -438,13 +446,8 @@ static void glitch_window(const char *what, uint32_t ms) {
 }
 
 static void phase_stats(void) {
-    float ph = 0.0f;
-    uint32_t i;
     ALuint b, s;
-    for (i = 0; i < 48000u; i++) {
-        ph += TWO_PI * 480.0f / 48000.0f;
-        s_pcm[i] = (int16_t)(8000.0f * sinf(ph));
-    }
+    fill_tone(s_pcm, 48000u, 480.0f);   /* exact phase per sample: a float phase sum is ~1 rad off after 1 s, a click per loop */
     b = make_buffer(s_pcm, 48000u, 48000);
     s = make_source(b);
     alSourcei(s, AL_LOOPING, AL_TRUE);
@@ -518,14 +521,6 @@ static void scan_log(const char *what) {
           (unsigned long)s_scan.loud, (unsigned long)s_scan.peak,
           (unsigned long)(s_scan.frames ? (uint64_t)s_scan.crossings * 48000u / s_scan.frames : 0),
           (unsigned long)s_scan.jumps, (unsigned long)s_scan.gaps);
-}
-
-/* A sine of `hz` with a whole number of cycles per `frames` (exact phase from the index) */
-static void fill_tone(int16_t *dst, uint32_t frames, float hz) {
-    uint32_t i;
-    for (i = 0; i < frames; i++) {
-        dst[i] = (int16_t)(8000.0f * sinf(TWO_PI * hz * (float)(i % 48000u) / 48000.0f));
-    }
 }
 
 /* Breaks in the physical pages of a static buffer's list (0 = contiguous) */
@@ -882,14 +877,10 @@ static void zc_slice(const char *what) {
 }
 
 static void phase_zero_copy(void) {
-    float ph = 0.0f;
     uint32_t i;
     ALuint b, s;
     ALXBOXSTATS st;
-    for (i = 0; i < 48000u; i++) {
-        ph += TWO_PI * 480.0f / 48000.0f;
-        s_pcm[i] = (int16_t)(8000.0f * sinf(ph));
-    }
+    fill_tone(s_pcm, 48000u, 480.0f);   /* exact phase per sample (see phase 7) */
     b = make_buffer(s_pcm, 48000u, 48000);
     s = make_source(b);
     alSourcei(s, AL_LOOPING, AL_TRUE);

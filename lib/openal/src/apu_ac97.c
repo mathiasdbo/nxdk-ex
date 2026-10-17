@@ -98,6 +98,9 @@ static DWORD s_last_pump;   /* GetTickCount() of the previous pass */
 static uint64_t s_tsc0;     /* cycle counter and performance counter at the start */
 static LARGE_INTEGER s_qpc0;
 
+static bool s_codec_up;   /* XAudioInit has run */
+static void codec_open(void);
+
 /* Pump thread */
 static HANDLE s_thread;
 static volatile LONG s_quit;
@@ -209,7 +212,7 @@ static int copy_start(uintptr_t bar0) {
         }
         memset(s_slot[i], 0, CHUNK_BYTES);
     }
-    XAudioInit(16, 2, NULL, NULL);
+    codec_open();
     /* Silence first: this is the lead the GP output keeps over the codec, and
      * it must outlast the longest gap between two pumps (a 60 Hz frame is
      * 16.7 ms without the thread); with too little, every pump found the queue
@@ -244,6 +247,38 @@ static void dma_reset(volatile uint8_t *pb, uint32_t cr) {
     pb[cr] = AC97_CR_RESET;
     for (guard = 0; guard < 100000u && (pb[cr] & AC97_CR_RESET); guard++) {
     }
+}
+
+/*
+ * Both DMAs reset and pointed at empty buffer lists. The codec cold reset and
+ * the interrupt (XAudioInit) are done once: a console that cold-reset the
+ * codec again on a mode switch left it silent, its DMA neither moving nor
+ * halting, and the next XAudioInit waited for it forever
+ */
+static void codec_open(void) {
+    extern AC97_DEVICE ac97Device;
+    volatile uint8_t *pb;
+    uint32_t i;
+    if (!s_codec_up) {
+        XAudioInit(16, 2, NULL, NULL);
+        s_codec_up = true;
+    }
+    pb = ac97_regs();
+    dma_reset(pb, AC97_PO_CR);
+    dma_reset(pb, AC97_SP_CR);
+    pb[AC97_PO_SR] = 0xFFu;
+    pb[AC97_SP_SR] = 0xFFu;
+    for (i = 0; i < ZC_ENTRIES; i++) {
+        ac97Device.pcmOutDescriptor[i].bufferStartAddress = 0;
+        ac97Device.pcmOutDescriptor[i].bufferLengthInSamples = 0;
+        ac97Device.pcmOutDescriptor[i].bufferControl = 0;
+        ac97Device.pcmSpdifDescriptor[i].bufferStartAddress = 0;
+        ac97Device.pcmSpdifDescriptor[i].bufferLengthInSamples = 0;
+        ac97Device.pcmSpdifDescriptor[i].bufferControl = 0;
+    }
+    *(volatile uint32_t *)(pb + AC97_PO_BDBAR) = MmGetPhysicalAddress((void *)&ac97Device.pcmOutDescriptor[0]);
+    *(volatile uint32_t *)(pb + AC97_SP_BDBAR) = MmGetPhysicalAddress((void *)&ac97Device.pcmSpdifDescriptor[0]);
+    ac97Device.nextDescriptor = 0;   /* XAudioProvideSamples starts at entry 0, where the reset CIV is */
 }
 
 /*
@@ -349,7 +384,7 @@ static int zc_start(uintptr_t bar0) {
     s_zc_ring = apu_gp_fifo_bytes();
     s_zc_pieces = s_zc_ring / APU_AC97_ZC_PIECE_BYTES;
     s_zc_phys = apu_gp_fifo_phys();
-    XAudioInit(16, 2, NULL, NULL);   /* codec cold reset, buffer list bases, the ISR (it stays quiet) */
+    codec_open();
     s_stats.lead_min = 0xFFFFFFFFu;
     zc_begin(bar0);
     return 0;
@@ -430,10 +465,8 @@ static int output_start(uintptr_t bar0) {
 }
 
 static void output_stop(void) {
-    if (s_zc) {
-        apu_ac97_halt_dma();   /* the codec reads the GP ring: stop it before that is freed */
-    } else {
-        XAudioPause();
+    apu_ac97_halt_dma();   /* the codec reads the GP ring or the copy buffers: stop it before those are freed */
+    if (!s_zc) {
         free_slots();
     }
 }
