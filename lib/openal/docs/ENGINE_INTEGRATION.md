@@ -177,7 +177,7 @@ alSourcef(src, AL_XBOX_REVERB_SEND, 0.5f);             /* per source, 0..1, defa
 ### 3.8 Measuring the library's CPU time (AL_XBOX_stats)
 
 With OpenAL the audio CPU time is in two places: the library's **output thread** (every 4 ms, top priority; it
-moves the APU's mix to the AC97 and scrubs played stream data) and the **voice tick** (`alXboxUpdateVoices`, on
+keeps the AC97 fed with the APU's mix and scrubs played stream data) and the **voice tick** (`alXboxUpdateVoices`, on
 the game thread). Both are counted in CPU cycles:
 
 ```c
@@ -193,8 +193,18 @@ double tick_ms = (s.update_cycles - prev.update_cycles) * 1000.0 / s.cycle_hz;
   - `output_passes`, `output_max_gap_ms`, `output_max_cycles`: how regularly the thread ran and its longest pass;
   - `output_hook_cycles`: the share of 3.9's callback;
   - `update_calls`, `update_max_cycles`: the voice tick;
-  - `ac97_buffers`, `ac97_underruns`, `ac97_padded`: output health (10.7 ms per buffer; padded means the APU's
-    mix was late).
+  - `ac97_buffers`, `ac97_underruns`, `ac97_padded`: output health (copy mode: 10.7 ms per buffer, padded means
+    the APU's mix was late; zero-copy: 2.67 ms per buffer-list entry, an underrun means the thread was away for
+    the whole ~85 ms queue);
+  - `output_zero_copy`: the codec reads the APU's mix directly (the default; see below);
+  - `output_slips`, `output_lead_min` / `_max` / `_last`: zero-copy only. The lead is how many frames the APU's mix
+    is ahead of the codec (about 1024, half the 8 KiB ring, ~21 ms of latency); a slip plays a 2.67 ms piece twice
+    or skips one to keep it in the middle half of the ring. On a console the two clocks are locked, so slips should
+    stay at 0.
+- **Zero-copy output:** the APU writes its mix in the codec's format, so by default the codec reads it in place
+  and the output thread only refills the codec's buffer list (no samples go through the CPU). An output callback
+  (3.9) needs the samples, so while one is installed the output runs in copy mode. `APU_VP_DBG_AC97_COPY`
+  (`apu_vp_debug_set_flags`, before the context is created) forces the copy mode with its larger ring.
 - **Without the output thread:** the output work runs inside the tick, so `update_cycles` includes it.
 - **Older structures:** only `size` bytes are written, so a program built against an older `ALXBOXSTATS` keeps
   working.
@@ -210,6 +220,8 @@ alXboxOutputCallback(my_fx, my_state);   /* NULL removes it */
 
 - **When it runs:** for every block of the final mix (after the APU's voices, HRTF and GP reverb), just before
   it goes to the codec. The samples are in cached memory, so reading them is cheap.
+- **It costs the zero-copy output:** installing a callback switches the output to copy mode (a short gap while
+  the codec restarts) and the output thread copies every block again; removing it switches back (3.8).
 - **Constraints:** it runs in the output thread at high priority. Keep it well under a millisecond per block
   (it shows in `output_hook_cycles`), and do not call OpenAL from it.
 - **Uses:** a CPU effect on the whole mix, a recorder, a level meter.
