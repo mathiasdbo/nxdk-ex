@@ -59,6 +59,10 @@ screens.
 - **Listener:** position, velocity, orientation, gain.
 - **Global:** `alDistanceModel` (all models), `alDopplerFactor`, `alSpeedOfSound`, `alGetError`, `alGetString`,
   `alGetInteger*`, `alGetFloat*`, `alEnable`/`alDisable`/`alIsEnabled` (`AL_XBOX_HRTF`, `AL_XBOX_REVERB`).
+- **Effects (`ALC_EXT_EFX` 1.0, `AL/efx.h`):** effects, filters and auxiliary effect slots with every EFX
+  function and token; source sends and send filters, the EFX source and listener parameters. Effect types
+  null, reverb and EAX reverb (on the GP's reverb) and `AL_EFFECT_XBOX_GP_PROGRAM` (your own GP kernel);
+  filters `AL_FILTER_NULL` only. 4 slots, one of them holding an effect at a time; 2 sends per source.
 
 ## Extensions (`include/AL/alext.h`)
 
@@ -70,7 +74,9 @@ screens.
 | `AL_XBOX_adpcm` | `AL_FORMAT_MONO_XBOX_ADPCM` / `AL_FORMAT_STEREO_XBOX_ADPCM`: `.xwav` data decoded by the APU (3.11) |
 | `AL_EXT_STATIC_BUFFER` | `alBufferDataStatic`: a buffer plays the application's memory in place, any range of it (3.10) |
 | `AL_SOFT_loop_points` | a buffer's loop section: play the intro once, then repeat `[start, end)` in hardware |
-| `AL_XBOX_hardware_status` | `alXboxGetHardwareStatus`: voices, free voices, sample memory, backend, AV pack, HRTF / reverb running |
+| `ALC_EXT_EFX` | the OpenAL Effects Extension 1.0: slots, sends, reverb / EAX reverb on the GP (`ENGINE_INTEGRATION.md` 3.12) |
+| `AL_XBOX_gp_program` | `AL_EFFECT_XBOX_GP_PROGRAM`, `alXboxEffectProgram`, `AL_XBOX_GP_PARAM0 + n`: an EFX effect that runs your own GP DSP kernel (3.13, `docs/GP_KERNELS.md`) |
+| `AL_XBOX_hardware_status` | `alXboxGetHardwareStatus`: voices, free voices, sample memory, backend, AV pack, HRTF / reverb running, GP load |
 | `AL_XBOX_source_control` | engine control of voices: direct left/right gains, priority, no-standby, has-voice |
 | `AL_XBOX_hrtf` | the APU's HRTF stage for mono 3D sources (on by default; `ENGINE_INTEGRATION.md` 3.5) |
 | `AL_XBOX_reverb` | a room reverb on the GP DSP, eight presets, a send per source (`ENGINE_INTEGRATION.md` 3.7) |
@@ -91,7 +97,8 @@ See the table in `docs/ENGINE_INTEGRATION.md` section 2. In short:
   already-played stream data.
 - **Old model microcode:** `src/apu_gp_ucode.h` holds the original model's GP microcode, which is not valid
   DSP56300. Only the null backend still writes it, into its RAM stand-in. The console runs the frame loop
-  `dsp/gp_loop.asm` with kernel 0, the reverb `dsp/gp_kfreeverb.asm`, assembled with `tools/dsp56asm.py`
+  `dsp/gp_loop.asm` with kernel 0, the reverb `dsp/gp_kfreeverb.asm` (or a custom kernel such as
+  `dsp/gp_kecho.asm`), assembled with `tools/dsp56asm.py`
   and checked on the host with `tools/dsp56sim.py` (`tests/test_gp_programs.py`).
 
 ## Tests
@@ -115,15 +122,17 @@ links showcase sources needs an `EXTRA_<test>` entry in the Makefile and a branc
 
 ## Layout
 
-- `include/AL/`: public headers (`al.h`, `alc.h`, `alext.h`).
+- `include/AL/`: public headers (`al.h`, `alc.h`, `alext.h`, `efx.h`).
 - `src/`:
-  - `al_*`: the AL objects;
+  - `al_*`: the AL objects (`al_efx.c`: EFX effects, filters, slots);
   - `alc_context.c`: devices and contexts;
   - `apu_vp.c`: voices;
   - `apu_gp.c`, `apu_reverb.c`: the GP program and reverb;
   - `apu_ac97.c`: output;
   - `apu_voice*.c`: the voice manager;
   - `apu_hrtf.c`, `apu_spatial.c`: HRTF table and 3D math.
-- `dsp/`: the GP programs in DSP56300 assembly; `tools/dsp56asm.py` assembles them into headers in `src/`.
+- `dsp/`: the GP programs in DSP56300 assembly; `tools/dsp56asm.py` assembles them into headers in `src/`
+  (the example kernel's image into `dsp/gp_kecho.h`); `tools/dsp56sim.py` runs them on the host.
 - `tests/`: host tests and runners.
-- `docs/`: hardware findings, engine guide, plans.
+- `docs/`: hardware findings, the engine guide (`ENGINE_INTEGRATION.md`), writing GP kernels (`GP_KERNELS.md`),
+  plans.

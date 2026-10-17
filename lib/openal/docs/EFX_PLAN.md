@@ -184,6 +184,7 @@ As built (phase8-04):
 - **Parameters**: `alEffecti` stores -0x800000..0xFFFFFF (read back sign-extended), `alEffectf` -1..1 as Q23.
   Attaching the effect again with the same image sends only the changed words, in one mailbox post (one
   frame); a different image reloads the kernel. Switching back to a reverb puts its code back the same way.
+- **Guide** for kernel authors: `docs/GP_KERNELS.md`; the game's side in `ENGINE_INTEGRATION.md` 3.12-3.13.
 - **Example**: `dsp/gp_kecho.asm` (154 words), a stereo echo: delay 32..16384 samples (param 0, raw),
   feedback and wet (params 1/2, Q23), two 64 KiB lines, 4 descriptors. It sets the next frame's read offsets
   from the write offset every frame, so a new delay applies on the next frame. `tests/test_gp_programs.py` [5]
@@ -230,5 +231,5 @@ library than the ABI and the mailbox.
 | `VBIN` cannot change on a playing voice | bin changes apply at the next play (documented); the engine sets sends before playing |
 | The split loop costs too much with the reverb | keep the reverb monolithic for `AL_EFFECT_REVERB`; custom kernels replace the whole program with a loop template we ship |
 | The VP filter is unusable | probed usable (2.1); until the follow-up, filters stay `AL_INVALID_VALUE` and muffling goes via `AL_XBOX_REVERB_OUTPUT_LOWPASS` or the game's kernel |
-| A custom kernel overruns the frame | `padded` / `slips` in `AL_XBOX_stats` and `AL_XBOX_GP_KERNEL_CYCLES` show it; nothing guards it on the DSP |
+| A custom kernel overruns the frame | `padded` / `slips` in `AL_XBOX_stats` and `AL_XBOX_GP_LOAD_PEAK` show it; nothing guards it on the DSP |
 | Games expect several slots (EAX-style per-room) | one active effect is reported by `AL_INVALID_OPERATION`; a later phase links several light kernels into one image |
