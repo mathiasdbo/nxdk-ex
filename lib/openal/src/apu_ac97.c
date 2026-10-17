@@ -92,7 +92,7 @@ static void pump_once(uintptr_t bar0) {
     volatile uint8_t *pb = ac97_regs();
     bool halted = (pb[AC97_PO_SR] & AC97_SR_DCH) != 0;
     DWORD now = GetTickCount();
-    uint32_t guard, queued;
+    uint32_t guard, queued, queued0;
 
     if (s_stats.pumps != 0u && now - s_last_pump > s_stats.max_gap_ms) {
         s_stats.max_gap_ms = now - s_last_pump;
@@ -100,10 +100,13 @@ static void pump_once(uintptr_t bar0) {
     s_last_pump = now;
     s_stats.pumps++;
 
-    /* The codec's queue is read once a pass and counted here as buffers go
-     * on it: each register read is a bus transaction, and the codec takes at
-     * most one buffer off it (10.7 ms) while a pass runs */
+    /* The codec's queue is read once for the fill and counted here as
+     * buffers go on it: each register read is a bus transaction. The codec
+     * may take one buffer (10.7 ms) off it during the pass, so the count can
+     * be one high: the fill then stops with APU_AC97_AHEAD - 1 queued, still
+     * more than a 4 ms pass needs */
     queued = (pb[AC97_PO_LVI] - pb[AC97_PO_CIV]) & 31u;
+    queued0 = queued;
     for (guard = 0; guard < SLOTS; guard++) {
         uint64_t t0;
         if (queued >= APU_AC97_AHEAD && !halted) {
@@ -120,7 +123,12 @@ static void pump_once(uintptr_t bar0) {
     }
     /* The GP is not delivering (stalled, or the pump ran too rarely) and the
      * codec is on its last buffer: top the queue up with the partial buffer
-     * padded with silence, rather than let it run dry and replay old buffers */
+     * padded with silence, rather than let it run dry and replay old buffers.
+     * A buffer queued in this pass is still on the queue; with none, the
+     * snapshot may be stale, so the queue is read again */
+    if (queued == queued0) {
+        queued = (pb[AC97_PO_LVI] - pb[AC97_PO_CIV]) & 31u;
+    }
     if (queued == 0u) {
         memset(s_stage + 2u * s_fill, 0, (APU_AC97_CHUNK_FRAMES - s_fill) * 4u);
         queue_block();
