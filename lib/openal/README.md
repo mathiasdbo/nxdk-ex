@@ -5,7 +5,7 @@ Processing Unit (APU):
 - **Voices:** each playing source runs on a hardware voice of the APU's voice processor (VP): resampling, volume,
   HRTF.
 - **Mixing and effects:** the APU's GP DSP runs our own program; it forwards the mix and can add a room reverb.
-- **Output:** a library thread moves the result to the AC97 codec every 4 ms.
+- **Output:** the AC97 codec plays the APU's mix in place; a library thread refills its buffer list every 4 ms.
 
 It is a clean-room implementation: no Microsoft firmware, XDK code or state left by other software; hardware
 facts come from public sources (xemu, XboxDevWiki) and our own console probes.

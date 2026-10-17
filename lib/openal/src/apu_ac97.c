@@ -241,9 +241,14 @@ static void zc_set_entry(uint32_t i, uint32_t p) {
     s_zc_piece_of[i] = (uint8_t)p;
 }
 
+/* Stop one DMA (cr: its control register; its status register is 5 bytes
+ * before), wait until it has halted (an ICH must be halted before its
+ * registers are reset, and it may still be fetching), then reset it */
 static void dma_reset(volatile uint8_t *pb, uint32_t cr) {
     uint32_t guard;
     pb[cr] = 0;
+    for (guard = 0; guard < 100000u && !(pb[cr - 5u] & AC97_SR_DCH); guard++) {
+    }
     pb[cr] = AC97_CR_RESET;
     for (guard = 0; guard < 100000u && (pb[cr] & AC97_CR_RESET); guard++) {
     }
@@ -385,7 +390,9 @@ static int zc_start(uintptr_t bar0) {
     s_zc_pieces = s_zc_ring / APU_AC97_ZC_PIECE_BYTES;
     s_zc_phys = apu_gp_fifo_phys();
     codec_open();
-    s_stats.lead_min = 0xFFFFFFFFu;
+    s_stats.lead_min = 0xFFFFFFFFu;   /* the lead of this zero-copy run */
+    s_stats.lead_max = 0;
+    s_stats.lead_last = 0;
     zc_begin(bar0);
     return 0;
 }
@@ -528,6 +535,7 @@ void apu_ac97_stop(void) {
     output_stop();
     s_active = false;
     s_zc = false;
+    s_stats.zero_copy = false;
 }
 
 void apu_ac97_halt_dma(void) {
@@ -536,10 +544,8 @@ void apu_ac97_halt_dma(void) {
         return;
     }
     /* Stop both DMAs and reset their registers: they no longer read the old buffers */
-    pb[AC97_PO_CR] = 0;
-    pb[AC97_PO_CR] = AC97_CR_RESET;
-    pb[AC97_SP_CR] = 0;
-    pb[AC97_SP_CR] = AC97_CR_RESET;
+    dma_reset(pb, AC97_PO_CR);
+    dma_reset(pb, AC97_SP_CR);
 }
 
 #else /* host: no codec */

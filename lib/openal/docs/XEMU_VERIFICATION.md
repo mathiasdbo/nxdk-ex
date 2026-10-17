@@ -1554,7 +1554,7 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
 * **Zero-copy output** (`openal_engine` phase 11, the default output since this change): the AC97's buffer
   list points at 512-byte pieces of an 8 KiB GP ring, and the output thread only requeues played entries.
   Over 420 s on the console: 60 s zero-copy, 60 s copy mode (a no-op output callback), 300 s zero-copy again.
-  Every 10 s window had 0 slips, 0 underruns and 0 padded buffers, ~3755 entries per 10 s (48 kHz), and a
+  The run ended with 0 slips, 0 underruns and 0 padded buffers in total, ~3755 entries per 10 s (48 kHz), and a
   lead over the codec of 1008..1112 frames (~22 ms). The output thread took 1.27 ms of CPU per second in
   zero-copy mode against 5.06 ms/s in copy mode (about 0.063 ms per 60 Hz frame saved). The 480 Hz tone was
   clean by ear, and phase 7's six mode switches ran without an underrun. `openal_showcase` (98 s, all six

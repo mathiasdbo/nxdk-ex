@@ -222,6 +222,9 @@ alXboxOutputCallback(my_fx, my_state);   /* NULL removes it */
   it goes to the codec. The samples are in cached memory, so reading them is cheap.
 - **It costs the zero-copy output:** installing a callback switches the output to copy mode (a short gap while
   the codec restarts) and the output thread copies every block again; removing it switches back (3.8).
+- **Gaps:** the APU's ring is the 8 KiB zero-copy one, so in copy mode the output tolerates ~37 ms between two
+  passes. The output thread runs every 4-6 ms; without it (the output in the tick), keep above ~30 fps while a
+  callback is installed. `APU_VP_DBG_AC97_COPY` gives copy mode its 64 KiB ring (~300 ms) but turns zero-copy off.
 - **Constraints:** it runs in the output thread at high priority. Keep it well under a millisecond per block
   (it shows in `output_hook_cycles`), and do not call OpenAL from it.
 - **Uses:** a CPU effect on the whole mix, a recorder, a level meter.
