@@ -303,13 +303,18 @@ void apu_voice_bind_loop(uint32_t index, uint32_t loop_start, uint32_t loop_end,
  */
 void apu_voice_set_direct(uint32_t index, bool on, float left, float right);
 
+/** Effect sends per voice (EFX_PLAN.md 3.2): send 0 and send 1. */
+#define APU_VOICE_SENDS 2u
+
 /**
- * Reverb send (AL_XBOX_REVERB_SEND, 0..1): on a console, outputs 4 and 5 carry
- * the slot's sound (mono, or the two channels of a stereo voice) to mixbin 2,
- * the GP reverb's input, at send times the master volume. Takes effect at the
- * next trigger or commit.
+ * Effect sends (EFX sends to the active slot, or AL_XBOX_REVERB_SEND): the
+ * linear gain of each send, 0..1, already including the source's gain and
+ * attenuation. On a console send n leaves on outputs 4 + 2n and 5 + 2n (the
+ * mono sound twice, or a stereo voice's left and right) to mixbins 2 and 3,
+ * the GP kernel's input pair, each at half the gain. Takes effect at the next
+ * trigger or commit.
  */
-void apu_voice_set_send(uint32_t index, float send);
+void apu_voice_set_sends(uint32_t index, const float sends[APU_VOICE_SENDS]);
 
 /**
  * Switch looping of a running voice (AL_LOOPING while playing or paused): the

@@ -123,6 +123,8 @@ typedef void (AL_APIENTRY *LPALBUFFERDATASTATIC)(ALuint buffer, ALenum format, c
  *   AL_XBOX_REVERB_OUTPUT_LOWPASS 0 .. 0.98       muffles the whole mix, dry sound included
  *                                                 (underwater; 0 leaves the mix untouched)
  * Gains change at once; a new pre-delay restarts the reverb (its tail is cut).
+ * The GP runs one effect: AL_XBOX_REVERB and an ALC_EXT_EFX slot holding an
+ * effect exclude each other (AL_INVALID_OPERATION; AL/efx.h).
  * alXboxGetReverbf reads a value back. Out-of-range values: AL_INVALID_VALUE.
  * Runs on a real console (AL_XBOX_REVERB_ACTIVE says when); the settings are
  * kept when no device is open and applied when one is.

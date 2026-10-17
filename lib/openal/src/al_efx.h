@@ -4,14 +4,18 @@
 /*
  * ALC_EXT_EFX objects (lib/openal/docs/EFX_PLAN.md 3.1): effects, filters,
  * auxiliary effect slots and the per-source / listener EFX state. This file
- * stores and validates; the routing to mixbins and the GP comes later
- * (phase8-03), through al_efx_slot() and al_efx_active_slot().
+ * stores and validates and maps the reverb onto the GP's; al_source.c routes
+ * the sends and drives the GP (EFX_PLAN.md 3.2) through al_efx_slot() and
+ * al_efx_active_slot(), and hears of slot changes through
+ * al_source_effects_changed().
  */
 
 #include <AL/al.h>
 #include <AL/efx.h>
 #include <stdbool.h>
 #include <stdint.h>
+
+#include "apu_reverb.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -101,6 +105,21 @@ ALuint al_efx_active_slot(void);
 
 /** Free every effect, filter and slot (last device closed). */
 void al_efx_reset(void);
+
+/**
+ * The GP reverb's parameters for a slot holding AL_EFFECT_REVERB or
+ * AL_EFFECT_EAXREVERB (EFX_PLAN.md 3.5, an approximation): decay time, HF
+ * ratio (at most 1), wet gain = GAIN x LATE_REVERB_GAIN x the slot's gain,
+ * pre-delay = REFLECTIONS_DELAY + LATE_REVERB_DELAY (at most 0.1 s),
+ * diffusion, and GAINHF as a one-pole lowpass on the input at HFREFERENCE.
+ */
+void al_efx_reverb_params(const al_efx_slot_t *slot, apu_reverb_params_t *out);
+
+/** The one-pole coefficient whose gain at `hz` (48 kHz) is `gain_hf` (0 for 1 and above), at most 0.95. */
+float al_efx_onepole_for_gain(float gain_hf, float hz);
+
+/** Room rolloff of a source's send to `slot`: the source's plus, with the slot's send-auto flag, the effect's. */
+ALfloat al_efx_room_rolloff(const al_efx_source_t *s, const al_efx_slot_t *slot);
 
 #ifdef __cplusplus
 }

@@ -45,13 +45,14 @@ typedef struct {
 
 static voice_direct_t s_voice_direct[APU_VOICE_MAX_SLOTS];
 
-/* Reverb send of each slot (apu_voice_set_send) */
-static float s_voice_send[APU_VOICE_MAX_SLOTS];
+/* Effect sends of each slot (apu_voice_set_sends): absolute linear gains */
+static float s_voice_send[APU_VOICE_MAX_SLOTS][APU_VOICE_SENDS];
 
-/* Console outputs that feed the GP reverb's input bin (dsp/gp_reverb.asm BIN2) */
-#define SEND_OUT_A   4
-#define SEND_OUT_B   5
-#define SEND_BIN     2u
+/* Console: send n leaves on outputs 4 + 2n (left or mono) and 5 + 2n (right
+ * or mono) for the GP kernel's input pair, bins 2/3 (dsp/gp_kfreeverb.asm KIN) */
+#define SEND_OUT     4
+#define SEND_BIN_L   2u
+#define SEND_BIN_R   3u
 
 /* HRTF: the slot plays as an HRTF voice (its last start); AL_XBOX_HRTF (on by default) */
 static bool s_slot_hrtf[APU_VOICE_MAX_SLOTS];
@@ -153,16 +154,22 @@ static void vp_params_core(uint32_t index, const NVAPU_VOICE_CONTEXT_3D *ctx, bo
     }
 }
 
-/* The voice's pitch, bins and volumes; on a console also its reverb send:
- * outputs 4 and 5 (both channels of a stereo voice, each at half) to bin 2 */
+/* The voice's pitch, bins and volumes; on a console also its effect sends:
+ * send n on outputs 4 + 2n / 5 + 2n to bins 2 / 3, each at half the send's
+ * gain (a stereo voice's left and right, or the mono sound twice: their sum,
+ * which a mono-input kernel reads, is the send) */
 static void vp_params_from_context(uint32_t index, const NVAPU_VOICE_CONTEXT_3D *ctx, bool hrtf, int16_t *pitch,
                                    uint8_t bins[APU_VP_OUTPUTS], uint16_t vols[APU_VP_OUTPUTS]) {
+    uint32_t n;
     vp_params_core(index, ctx, hrtf, pitch, bins, vols);
     if (!apu_vp_front_end_ok()) {
-        float master = (float)ctx->master_vol_left / 65535.0f;
-        bins[SEND_OUT_A] = bins[SEND_OUT_B] = (uint8_t)SEND_BIN;
-        vols[SEND_OUT_A] = vols[SEND_OUT_B] =
-            (s_voice_send[index] > 0.0f) ? apu_vp_atten_from_gain(0.5f * master * s_voice_send[index]) : 0xFFFu;
+        for (n = 0; n < APU_VOICE_SENDS; n++) {
+            float g = s_voice_send[index][n];
+            uint16_t v = (g > 0.0f) ? apu_vp_atten_from_gain(0.5f * g) : 0xFFFu;
+            bins[SEND_OUT + 2u * n] = (uint8_t)SEND_BIN_L;
+            bins[SEND_OUT + 2u * n + 1u] = (uint8_t)SEND_BIN_R;
+            vols[SEND_OUT + 2u * n] = vols[SEND_OUT + 2u * n + 1u] = v;
+        }
     }
 }
 
@@ -535,12 +542,16 @@ void apu_voice_set_direct(uint32_t index, bool on, float left, float right)
     s_voice_direct[index].right = right;
 }
 
-void apu_voice_set_send(uint32_t index, float send)
+void apu_voice_set_sends(uint32_t index, const float sends[APU_VOICE_SENDS])
 {
-    if (index >= APU_VOICE_MAX_SLOTS) {
+    uint32_t n;
+    if (index >= APU_VOICE_MAX_SLOTS || sends == NULL) {
         return;
     }
-    s_voice_send[index] = (send > 0.0f) ? ((send < 1.0f) ? send : 1.0f) : 0.0f;
+    for (n = 0; n < APU_VOICE_SENDS; n++) {
+        float g = sends[n];
+        s_voice_send[index][n] = (g > 0.0f) ? ((g < 1.0f) ? g : 1.0f) : 0.0f;
+    }
 }
 
 void apu_voice_set_direction(uint32_t index, const float local_pos[3])

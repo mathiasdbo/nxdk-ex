@@ -20,6 +20,7 @@
 #include <AL/alext.h>
 
 #include "al_buffer.h"   /* alSetError */
+#include "al_source.h"   /* al_source_effects_changed */
 
 /* ------------------------------------------------------------------ parameter tables */
 
@@ -538,6 +539,9 @@ AL_API void AL_APIENTRY alDeleteAuxiliaryEffectSlots(ALsizei n, const ALuint *sl
     for (k = 0; k < n; k++) {
         if (slots[k] != 0u) s_slots[slots[k] - 1u].in_use = false;
     }
+    if (n > 0) {
+        al_source_effects_changed();   /* an active slot may have gone */
+    }
 }
 
 AL_API ALboolean AL_APIENTRY alIsAuxiliaryEffectSlot(ALuint slot) {
@@ -574,6 +578,7 @@ AL_API void AL_APIENTRY alAuxiliaryEffectSloti(ALuint slot, ALenum param, ALint 
                 effect_set_type(&s->props, AL_EFFECT_NULL);
             }
             s->effect = (ALuint)value;
+            al_source_effects_changed();
             break;
         }
         case AL_EFFECTSLOT_AUXILIARY_SEND_AUTO:
@@ -582,6 +587,7 @@ AL_API void AL_APIENTRY alAuxiliaryEffectSloti(ALuint slot, ALenum param, ALint 
                 return;
             }
             s->send_auto = (ALboolean)value;
+            al_source_effects_changed();
             break;
         default:
             alSetError(AL_INVALID_ENUM);
@@ -612,6 +618,9 @@ AL_API void AL_APIENTRY alAuxiliaryEffectSlotf(ALuint slot, ALenum param, ALfloa
         return;
     }
     s->gain = value;
+    if (al_efx_active_slot() == slot) {
+        al_source_effects_changed();
+    }
 }
 
 AL_API void AL_APIENTRY alAuxiliaryEffectSlotfv(ALuint slot, ALenum param, const ALfloat *values) {
@@ -831,6 +840,40 @@ void al_efx_set_max_sends(ALint sends) {
 
 ALint al_efx_max_sends(void) {
     return s_max_sends;
+}
+
+float al_efx_onepole_for_gain(float gain_hf, float hz) {
+    /* lp = s + p (lp - s): |H| = (1 - p) / sqrt(1 - 2 p cos w + p^2); solved for |H| = g */
+    double g = gain_hf, c = cos(2.0 * 3.14159265358979 * hz / 48000.0), a, k, p;
+    if (!(g < 1.0)) return 0.0f;
+    if (!(g > 0.0)) return 0.95f;
+    a = 1.0 - g * g;
+    k = 1.0 - g * g * c;
+    p = (k - sqrt(k * k - a * a)) / a;
+    return (float)(p < 0.0 ? 0.0 : (p > 0.95 ? 0.95 : p));
+}
+
+ALfloat al_efx_room_rolloff(const al_efx_source_t *s, const al_efx_slot_t *slot) {
+    ALfloat r = s->room_rolloff_factor;
+    if (slot && slot->send_auto &&
+        (slot->props.type == AL_EFFECT_REVERB || slot->props.type == AL_EFFECT_EAXREVERB)) {
+        r += slot->props.reverb.room_rolloff_factor;
+    }
+    return r;
+}
+
+void al_efx_reverb_params(const al_efx_slot_t *slot, apu_reverb_params_t *out) {
+    const al_efx_reverb_t *r = &slot->props.reverb;
+    float wet = r->gain * r->late_reverb_gain * slot->gain;
+    float pre = r->reflections_delay + r->late_reverb_delay;
+    apu_reverb_default_params(out);   /* input gain (headroom) and no output lowpass */
+    out->decay_time = r->decay_time;
+    out->hf_ratio = (r->decay_hf_ratio < 1.0f) ? r->decay_hf_ratio : 1.0f;
+    out->gain = (wet < 1.0f) ? wet : 1.0f;
+    out->pre_delay = (pre < 0.1f) ? pre : 0.1f;
+    out->diffusion = r->diffusion;
+    out->input_lowpass = al_efx_onepole_for_gain(r->gain_hf, r->hf_reference);
+    out->output_lowpass = 0.0f;
 }
 
 void al_efx_reset(void) {
