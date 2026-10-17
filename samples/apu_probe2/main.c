@@ -384,7 +384,7 @@ int main(void) {
         for (i = 0; i < FRAMES; i++) pcm[i] = (int16_t)(6000.0f * sinf(6.2831853f * 440.0f * (float)i / 48000.0f));
         s_pcm_phys = ph;
     }
-    apu_vp_debug_set_flags(APU_VP_DBG_NO_AC97);
+    apu_vp_debug_set_flags(APU_VP_DBG_NO_AC97 | APU_VP_DBG_AC97_COPY);   /* the 64 KiB ring, copy output */
     if (apu_vp_init(BAR0) != 0) {
         logf_("apu_vp_init failed\n");
         save_log();

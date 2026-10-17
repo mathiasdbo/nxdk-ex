@@ -391,7 +391,7 @@ int main(void) {
 
     apu_gp_debug_set_program(gp_probe_words, GP_PROBE_WORDS);
     apu_gp_debug_set_scratch_bytes(SCR_BYTES);
-    apu_vp_debug_set_flags(APU_VP_DBG_NO_AC97);
+    apu_vp_debug_set_flags(APU_VP_DBG_NO_AC97 | APU_VP_DBG_AC97_COPY);   /* the 64 KiB ring, copy output */
     if (apu_vp_init(BAR0) != 0) {
         logf_("apu_vp_init failed\n");
         save_log();

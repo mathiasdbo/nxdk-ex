@@ -952,7 +952,9 @@ static unsigned s_output_slot_i;
 
 static void output_trampoline(int16_t *samples, uint32_t frames, void *user) {
     const output_slot_t *slot = (const output_slot_t *)user;
-    slot->fn((ALshort *)samples, (ALsizei)frames, slot->user);
+    if (slot && slot->fn) {   /* the pump may read the hook just as it is removed (fn and user are two loads) */
+        slot->fn((ALshort *)samples, (ALsizei)frames, slot->user);
+    }
 }
 
 AL_API void AL_APIENTRY alXboxOutputCallback(ALXBOXOUTPUTPROC fn, ALvoid *user) {

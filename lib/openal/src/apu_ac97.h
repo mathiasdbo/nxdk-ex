@@ -18,7 +18,10 @@
  *
  * Copy: the CPU copies the ring into its own AC97 buffers. Used while an
  * output hook is installed (it needs the samples on the CPU) and with
- * apu_ac97_set_zero_copy(false). No XAudio callback is used (it stops after
+ * apu_ac97_set_zero_copy(false). Under a hook the ring stays the 8 KiB one,
+ * so a pump gap of more than ~37 ms (7/8 of it) loses audio, where the 64 KiB
+ * ring (APU_VP_DBG_AC97_COPY) bridged ~300 ms: the thread pumps every 4-6 ms,
+ * a pump from apu_vp_service() alone needs a frame rate above ~30 fps. No XAudio callback is used (it stops after
  * the first underrun, see samples/openal_showcase/showcase_audio.c).
  *
  * Both are kept going by a pump thread that runs every few milliseconds
@@ -41,8 +44,8 @@ extern "C" {
 #endif
 
 #define APU_AC97_CHUNK_FRAMES 512u   /* 10.7 ms per AC97 buffer */
-#define APU_AC97_PRIME        4u     /* silent buffers queued at start: the GP-to-codec lead (~43 ms) */
-#define APU_AC97_AHEAD        8u     /* most buffers queued ahead of the one playing (~85 ms) */
+#define APU_AC97_PRIME        4u     /* copy mode: silent buffers queued at start, the GP-to-codec lead (~43 ms) */
+#define APU_AC97_AHEAD        8u     /* copy mode: most buffers queued ahead of the one playing (~85 ms) */
 #define APU_AC97_PUMP_MS      4u     /* pump thread period */
 #define APU_AC97_ZC_PIECE_BYTES 512u /* zero-copy: one buffer-list entry, 128 frames (2.67 ms) */
 
@@ -80,7 +83,8 @@ typedef struct {
 typedef void (*apu_ac97_output_fn)(int16_t *samples, uint32_t frames, void *user);
 void apu_ac97_set_output_hook(apu_ac97_output_fn fn, void *user);
 
-/** Zero-copy output (default true) from the next apu_ac97_start() on, while no output hook is installed. */
+/** Zero-copy output (default true) while no output hook is installed: from the next apu_ac97_start() or hook
+ *  change on. apu_vp_init() sets it with the ring size (off with APU_VP_DBG_AC97_COPY). */
 void apu_ac97_set_zero_copy(bool on);
 
 /** Use the pump thread (default true) from the next apu_ac97_start() on. */
