@@ -36,7 +36,7 @@ static uint8_t s_list[APU_VP_MAX_HANDLES];      /* list each handle is linked on
 static uint8_t s_paused[APU_VP_MAX_HANDLES];    /* taken off its list by apu_vp_voice_pause() */
 static uint32_t s_listed[APU_VP_MAX_HANDLES / 32u]; /* a bit per handle on a list: the service walks only these */
 static uint32_t s_service_calls;
-static uint64_t s_service_cycles;                /* in apu_vp_service() since boot (apu_vp_service_cycles) */
+static uint64_t s_service_cycles;                /* in apu_vp_service() since apu_vp_init (apu_vp_service_cycles) */
 static apu_vp_fe_stats_t s_fe_stats;
 static uint32_t s_soft_end[APU_VP_MAX_HANDLES];  /* data frames of a one-shot looping on its silent tail, 0 = none */
 static uint32_t s_retired_at[APU_VP_MAX_HANDLES]; /* XGSCNT when the handle left its list */
@@ -692,6 +692,8 @@ int apu_vp_init(uintptr_t bar0) {
     s_fe_ok = (s_dbg & APU_VP_DBG_NO_FE_PROBE) ? false : fe_probe(bar0);
     s_trace_n = 0;
     s_trace_stopped = false;
+    s_service_calls = 0;
+    s_service_cycles = 0;
     s_stall_gp = 0;
     if (!s_fe_ok) {
         /* Real console: with bit 15 set, an ended voice still in a list stops

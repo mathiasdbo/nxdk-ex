@@ -17,6 +17,7 @@
  */
 static ALsource g_sources[AL_MAX_SOURCES];
 static ALuint s_source_end;   /* al_source_id_end() */
+static uint64_t s_tick_stream_cycles, s_tick_voice_cycles;   /* al_source_tick_cycles(), per device */
 static bool s_subsystem_initialized = false;
 static uintptr_t s_apu_base = 0; /* 0: no base installed, see al_source_get_apu_base() */
 static uint32_t s_spatial_calc_count = 0;
@@ -118,6 +119,7 @@ void al_source_init_subsystem(void) {
     apu_spatial_reset();
     s_play_seq = 0;
     s_source_end = 0;
+    s_tick_stream_cycles = s_tick_voice_cycles = 0;
     s_subsystem_initialized = true;
 }
 
@@ -140,6 +142,7 @@ void al_source_cleanup_subsystem(void) {
     apu_voice_mgr_deinit();
     apu_spatial_reset();
     s_source_end = 0;
+    s_tick_stream_cycles = s_tick_voice_cycles = 0;
     s_subsystem_initialized = false;
 }
 
@@ -664,8 +667,6 @@ static void source_update_stream(ALsource *src) {
 
 static void reverb_sync(void);
 
-static uint64_t s_tick_stream_cycles, s_tick_voice_cycles;
-
 void al_source_tick_cycles(uint64_t *stream, uint64_t *voices) {
     *stream = s_tick_stream_cycles;
     *voices = s_tick_voice_cycles;
@@ -683,8 +684,8 @@ void al_source_update_frame(void) {
     t1 = apu_platform_cycles();
     s_tick_stream_cycles += t1 - t0;
     apu_voice_mgr_update(al_source_get_apu_base());
-    reverb_sync();
     s_tick_voice_cycles += apu_platform_cycles() - t1;
+    reverb_sync();   /* in the update's unsplit rest (ALXBOXSTATS) */
 }
 
 
