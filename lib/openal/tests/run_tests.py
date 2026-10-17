@@ -3,7 +3,8 @@
 Master Regression Test Runner for nxdk-ex OpenAL MCPX APU Subsystem
 
 Compiles lib/openal/src/*.c into a static library and then builds and runs
-every lib/openal/tests/test_*.c host unit test against it. Tests are
+every lib/openal/tests/test_*.c host unit test against it, then every
+tests/test_*.py (the GP programs on tools/dsp56sim.py). Tests are
 discovered by globbing, so a new test_*.c file is picked up automatically
 (tests/Makefile derives its test list from the same files).
 
@@ -166,8 +167,29 @@ def run_all_tests(clang, openal_dir, lib_path, build_dir):
         print(f"[{idx:02d}/{len(test_files):02d}] [PASS] {tname}")
         passed_count += 1
 
+    # Python tests (tests/test_*.py): the GP programs in tools/dsp56sim.py
+    py_tests = sorted(glob.glob(os.path.join(tests_dir, "test_*.py")))
+    env = dict(os.environ, NXDK_AL_CLANG=clang, NXDK_AL_LIB=lib_path)
+    total = len(test_files) + len(py_tests)
+    for idx, tf in enumerate(py_tests, len(test_files) + 1):
+        tname = os.path.basename(tf)
+        try:
+            run_res = subprocess.run([sys.executable, tf], capture_output=True, text=True, cwd=tests_dir,
+                                     env=env, timeout=TEST_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            print(f"[{idx:02d}/{total:02d}] [FAIL - TIMEOUT] {tname} (> {TEST_TIMEOUT_SECONDS}s)")
+            failed_count += 1
+            continue
+        if run_res.returncode != 0:
+            print(f"[{idx:02d}/{total:02d}] [FAIL - RUNTIME] {tname}")
+            print(f"       Details: {(run_res.stderr or run_res.stdout).strip()[-400:]}")
+            failed_count += 1
+            continue
+        print(f"[{idx:02d}/{total:02d}] [PASS] {tname}")
+        passed_count += 1
+
     print("================================================================================")
-    print(f" SUMMARY: {passed_count}/{len(test_files)} PASSED | {failed_count} FAILED")
+    print(f" SUMMARY: {passed_count}/{total} PASSED | {failed_count} FAILED")
     print("================================================================================")
 
     if failed_count > 0:

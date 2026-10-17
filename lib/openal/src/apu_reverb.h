@@ -3,11 +3,12 @@
 
 /*
  * Reverb on the GP DSP (lib/openal/docs/GP_REVERB_PLAN.md): the parameters,
- * the delay-line layout and the X-memory words that drive dsp/gp_reverb.asm,
- * plus a host reference of the program's arithmetic.
+ * the delay-line layout and the X-memory words that drive kernel 0
+ * (dsp/gp_kfreeverb.asm, inside the frame loop dsp/gp_loop.asm), plus a host
+ * reference of their arithmetic.
  *
  * Topology (the comb/allpass family, with the public-domain Freeverb tuning):
- * mono send (mixbin 2) -> gain -> one-pole lowpass -> pre-delay -> 8 damped
+ * mono send (mixbins 2 + 3, the slot's pair) -> gain -> one-pole lowpass -> pre-delay -> 8 damped
  * feedback combs per ear, summed -> 4 series allpasses per ear -> wet gain,
  * added to bins 0/1. 25 delay lines in system RAM, each moved one 32-sample
  * block per frame by DMA. (4 combs and 2 allpasses per ear sounded metallic
@@ -80,7 +81,7 @@ uint32_t apu_reverb_q23(float v);
 /*
  * Host reference: the program's arithmetic on 24-bit words (56-bit accumulator,
  * convergent rounding to 24 bits on moves, saturation), frame by frame. State
- * for the delay lines is kept here; feed it bins 0/1/2 of each frame, get OUT L/R.
+ * for the delay lines is kept here; feed it bins 0-3 of each frame, get OUT L/R.
  */
 typedef struct {
     int32_t *line[APU_REVERB_LINES];
@@ -93,8 +94,8 @@ typedef struct {
 
 int apu_reverb_ref_init(apu_reverb_ref_t *r, const apu_reverb_params_t *p);
 void apu_reverb_ref_free(apu_reverb_ref_t *r);
-/** bins: 3 x 32 signed 24-bit samples (bin 0, bin 1, send). out: 2 x 32 (L then R). */
-void apu_reverb_ref_frame(apu_reverb_ref_t *r, int32_t bins[3][32], int32_t out[2][32]);
+/** bins: 4 x 32 signed 24-bit samples (dry bins 0/1, the input pair 2/3). out: 2 x 32 (L then R). */
+void apu_reverb_ref_frame(apu_reverb_ref_t *r, int32_t bins[4][32], int32_t out[2][32]);
 
 #ifdef __cplusplus
 }

@@ -273,7 +273,7 @@ int main(void) {
     assert(reg(MCPX_APU_SECTL) == MCPX_APU_SECTL_RUN && reg(MCPX_APU_GPRST) == 3u);
     /* Console HRTF (apu_hrtf_probe rounds 2-5): our arrays, ears to bins 0/1, the table in the hardware code */
     assert(reg(MCPX_APU_VPHTADDR) != 0 && reg(MCPX_APU_VPHCADDR) != 0);
-    assert(reg(MCPX_APU_HRTF_SUBMIXES) == (0u | (31u << 8) | (1u << 16) | (31u << 24)));
+    assert(reg(MCPX_APU_HRTF_SUBMIXES) == (0u | (30u << 8) | (1u << 16) | (30u << 24)));   /* spare slots on bin 30, not the multipass bin */
     {
         static apu_hrtf_entry_t table[APU_HRTF_ENTRIES];
         uint32_t packed[APU_HRTF_HW_ENTRY_DWORDS];

@@ -1,5 +1,6 @@
 #include "apu_gp.h"
-#include "apu_gp_reverb.h"
+#include "apu_gp_kfreeverb.h"
+#include "apu_gp_loop.h"
 #include "apu_reverb.h"
 #include "apu_mem.h"
 #include "apu_platform.h"
@@ -55,9 +56,31 @@ static uint32_t s_frames_read;
 static uint32_t s_resyncs;
 static bool s_ready;
 static bool s_loaded;
-/* The program: dsp/gp_reverb.asm, the copy program until its reverb is switched on */
-static const uint32_t *s_image = gp_reverb_words;    /* apu_gp_debug_set_program() */
-static uint32_t s_image_words = GP_REVERB_WORDS;
+/*
+ * The program: the frame loop (dsp/gp_loop.asm) at P:0 with kernel 0, the
+ * reverb (dsp/gp_kfreeverb.asm), at P:$100; the copy program until the kernel
+ * is switched on. s_image NULL means this default image.
+ */
+#define DEFAULT_IMAGE_WORDS (GP_KFREEVERB_ORIGIN + GP_KFREEVERB_WORDS)
+typedef char apu_gp_image_check[(GP_LOOP_WORDS <= GP_LOOP_KERNEL && GP_KFREEVERB_ORIGIN == GP_LOOP_KERNEL &&
+                                 DEFAULT_IMAGE_WORDS <= SCRATCH_BYTES / 4u) ? 1 : -1];
+static uint32_t s_default_image[DEFAULT_IMAGE_WORDS];
+static const uint32_t *s_image;                      /* apu_gp_debug_set_program(); NULL = the default */
+static uint32_t s_image_words;
+static uint32_t s_mb_seq;                            /* the last mailbox sequence number posted */
+
+static const uint32_t *image_words(uint32_t *count) {
+    if (s_image) {
+        *count = s_image_words;
+        return s_image;
+    }
+    if (s_default_image[0] == 0u) {
+        memcpy(s_default_image, gp_loop_words, sizeof(gp_loop_words));
+        memcpy(s_default_image + GP_KFREEVERB_ORIGIN, gp_kfreeverb_words, sizeof(gp_kfreeverb_words));
+    }
+    *count = DEFAULT_IMAGE_WORDS;
+    return s_default_image;
+}
 static uint32_t s_scratch_req;                       /* apu_gp_debug_set_scratch_bytes(); 0 = what the image needs */
 static uint32_t s_scratch_bytes = SCRATCH_BYTES;     /* in use */
 static bool s_reverb_on;
@@ -68,8 +91,8 @@ void apu_gp_debug_set_program(const uint32_t *words, uint32_t count) {
         s_image = words;
         s_image_words = count;
     } else {
-        s_image = gp_reverb_words;
-        s_image_words = GP_REVERB_WORDS;
+        s_image = NULL;
+        s_image_words = 0;
     }
 }
 
@@ -103,14 +126,15 @@ static inline uint32_t reg_rd(uintptr_t bar0, uint32_t off) {
  */
 static bool program_loaded(uintptr_t bar0) {
 #if defined(OPENAL_TARGET_XBOX)
-    uint32_t attempt, i, spin;
+    uint32_t attempt, i, spin, words;
+    const uint32_t *image = image_words(&words);
     for (attempt = 0; attempt < 3u; attempt++) {
         bool ok = true;
         for (spin = 0; spin < 2000u; spin++) {
             (void)reg_rd(bar0, MCPX_APU_GPRST);      /* ~2 ms for the bootstrap DMA */
         }
-        for (i = 0; i < s_image_words; i++) {
-            if ((reg_rd(bar0, MCPX_APU_GP_PMEM + 4u * i) & 0xFFFFFFu) != (s_image[i] & 0xFFFFFFu)) {
+        for (i = 0; i < words; i++) {
+            if ((reg_rd(bar0, MCPX_APU_GP_PMEM + 4u * i) & 0xFFFFFFu) != (image[i] & 0xFFFFFFu)) {
                 ok = false;
             }
         }
@@ -150,7 +174,7 @@ int apu_gp_init(uintptr_t bar0) {
         return 0;
     }
     s_scratch_bytes = s_scratch_req ? s_scratch_req
-                    : (s_image == gp_reverb_words ? (APU_REVERB_SCRATCH_BASE + apu_reverb_scratch_bytes() + 4095u) & ~4095u
+                    : (s_image == NULL ? (APU_REVERB_SCRATCH_BASE + apu_reverb_scratch_bytes() + 4095u) & ~4095u
                                                   : SCRATCH_BYTES);
     s_reverb_on = false;
     s_fifo_bytes = s_fifo_req;
@@ -166,8 +190,12 @@ int apu_gp_init(uintptr_t bar0) {
     /* Bootstrap image: P:0..$7FF as little-endian 32-bit words, top byte 0; the
      * rest stays 0 (NOP), the program never runs into it */
     memset(s_scratch, 0, s_scratch_bytes);
-    for (i = 0; i < s_image_words; i++) {
-        s_scratch[i] = s_image[i] & 0xFFFFFFu;
+    {
+        uint32_t words;
+        const uint32_t *image = image_words(&words);
+        for (i = 0; i < words; i++) {
+            s_scratch[i] = image[i] & 0xFFFFFFu;
+        }
     }
     memset(s_fifo, 0, s_fifo_bytes);
 #if defined(OPENAL_TARGET_XBOX)
@@ -220,8 +248,9 @@ int apu_gp_init(uintptr_t bar0) {
                (i == 1u) ? ((desc[1] & ~DESC_DSP_STEP(0x3FFu)) | DESC_DSP_STEP(s_dsp_step)) : desc[i]);
     }
     for (i = FRAME_COUNTER_X; i < CLEAR_X_END; i++) {
-        reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * i, 0);   /* frame counter and the program's parameters */
+        reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * i, 0);   /* frame counter, loop words (mailbox 0/0), OUT L/R */
     }
+    s_mb_seq = 0;
     s_ready = true;
     return 0;
 }
@@ -238,7 +267,7 @@ void apu_gp_deinit(uintptr_t bar0) {
 
 /* ---------------------------------------------------------------- reverb */
 
-#define REVERB_FLAGS_X  0x11u   /* gp_reverb.asm FLAGS, bit 0 */
+#define REVERB_FLAGS_X  GP_LOOP_FLAGS   /* bit 0: the kernel runs */
 
 /* Let the frame in progress finish its DMA chains (on the host nothing runs) */
 static void wait_frames(uintptr_t bar0, uint32_t n) {
@@ -262,11 +291,82 @@ static void write_words(uintptr_t bar0, const apu_reverb_word_t *w, uint32_t n) 
     }
 }
 
+#define XREG(n) (MCPX_APU_GP_XMEM + 4u * (n))
+
+/* The loop has applied every mailbox posted so far (about 20 ms of register reads at most) */
+static bool mailbox_idle(uintptr_t bar0) {
+#if defined(OPENAL_TARGET_XBOX)
+    uint32_t spin;
+    for (spin = 0; spin < 40000u; spin++) {
+        if ((reg_rd(bar0, XREG(GP_LOOP_MB_ACK)) & 0xFFFFFFu) == s_mb_seq) {
+            return true;
+        }
+    }
+    return false;
+#else
+    (void)bar0;
+    return true;
+#endif
+}
+
+int apu_gp_mailbox(uintptr_t bar0, const apu_reverb_word_t *w, uint32_t n) {
+    uint32_t i;
+    if (!s_ready || s_image != NULL || n > GP_LOOP_MB_MAX || (n && !w)) {
+        return -1;
+    }
+    if (!mailbox_idle(bar0)) {
+        /* The GP is not taking frames: nothing would apply it */
+        write_words(bar0, w, n);
+        return 1;
+    }
+    for (i = 0; i < n; i++) {
+        reg_wr(bar0, XREG(GP_LOOP_MBOX + 2u * i), w[i].addr);
+        reg_wr(bar0, XREG(GP_LOOP_MBOX + 2u * i + 1u), w[i].value & 0xFFFFFFu);
+    }
+    reg_wr(bar0, XREG(GP_LOOP_MB_N), n);
+    s_mb_seq = (s_mb_seq + 1u) & 0xFFFFFFu;
+    reg_wr(bar0, XREG(GP_LOOP_MB_SEQ), s_mb_seq);   /* last: the loop takes the pairs at its next frame */
+#if !defined(OPENAL_TARGET_XBOX)
+    /* No GP on the host: apply it the way the loop would */
+    write_words(bar0, w, n);
+    reg_wr(bar0, XREG(GP_LOOP_MB_ACK), s_mb_seq);
+#endif
+    return 0;
+}
+
+uint32_t apu_gp_debug_mailbox_frames(uintptr_t bar0) {
+#if defined(OPENAL_TARGET_XBOX)
+    uint32_t f0, spin;
+    if (!s_ready || s_image != NULL || !mailbox_idle(bar0)) {
+        return 0xFFFFFFFFu;
+    }
+    f0 = apu_gp_frames(bar0);
+    if (apu_gp_mailbox(bar0, NULL, 0) != 0) {
+        return 0xFFFFFFFFu;
+    }
+    for (spin = 0; spin < 40000u; spin++) {
+        if ((reg_rd(bar0, XREG(GP_LOOP_MB_ACK)) & 0xFFFFFFu) == s_mb_seq) {
+            return (apu_gp_frames(bar0) - f0) & 0xFFFFFFu;
+        }
+    }
+    return 0xFFFFFFFFu;
+#else
+    (void)bar0;
+    return 0;
+#endif
+}
+
+void apu_gp_debug_set_burn(uintptr_t bar0, uint32_t cycles) {
+    if (s_ready && s_image == NULL) {
+        reg_wr(bar0, XREG(GP_LOOP_BURN), cycles & 0xFFFFu);
+    }
+}
+
 int apu_gp_reverb_set(uintptr_t bar0, const apu_reverb_params_t *p, bool on) {
     static apu_reverb_word_t words[APU_REVERB_MAX_WORDS];
     uint32_t len[APU_REVERB_LINES], n;
 
-    if (!s_ready || s_image != gp_reverb_words || !p) {
+    if (!s_ready || s_image != NULL || !p) {
         return -1;
     }
     if (!on) {
@@ -278,8 +378,11 @@ int apu_gp_reverb_set(uintptr_t bar0, const apu_reverb_params_t *p, bool on) {
     }
     apu_reverb_line_lengths(p, len);
     if (s_reverb_on && len[0] == s_reverb_pre) {
-        /* Same delay lines: only the gains change, word by word while it runs */
-        write_words(bar0, words, apu_reverb_coefficients(p, words));
+        /* Same delay lines: only the gains change, all in one frame (mailbox) */
+        n = apu_reverb_coefficients(p, words);
+        if (apu_gp_mailbox(bar0, words, n) < 0) {
+            write_words(bar0, words, n);
+        }
         return 0;
     }
     if (s_reverb_on) {
