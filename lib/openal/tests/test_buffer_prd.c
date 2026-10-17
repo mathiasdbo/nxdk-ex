@@ -122,6 +122,9 @@ int main(void) {
     ALbuffer *b2 = al_buffer_get(bufs[2]);
     assert(b2 != NULL);
     assert(b2->size == buf_128kb_size);
+    /* The APU copy and its PRD table are made for a voice (test_buffer_cpu.c) */
+    assert(b2->prd_count == 0 && b2->cpu_data != NULL);
+    assert(al_buffer_make_apu_ready(b2) == AL_NO_ERROR);
     assert(b2->prd_count == 3);
     assert(b2->prd_table_virt != NULL);
     assert(b2->data_virt != NULL);
@@ -275,6 +278,13 @@ int main(void) {
 
                 bb = al_buffer_get(name);
                 assert(bb != NULL);
+                /* alBufferData keeps the data in CPU memory; the APU copy
+                 * and its table are made for a voice that plays it */
+                assert(bb->cpu_data != NULL && bb->data_virt == bb->cpu_data && bb->prd_count == 0);
+                assert(memcmp(bb->data_virt, pcm_scratch, size) == 0);
+                assert(al_buffer_make_apu_ready(bb) == AL_NO_ERROR);
+                assert(bb->cpu_data == NULL);
+                assert(memcmp(bb->data_virt, pcm_scratch, size) == 0);
                 assert(bb->prd_count == (uint32_t)apu_prd_calculate_count(size));
                 assert(bb->data_phys % fmts[f].frame == 0);
                 for (k = 0; k < bb->prd_count; k++) {
@@ -308,6 +318,8 @@ int main(void) {
     alBufferData(bufs[2], AL_FORMAT_MONO8, small_pcm, 16, 44100);
     assert(alGetError() == AL_NO_ERROR);
     assert(b2->size == 16);
+    assert(b2->prd_count == 0 && b2->prd_table_virt == NULL);   /* the old APU copy is gone */
+    assert(al_buffer_make_apu_ready(b2) == AL_NO_ERROR);
     assert(b2->prd_count == 1);
     assert((b2->prd_table_virt[0].control & NV_PAPU_PRD_EOT) != 0);
     assert((b2->prd_table_virt[0].control & 0xFFFF) == 16);

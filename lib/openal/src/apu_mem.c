@@ -119,6 +119,10 @@ int apu_mem_init(size_t pool_size) {
     return 0;
 }
 
+size_t apu_mem_pool_size(void) {
+    return s_pool_virt ? s_pool_size : 0u;
+}
+
 void apu_mem_shutdown(void) {
     if (!s_pool_virt) {
         return;
@@ -323,6 +327,21 @@ void *apu_mem_alloc_phys(size_t size, size_t alignment, uint32_t *out_phys) {
 void *apu_mem_alloc_table(size_t size, uint32_t *out_phys) {
 #ifdef OPENAL_TARGET_XBOX
     void *p = MmAllocateContiguousMemoryEx(size, 0, NVAPU_MAXRAM, 0x4000, PAGE_READWRITE | PAGE_NOCACHE);
+    if (p) {
+        memset(p, 0, size);
+    }
+    if (out_phys) {
+        *out_phys = p ? (uint32_t)MmGetPhysicalAddress(p) : 0;
+    }
+    return p;
+#else
+    return apu_mem_alloc_phys(size, 0x4000, out_phys);
+#endif
+}
+
+void *apu_mem_alloc_wc(size_t size, uint32_t *out_phys) {
+#ifdef OPENAL_TARGET_XBOX
+    void *p = MmAllocateContiguousMemoryEx(size, 0, NVAPU_MAXRAM, 0x4000, PAGE_READWRITE | PAGE_WRITECOMBINE);
     if (p) {
         memset(p, 0, size);
     }

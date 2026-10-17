@@ -95,8 +95,16 @@ static const struct {
     { "alXboxGetReverbf",        (ALC_PROC)alXboxGetReverbf },
     { "alXboxGetStats",          (ALC_PROC)alXboxGetStats },
     { "alXboxOutputCallback",    (ALC_PROC)alXboxOutputCallback },
+    { "alXboxSetPoolSize",       (ALC_PROC)alXboxSetPoolSize },
     { "alBufferDataStatic",      (ALC_PROC)alBufferDataStatic }
 };
+
+/* The APU pool size the next alcOpenDevice allocates; 0 is the default */
+static size_t s_pool_request;
+
+AL_API void AL_APIENTRY alXboxSetPoolSize(ALsizei bytes) {
+    s_pool_request = (bytes > 0) ? (size_t)bytes : 0u;
+}
 
 static void *alc_lookup_proc(const char *name) {
     size_t i;
@@ -197,8 +205,8 @@ ALC_API ALCdevice * ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) {
         s_vp_route_a = (apu_base == NV_PAPU_BASE);
 #endif
 
-        /* 1. Contiguous physical memory pool */
-        if (apu_mem_init(0) != 0) {
+        /* 1. Contiguous physical memory pool (alXboxSetPoolSize, or the default) */
+        if (apu_mem_init(s_pool_request) != 0) {
             alc_null_ram_release();
             free(device);
             alc_set_error(NULL, ALC_OUT_OF_MEMORY);
@@ -705,7 +713,7 @@ AL_API const ALchar * AL_APIENTRY alGetString(ALenum param) {
                        : "MCPX APU (null backend)";
         case AL_EXTENSIONS:
             return "AL_EXT_OFFSET AL_EXT_STATIC_BUFFER AL_SOFT_loop_points AL_XBOX_hardware_status AL_XBOX_hrtf "
-                   "AL_XBOX_adpcm AL_XBOX_output_callback "
+                   "AL_XBOX_adpcm AL_XBOX_output_callback AL_XBOX_pool_size "
                    "AL_XBOX_reverb AL_XBOX_source_control AL_XBOX_stats AL_XBOX_update";
         default:
             alSetError(AL_INVALID_ENUM);
@@ -727,6 +735,7 @@ AL_API ALboolean AL_APIENTRY alIsExtensionPresent(const ALchar *extname) {
         strcmp(extname, "AL_XBOX_adpcm") == 0 ||
         strcmp(extname, "AL_XBOX_stats") == 0 ||
         strcmp(extname, "AL_XBOX_output_callback") == 0 ||
+        strcmp(extname, "AL_XBOX_pool_size") == 0 ||
         strcmp(extname, "AL_XBOX_source_control") == 0 ||
         strcmp(extname, "AL_XBOX_update") == 0) {
         return AL_TRUE;
