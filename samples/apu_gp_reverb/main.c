@@ -242,7 +242,7 @@ int main(void) {
             b[i] = (int16_t)((v * 0.4f) * (1.0f - (float)i / 7200.0f));
         }
     }
-    logf_("program loaded %s (%u words), scratch %lu bytes, %lu frames/s\n", apu_gp_program_loaded() ? "yes" : "NO",
+    logf_("program loaded %s (loop %u + kernel %u words), scratch %lu bytes, %lu frames/s\n", apu_gp_program_loaded() ? "yes" : "NO",
           (unsigned)GP_LOOP_WORDS, (unsigned)GP_KFREEVERB_WORDS, (unsigned long)apu_gp_scratch_bytes(), (unsigned long)frame_rate(200));
     save_log();
 

@@ -392,13 +392,18 @@ static void band_power(uint32_t frames, double out[BANDS]) {
 
 static double s_ref[BANDS];
 
+/* nxdk's pdclib lrint() is an assert(0) stub */
+static int db10_round(double v) {
+    return (int)(v < 0.0 ? v - 0.5 : v + 0.5);
+}
+
 static void log_filter(const char *what) {
     double p[BANDS];
     uint32_t b, n = capture_pair(0, CAP_FRAMES);
     band_power(n, p);
     logf_("  %-30s RMS %5lu:", what, (unsigned long)rms(n, 0));
     for (b = 0; b < BANDS; b++) {
-        int db10 = (p[b] > 0.0 && s_ref[b] > 0.0) ? (int)lrint(100.0 * log10(p[b] / s_ref[b])) : -999;
+        int db10 = (p[b] > 0.0 && s_ref[b] > 0.0) ? db10_round(100.0 * log10(p[b] / s_ref[b])) : -999;
         logf_(" %4d", db10);
     }
     logf_("\n");
