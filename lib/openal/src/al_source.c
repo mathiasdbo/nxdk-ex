@@ -62,6 +62,8 @@ uintptr_t al_source_get_apu_base(void) {
 }
 
 static void source_reset_defaults(ALsource *src, ALuint id) {
+    al_efx_source_release(&src->efx);
+    al_efx_source_defaults(&src->efx);
     src->id = id;
     src->in_use = false;
     src->state = AL_INITIAL;
@@ -936,7 +938,9 @@ AL_API void AL_APIENTRY alSourcef(ALuint source, ALenum param, ALfloat value) {
             break;
 
         default:
-            alSetError(AL_INVALID_ENUM);
+            if (!al_efx_source_setf(&src->efx, param, value)) {
+                alSetError(AL_INVALID_ENUM);
+            }
             break;
     }
 }
@@ -1007,6 +1011,9 @@ AL_API void AL_APIENTRY alSourcefv(ALuint source, ALenum param, const ALfloat *v
         case AL_BYTE_OFFSET:
         case AL_XBOX_PRIORITY:
         case AL_XBOX_REVERB_SEND:
+        case AL_AIR_ABSORPTION_FACTOR:
+        case AL_ROOM_ROLLOFF_FACTOR:
+        case AL_CONE_OUTER_GAINHF:
             alSourcef(source, param, values[0]);
             break;
 
@@ -1136,14 +1143,26 @@ AL_API void AL_APIENTRY alSourcei(ALuint source, ALenum param, ALint value) {
             src->virtualize = (ALboolean)value;
             break;
 
-
         default:
-            alSetError(AL_INVALID_ENUM);
+            if (!al_efx_source_seti(&src->efx, param, value)) {
+                alSetError(AL_INVALID_ENUM);
+            }
             break;
     }
 }
 
 AL_API void AL_APIENTRY alSource3i(ALuint source, ALenum param, ALint v1, ALint v2, ALint v3) {
+    if (param == AL_AUXILIARY_SEND_FILTER) {
+        ALsource *src;
+        ensure_subsystem_initialized();
+        src = al_source_get(source);
+        if (!src) {
+            alSetError(AL_INVALID_NAME);
+            return;
+        }
+        al_efx_source_set3i(&src->efx, param, v1, v2, v3);
+        return;
+    }
     alSource3f(source, param, (ALfloat)v1, (ALfloat)v2, (ALfloat)v3);
 }
 
@@ -1160,6 +1179,14 @@ AL_API void AL_APIENTRY alSourceiv(ALuint source, ALenum param, const ALint *val
             alSource3f(source, param, (ALfloat)values[0], (ALfloat)values[1], (ALfloat)values[2]);
             break;
 
+        case AL_AUXILIARY_SEND_FILTER:
+            alSource3i(source, param, values[0], values[1], values[2]);
+            break;
+
+        case AL_DIRECT_FILTER:
+        case AL_DIRECT_FILTER_GAINHF_AUTO:
+        case AL_AUXILIARY_SEND_FILTER_GAIN_AUTO:
+        case AL_AUXILIARY_SEND_FILTER_GAINHF_AUTO:
         case AL_BUFFER:
         case AL_LOOPING:
         case AL_SOURCE_RELATIVE:
@@ -1259,7 +1286,9 @@ AL_API void AL_APIENTRY alGetSourcef(ALuint source, ALenum param, ALfloat *value
             break;
 
         default:
-            alSetError(AL_INVALID_ENUM);
+            if (!al_efx_source_getf(&src->efx, param, value)) {
+                alSetError(AL_INVALID_ENUM);
+            }
             break;
     }
 }
@@ -1418,7 +1447,9 @@ AL_API void AL_APIENTRY alGetSourcei(ALuint source, ALenum param, ALint *value) 
             break;
 
         default:
-            alSetError(AL_INVALID_ENUM);
+            if (!al_efx_source_geti(&src->efx, param, value)) {
+                alSetError(AL_INVALID_ENUM);
+            }
             break;
     }
 }
@@ -2008,6 +2039,11 @@ AL_API void AL_APIENTRY alEnable(ALenum capability) {
         return;
     }
     if (capability == AL_XBOX_REVERB) {
+        /* The GP runs one effect: not while an EFX slot holds one (EFX_PLAN 3.1) */
+        if (al_efx_active_slot() != 0u) {
+            alSetError(AL_INVALID_OPERATION);
+            return;
+        }
         s_reverb_enabled = true;
         reverb_apply();
         return;

@@ -79,16 +79,17 @@ int main(void) {
 
     ALCint attr_size = 0;
     alcGetIntegerv(dev, ALC_ATTRIBUTES_SIZE, 1, &attr_size);
-    assert(attr_size == 11);
+    assert(attr_size == 13);
 
-    ALCint attrs[12] = {0};
-    alcGetIntegerv(dev, ALC_ALL_ATTRIBUTES, 11, attrs);
+    ALCint attrs[14] = {0};
+    alcGetIntegerv(dev, ALC_ALL_ATTRIBUTES, 13, attrs);
     assert(attrs[0] == ALC_FREQUENCY && attrs[1] == 48000);
     assert(attrs[2] == ALC_REFRESH && attrs[3] == 60);
     assert(attrs[4] == ALC_SYNC && attrs[5] == ALC_FALSE);
     assert(attrs[6] == ALC_MONO_SOURCES && attrs[7] == 64);
     assert(attrs[8] == ALC_STEREO_SOURCES && attrs[9] == 32);
-    assert(attrs[10] == 0);
+    assert(attrs[10] == ALC_MAX_AUXILIARY_SENDS && attrs[11] == 2);
+    assert(attrs[12] == 0);
     printf("    -> String and integer queries conform to OpenAL 1.1 [PASS]\n");
 
     /* Test 3: Context Creation & Attribute Parsing */

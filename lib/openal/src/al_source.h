@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "al_buffer.h"
+#include "al_efx.h"
 #include "al_stream.h"
 #include "apu_voice.h"
 #include "apu_hardware.h"
@@ -67,6 +68,7 @@ typedef struct ALsource {
     ALfloat reverb_send;             /* AL_XBOX_REVERB_SEND: 0..1 */
     ALfloat xbox_priority;           /* AL_XBOX_PRIORITY: >= 0 engine priority, < 0 the library's */
     ALboolean virtualize;            /* AL_XBOX_VIRTUALIZE */
+    al_efx_source_t efx;             /* ALC_EXT_EFX: filters, sends and their factors */
 } ALsource;
 
 
