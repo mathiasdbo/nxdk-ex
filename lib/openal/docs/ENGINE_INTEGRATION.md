@@ -367,7 +367,7 @@ alAuxiliaryEffectSloti(slot, AL_EFFECTSLOT_EFFECT, (ALint)fx);       /* loads an
 - **Parameters:** a change reaches the kernel when the effect is attached again, all the changed words in the
   same 0.67 ms frame.
 - **A new image** reloads the kernel, starting from silence. A brief gap in the effect, not in the dry sound.
-- **`AL_EFFECTSLOT_GAIN`** does not reach a custom kernel: give it a wet parameter.
+- **`AL_EFFECTSLOT_GAIN`** scales the sends into the kernel, live (for a linear kernel, the same as its output).
 - **Cost:** `alXboxGetHardwareStatus(AL_XBOX_GP_LOAD / AL_XBOX_GP_LOAD_PEAK)` is how much of the GP's frame
   the effect takes, in percent.
 - **Example:** `dsp/gp_kecho.asm` is a stereo echo with delay (32-16384 samples), feedback and wet parameters.

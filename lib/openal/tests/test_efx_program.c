@@ -105,6 +105,21 @@ static void test_slot(ALuint e) {
     assert(k.code != gp_kecho_image + 4);                   /* the library's copy */
     assert(params[0] == 100u && params[2] == 0x400000u && params[3] == 0xFFFFFBu);
 
+    /* AL_EFFECTSLOT_GAIN scales the sends into a custom kernel (it has no word for it), live */
+    {
+        ALuint src = 0;
+        float s[APU_VOICE_SENDS];
+        alGenSources(1, &src);
+        alSource3i(src, AL_AUXILIARY_SEND_FILTER, (ALint)slot, 0, AL_FILTER_NULL);
+        assert(al_source_debug_sends(src, s) && s[0] == 1.0f && s[1] == 0.0f);
+        alAuxiliaryEffectSlotf(slot, AL_EFFECTSLOT_GAIN, 0.25f);
+        assert(alGetError() == AL_NO_ERROR);
+        assert(al_source_debug_sends(src, s) && s[0] == 0.25f);
+        alAuxiliaryEffectSlotf(slot, AL_EFFECTSLOT_GAIN, 1.0f);
+        assert(al_source_debug_sends(src, s) && s[0] == 1.0f);
+        alDeleteSources(1, &src);
+    }
+
     /* changing the effect does nothing until it is attached again */
     alEffecti(e, AL_XBOX_GP_PARAM0, 200);
     assert(al_source_debug_gp_kernel(&k, &params) && params[0] == 100u);

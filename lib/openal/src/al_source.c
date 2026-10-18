@@ -394,8 +394,10 @@ static NVAPU_VOICE_CONTEXT_3D *source_live_context(const ALsource *src) {
  * active effect. An EFX send's gain is the source's gain with distance
  * attenuation by the room rolloff (the source's plus the effect's), the cone
  * when AL_AUXILIARY_SEND_FILTER_GAIN_AUTO is on, within AL_MIN_GAIN /
- * AL_MAX_GAIN, times the listener gain; AL_EFFECTSLOT_GAIN is applied on the
- * GP. (Filters are AL_FILTER_NULL for now: gain 1.)
+ * AL_MAX_GAIN, times the listener gain. AL_EFFECTSLOT_GAIN: the reverb applies
+ * it on the GP (its wet gain); a custom kernel has no word for it, so it scales
+ * the sends into that kernel instead (the same for a linear kernel; it changes
+ * live, with the volumes). (Filters are AL_FILTER_NULL for now: gain 1.)
  */
 static bool s_reverb_enabled;
 
@@ -411,6 +413,9 @@ static float efx_send_gain(const ALsource *src, const AL_SPATIAL_CALC *calc, con
     if (g < src->min_gain) g = src->min_gain;
     if (g > src->max_gain) g = src->max_gain;
     g *= al_listener_get_gain();
+    if (slot && slot->props.type == AL_EFFECT_XBOX_GP_PROGRAM) {
+        g *= slot->gain;
+    }
     return (g < 0.0f) ? 0.0f : ((g > 1.0f) ? 1.0f : g);
 }
 
