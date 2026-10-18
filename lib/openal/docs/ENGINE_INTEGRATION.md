@@ -37,7 +37,7 @@ the AC97 codec. Console verification of each feature is recorded in `XEMU_VERIFI
 | Output | stereo, 16-bit, 48 kHz | no 5.1 or Dolby Digital |
 | HRTF voices | 64 at once | mono 3D sources beyond that are panned by volume (`AL_XBOX_HRTF`) |
 | Reverb | one room for the whole mix | on the GP DSP, no CPU time; each source chooses how much it sends (`AL_XBOX_reverb`, 3.7) |
-| Effects (EFX) | 4 slots, one effect running; 2 sends per source; no filters yet | reverb / EAX reverb on the GP (3.12), or the game's own GP kernel: 0x700 code words, 60 DMA descriptors a frame, ~180 KiB scratch (3.13) |
+| Effects (EFX) | 4 slots, one effect running; 2 sends per source; lowpass filters only | reverb / EAX reverb on the GP (3.12), or the game's own GP kernel: 0x700 code words, 60 DMA descriptors a frame, ~180 KiB scratch (3.13) |
 
 Buffer memory itself comes from contiguous RAM (`apu_mem.c`), so the console's 64 MiB is the real ceiling.
 `alBufferData` keeps a buffer's data in ordinary cached RAM; the APU copy (contiguous, write-combined) is made
@@ -318,7 +318,7 @@ alSource3i(src, AL_AUXILIARY_SEND_FILTER, (ALint)slot, 0, AL_FILTER_NULL);   /* 
     `alGetProcAddress`.
   - Effect types: `AL_EFFECT_NULL`, `AL_EFFECT_REVERB`, `AL_EFFECT_EAXREVERB` and `AL_EFFECT_XBOX_GP_PROGRAM`
     (3.13). Other types give `AL_INVALID_VALUE`, as the extension allows.
-  - Filters: only `AL_FILTER_NULL` for now. Lowpass and the other types give `AL_INVALID_VALUE`.
+  - Filters: `AL_FILTER_NULL` and `AL_FILTER_LOWPASS` (below). Highpass and bandpass give `AL_INVALID_VALUE`.
   - Up to 4 slots and 256 effects and filters. `ALC_MAX_AUXILIARY_SENDS` is 2 (the default; larger requests are
     clamped).
 - **One effect per device.** The GP runs one program. While one slot holds an effect, attaching an effect to
@@ -348,6 +348,22 @@ alSource3i(src, AL_AUXILIARY_SEND_FILTER, (ALint)slot, 0, AL_FILTER_NULL);   /* 
   gain, echo, modulation, pans, references) are stored but not used. Presets such as Creative's
   `EFX_REVERB_PRESET_*` are the application's own (the library ships none).
 - **Changing rooms** behaves as in 3.7: gains change live, a new pre-delay restarts the reverb.
+- **Lowpass filters** (`AL_FILTER_LOWPASS`, for occlusion and muffling):
+
+  ```c
+  alFilteri(f, AL_FILTER_TYPE, AL_FILTER_LOWPASS);
+  alFilterf(f, AL_LOWPASS_GAIN, 0.8f);      /* the whole sound */
+  alFilterf(f, AL_LOWPASS_GAINHF, 0.2f);    /* the gain at 5 kHz */
+  alSourcei(src, AL_DIRECT_FILTER, (ALint)f);
+  ```
+
+  - `GAINHF` runs on the voice's own hardware filter (a 2-pole lowpass), fitted so that the level at 5 kHz
+    is `GAINHF`, measured on a console. It costs no CPU time, works on plain, HRTF and stereo voices,
+    and can change while the sound plays without a click. The sound below the cutoff is unchanged, above it
+    falls by about 12 dB an octave: deeper than OpenAL Soft's shelf, so a low `GAINHF` muffles more.
+  - `GAIN` scales the dry sound (direct filter) or that send (send filter).
+  - The hardware filter is one per voice, so it also shapes the sends. A send filter's `GAINHF` is not
+    applied (its `GAIN` is).
 - **Where it runs:** console only, like 3.7. `alXboxGetHardwareStatus(AL_XBOX_REVERB_ACTIVE)` reports 1 while
   an EFX reverb runs.
 

@@ -1579,6 +1579,10 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
   kernel loaded with `alXboxEffectProgram` (through the P window while the GP ran, no restart), echo
   sample-exact on both ears, a parameter change acknowledged in 1 frame, feedback 6 dB a repeat, two sends into
   one slot; GP load 34 % (reverb) / 4 % (echo); 5 min of effect switching with 0 underruns, padded and slips.
+* VP voice filter calibration (`samples/apu_filter_probe` rounds 1-2, 2026-10-18; table in EFX_PLAN.md 2.1):
+  `FMODE` 1 is a 2-pole lowpass on `TAR_FCA` only, damping 0xB505 flat, cutoff 8 kHz x 2^(c / 0x1000) for
+  c < 0 (0 and above: off), the same on plain, stereo and HRTF voices (HRTF with `TAR_FCB` = 0), clickless
+  live changes; `FMODE` 2 is a peaking boost on `TAR_FCB`. `AL_FILTER_LOWPASS` uses it.
 * Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
   from a spherical-head model (Brown-Duda head-shadow shelf per ear as a 31-tap int8 FIR, Woodworth ITD in
   s6.9; 32 azimuths x elevations -30/0/30/60; no measured data, no pinna cues). `apu_vp_init()` uploads it with

@@ -58,6 +58,7 @@ Also from the tree:
 | Live re-route | `CFG_VBIN` and the `CFG_FMT` bin bits move a playing voice's outputs at once. Dry bins: no click (largest step 1048 against the tone's 1044). The moved send starts abruptly (step 3062): a live move needs a volume ramp. Not needed by 3.2 (only volumes change) |
 | VP filter | Live writes work. `FMODE` 0 and `FMODE` 2 with Q 0 are flat (within the +-3 dB of the band estimate). **`FMODE` 1: resonant 2-pole lowpass on `TAR_FCA`**: cutoff s4.12 in octaves (-0x1000 = one octave down, 0 about 8 kHz), Q (31:16) is damping (0: +25..33 dB peak, 0x4000: about +6 dB, about -12 dB/octave above). `FMODE` 2 with Q 0x4000: a boost around the cutoff (+7..+14 dB). `FMODE` 3 looks like 1 and 2 in series. FCA and FCB were written together; which mode uses which is open |
 | Mailbox / GP | (phase8-02 on the real loop) `apu_gp_reverb`: decay -29.8 / -9.9 dB at 0.5 s for T60 1 / 3 s (expected -30 / -10), waits max 810 polls, 0 timeouts, 0 underruns over 64 s: identical to the monolithic program |
+| Filter calibration (2026-10-18) | `samples/apu_filter_probe`, 25 tones 50 Hz-20 kHz read by Goertzel against the same voice unfiltered. `FMODE` 1 reads only `TAR_FCA`. Damping (31:16): 0x2000 peaks +11.5 dB at the cutoff, 0x8000 +0.9, **0xB505 is flat (Butterworth: -3.3 dB at the cutoff, -11.6 an octave up)**, 0xFFFF droops. Cutoff (15:0) 8 kHz x 2^(c / 0x1000) for c < 0: -3 dB at 1 kHz / 500 / 250 / 125 / 62 Hz for -0x3000 .. -0x7000; **c = 0 and every positive value: no filtering**; from -0x800 to -1 the 5 kHz loss shrinks smoothly (-2.6 .. 0 dB), shallower near the top than an analog Butterworth (so the library maps by the measured 5 kHz levels). Stereo voices: the same. HRTF voices: the same with `TAR_FCB` = 0 (with FCB set too they filter about an octave lower). A live cutoff change makes no step. `FMODE` 2 is a peaking boost on `TAR_FCB` (+2.8 dB at Q 0xB505, +9.6 at 0x4000, flat at 0xFFFF), not a highpass; `FMODE` 3 is 1 and 2 in series |
 | EFX sample (phase8-05, 2026-10-18) | `samples/openal_efx`, all through the AL API. EFX reverb T60 1.5 s: -19.9 dB over 0.5 s (expected -20); send off: -41 dB. Echo kernel: loaded through the P window (no GP restart in any load of the run); dry -> echo exactly +1000 samples on both ears at -3.0 dB (wet 1, dry centre-panned), wet 0.5 gives -9.1; delay 2400 by re-attach: no reload, mailbox acknowledged after 1 frame, echo exactly +2400; feedback 0.5: +4800 / +9600 / +14400 / +19200 at -3.0 / -9.1 / -15.1 / -21.1 dB; sends 0 and 1 into one slot both echo +1000. GP load: reverb 34 %, echo 4 %. 5 min with the effect switching every 15 s (HRTF, panned and stereo sources): 0 underruns / padded / slips, zero-copy lead 1016..1056 |
 
 Toolchain note: nxdk's pdclib `lrint*()` is an `assert(0)` stub; round by hand.
@@ -195,12 +196,19 @@ As built (phase8-04):
 
 ### 3.7 Filters
 
-`alGenFilters` and the object API work; `AL_FILTER_NULL` is accepted everywhere. `AL_FILTER_LOWPASS`,
-`HIGHPASS`, `BANDPASS` give `AL_INVALID_VALUE` in Phase 1. Probe step 4 found a usable per-voice lowpass
-(`FMODE` 1, 2.1), so `AL_FILTER_LOWPASS` becomes a follow-up task: a calibration probe first (Q sweep up to
-0xFFFF for a flat response, FCA vs FCB per mode, positive cutoffs, a finer frequency scale), then `GAINHF`
-at `LOWPASS_GAINHF`'s 5 kHz reference mapped to a cutoff, `GAIN` on the volumes. The voice filter acts on all
-outputs, so a send filter whose HF differs from the direct one gets its gain only (documented).
+`alGenFilters` and the object API work. `AL_FILTER_LOWPASS` is built (after Phase 1); `HIGHPASS` and
+`BANDPASS` give `AL_INVALID_VALUE` (no mode of the voice filter is a highpass, 2.1).
+
+As built:
+- `AL_LOWPASS_GAIN` / `GAINHF` (0..1, default 1) on the filter object; sources keep a copy (`AL_DIRECT_FILTER`,
+  `AL_AUXILIARY_SEND_FILTER`), as the extension says.
+- `GAIN` scales the dry volume (direct filter) or the send (send filter).
+- The direct filter's `GAINHF` is the voice filter: `FMODE` 1, damping 0xB505, the cutoff interpolated from
+  the measured level at 5 kHz per cutoff (`apu_vp_lowpass`, `src/apu_vp.c`), FCB 0. Written at voice start
+  and live when it changes (no click). Within 0.05 dB of 1: no filter; the lowest cutoff is -0x7000 (-76 dB
+  at 5 kHz).
+- The voice filter acts on all outputs, so it also shapes the sends; a send filter's `GAINHF` is not applied.
+- Tests: `tests/test_efx_filter.c`; console: `samples/apu_filter_probe` (calibration), `openal_efx` step 6b.
 
 ## 4. Tasks
 
