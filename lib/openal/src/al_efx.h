@@ -52,8 +52,14 @@ typedef struct {
 
 /* A filter's state (copied into a source when set) */
 typedef struct {
-    ALenum type;                /* AL_FILTER_NULL only for now */
+    ALenum type;                /* AL_FILTER_NULL or AL_FILTER_LOWPASS */
+    ALfloat gain;               /* AL_LOWPASS_GAIN, 0..1 (1 for AL_FILTER_NULL) */
+    ALfloat gain_hf;            /* AL_LOWPASS_GAINHF, 0..1: the gain at 5 kHz */
 } al_efx_filter_props_t;
+
+/** A filter's overall gain and its gain at 5 kHz (1 / 1 for AL_FILTER_NULL). */
+ALfloat al_efx_filter_gain(const al_efx_filter_props_t *f);
+ALfloat al_efx_filter_gain_hf(const al_efx_filter_props_t *f);
 
 typedef struct {
     bool in_use;

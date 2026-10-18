@@ -171,13 +171,15 @@ static void test_filters(void) {
     ALint iv = -1;
     ALfloat fv;
 
-    printf("[3] Filters: AL_FILTER_NULL only until the VP filter is measured\n");
+    printf("[3] Filters: no highpass or bandpass; a null filter has no parameters (lowpass: test_efx_filter.c)\n");
     alGenFilters(1, &f);
     assert(f && alIsFilter(f) && alIsFilter(0));
     alGetFilteri(f, AL_FILTER_TYPE, &iv);
     assert(iv == AL_FILTER_NULL);
-    alFilteri(f, AL_FILTER_TYPE, AL_FILTER_LOWPASS);
-    expect_error(AL_INVALID_VALUE, "lowpass");
+    alFilteri(f, AL_FILTER_TYPE, AL_FILTER_HIGHPASS);
+    expect_error(AL_INVALID_VALUE, "highpass");
+    alFilteri(f, AL_FILTER_TYPE, AL_FILTER_BANDPASS);
+    expect_error(AL_INVALID_VALUE, "bandpass");
     alFilterf(f, AL_LOWPASS_GAIN, 0.5f);
     expect_error(AL_INVALID_ENUM, "null filter parameter");
     alGetFilterf(f, AL_LOWPASS_GAIN, &fv);

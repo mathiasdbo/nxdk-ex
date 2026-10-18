@@ -108,6 +108,26 @@ uint16_t apu_vp_atten_from_gain(float gain) {
     return (a > (float)0xFFE) ? 0xFFEu : (uint16_t)a;
 }
 
+uint32_t apu_vp_lowpass(float gain_hf, uint32_t *fc) {
+    float g = gain_hf, r, hz, c;
+    int32_t cut;
+    if (fc) *fc = 0;
+    if (!(g < 0.9999f)) {
+        return 0;   /* no high cut (also NaN) */
+    }
+    if (g < 1e-4f) g = 1e-4f;
+    /* Butterworth: |H(f)|^2 = 1 / (1 + (f / fc)^4), so fc = f_ref / (1/g^2 - 1)^(1/4) */
+    r = 1.0f / (g * g) - 1.0f;
+    hz = APU_VP_LP_REF_HZ / sqrtf(sqrtf(r));
+    c = 4096.0f * log2f(hz / APU_VP_LP_ZERO_HZ);
+    if (c >= (float)APU_VP_LP_CUT_MAX) {
+        return 0;   /* the cutoff is above what the filter does: off */
+    }
+    cut = (c <= (float)APU_VP_LP_CUT_MIN) ? APU_VP_LP_CUT_MIN : (int32_t)(c < 0.0f ? c - 0.5f : c + 0.5f);
+    if (fc) *fc = ((uint32_t)APU_VP_LP_DAMPING << 16) | ((uint32_t)cut & 0xFFFFu);
+    return 1;
+}
+
 void apu_vp_pack_volumes(const uint16_t v[APU_VP_OUTPUTS], uint32_t *vola, uint32_t *volb, uint32_t *volc) {
     uint32_t v6 = v[6] & 0xFFFu, v7 = v[7] & 0xFFFu;
     *vola = ((uint32_t)(v[0] & 0xFFFu) << 4) | ((uint32_t)(v[1] & 0xFFFu) << 20) |
@@ -599,6 +619,8 @@ static uint32_t *s_hrtf_target;  static uint32_t s_hrtf_target_phys;
 static uint8_t *s_hrtf_current;  static uint32_t s_hrtf_current_phys;
 static bool s_hrtf_hw;                              /* console HRTF set up */
 static uint8_t s_voice_hrtf[APU_VP_MAX_HANDLES];    /* the handle plays as an HRTF voice (3D list) */
+static uint8_t s_voice_fmode[APU_VP_MAX_HANDLES];   /* the voice filter as last written: FMODE */
+static uint32_t s_voice_fc[APU_VP_MAX_HANDLES];     /* and TAR_FCA / TAR_FCB */
 
 static void free_tables(void) {
     if (s_voices) apu_mem_free_phys(s_voices);
@@ -894,6 +916,14 @@ int apu_vp_voice_start(uintptr_t bar0, uint32_t h, const apu_vp_voice_params_t *
     *voice_dw(h, MCPX_VOICE_CFG_VBIN) = vbin;
     *voice_dw(h, MCPX_VOICE_CFG_FMT) = apu_vp_format(p->channels, p->bits, p->loop || soft_end) | fmt_bins;
     *voice_dw(h, MCPX_VOICE_CFG_HRTF_TARGET) = hrtf;   /* ENV0..MISC stay 0: EF_PITCHSCALE must be 0 */
+    if (p->fmode != 0u) {
+        /* the voice filter (apu_efx_probe step 4, apu_filter_probe): only FMODE in MISC */
+        *voice_dw(h, MCPX_VOICE_CFG_MISC) = (p->fmode & 3u) << 16;
+        *voice_dw(h, MCPX_VOICE_TAR_FCA) = p->fc;
+        *voice_dw(h, MCPX_VOICE_TAR_FCB) = p->fc;
+    }
+    s_voice_fmode[h] = (uint8_t)(p->fmode & 3u);
+    s_voice_fc[h] = p->fmode ? p->fc : 0u;
     *voice_dw(h, MCPX_VOICE_CUR_PSL_START) = ba;
     /* LBO / EBO: a looping voice wraps from EBO to LBO; a soft-ended one-shot loops over its silent tail */
     *voice_dw(h, MCPX_VOICE_CUR_PSH_SAMPLE) = soft_end ? frames : (p->loop ? loop_start : 0u);
@@ -943,6 +973,25 @@ void apu_vp_voice_update(uintptr_t bar0, uint32_t h, int16_t pitch, const uint16
     if (s_fe_ok) {
         apu_vp_service(bar0);   /* xemu: release an idle-voice trap promptly */
     }
+}
+
+void apu_vp_voice_set_filter(uintptr_t bar0, uint32_t h, uint32_t fmode, uint32_t fc) {
+    (void)bar0;
+    if (!s_ready || h >= APU_VP_MAX_HANDLES) {
+        return;
+    }
+    fmode &= 3u;
+    if (!fmode) fc = 0u;
+    if (fmode == s_voice_fmode[h] && fc == s_voice_fc[h]) {
+        return;
+    }
+    s_voice_fmode[h] = (uint8_t)fmode;
+    s_voice_fc[h] = fc;
+    /* Live writes take effect at once (apu_efx_probe step 4); FCA and FCB alike */
+    *voice_dw(h, MCPX_VOICE_TAR_FCA) = fc;
+    *voice_dw(h, MCPX_VOICE_TAR_FCB) = fc;
+    *voice_dw(h, MCPX_VOICE_CFG_MISC) = (*voice_dw(h, MCPX_VOICE_CFG_MISC) & ~0x30000u) | (fmode << 16);
+    wc_flush();
 }
 
 /* Pause = out of the list (the VP leaves the record, and CBO, alone); resume = back on top */

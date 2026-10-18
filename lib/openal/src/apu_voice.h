@@ -317,6 +317,16 @@ void apu_voice_set_direct(uint32_t index, bool on, float left, float right);
 void apu_voice_set_sends(uint32_t index, const float sends[APU_VOICE_SENDS]);
 
 /**
+ * High cut of the voice (AL_FILTER_LOWPASS): the gain at 5 kHz, 0..1 (1: none),
+ * on the VP's voice filter (apu_vp_lowpass). It acts on every output of the
+ * voice, sends included. Takes effect at the next trigger or commit.
+ */
+void apu_voice_set_lowpass(uint32_t index, float gain_hf);
+
+/** The slot's apu_voice_set_lowpass() value (tests). */
+float apu_voice_debug_lowpass(uint32_t index);
+
+/**
  * Switch looping of a running voice (AL_LOOPING while playing or paused): the
  * hardware backend rewrites its loop markers in place (apu_vp_voice_set_loop);
  * the software model updates the context's loop mode.

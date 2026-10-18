@@ -335,6 +335,18 @@ void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc) {
         calc->mixbin_gain[0] = (uint8_t)(src->direct_gain[0] * 255.0f + 0.5f);
         calc->mixbin_gain[1] = (uint8_t)(src->direct_gain[1] * 255.0f + 0.5f);
     }
+    /* AL_DIRECT_FILTER: its AL_LOWPASS_GAIN scales the dry sound (its GAINHF is
+     * the voice filter, source_lowpass) */
+    calc->effective_gain *= al_efx_filter_gain(&src->efx.direct_filter);
+}
+
+/*
+ * The voice filter for AL_FILTER_LOWPASS (EFX_PLAN.md 3.7): one per voice, so
+ * it follows the direct filter's AL_LOWPASS_GAINHF and also shapes the sends.
+ * A send filter's GAINHF is not applied (its AL_LOWPASS_GAIN is, on the send).
+ */
+static float source_lowpass(const ALsource *src) {
+    return al_efx_filter_gain_hf(&src->efx.direct_filter);
 }
 
 
@@ -397,12 +409,12 @@ static NVAPU_VOICE_CONTEXT_3D *source_live_context(const ALsource *src) {
  * AL_MAX_GAIN, times the listener gain. AL_EFFECTSLOT_GAIN: the reverb applies
  * it on the GP (its wet gain); a custom kernel has no word for it, so it scales
  * the sends into that kernel instead (the same for a linear kernel; it changes
- * live, with the volumes). (Filters are AL_FILTER_NULL for now: gain 1.)
+ * live, with the volumes). The send filter's AL_LOWPASS_GAIN scales the send.
  */
 static bool s_reverb_enabled;
 
-static float efx_send_gain(const ALsource *src, const AL_SPATIAL_CALC *calc, const al_efx_slot_t *slot) {
-    float g = src->gain;
+static float efx_send_gain(const ALsource *src, const AL_SPATIAL_CALC *calc, const al_efx_slot_t *slot, uint32_t n) {
+    float g = src->gain * al_efx_filter_gain(&src->efx.send[n].filter);
     if (!src->direct) {
         g *= apu_calc_distance_gain(calc->distance, src->reference_distance, src->max_distance,
                                     al_efx_room_rolloff(&src->efx, slot), apu_spatial_get_distance_model());
@@ -434,7 +446,7 @@ static void source_sends(const ALsource *src, const AL_SPATIAL_CALC *calc, float
     }
     for (n = 0; n < APU_VOICE_SENDS && n < (uint32_t)AL_EFX_MAX_SENDS; n++) {
         if (src->efx.send[n].slot == active) {
-            out[n] = efx_send_gain(src, calc, al_efx_slot(active));
+            out[n] = efx_send_gain(src, calc, al_efx_slot(active), n);
         }
     }
 }
@@ -480,6 +492,7 @@ static void source_update_hw(const ALsource *src, unsigned fields) {
     }
     apu_voice_set_direction((uint32_t)src->hw_voice_idx, calc.local_pos);
     apu_voice_set_direct((uint32_t)src->hw_voice_idx, src->direct, src->direct_gain[0], src->direct_gain[1]);
+    apu_voice_set_lowpass((uint32_t)src->hw_voice_idx, source_lowpass(src));
     {
         float sends[APU_VOICE_SENDS];
         source_sends(src, &calc, sends);
@@ -588,6 +601,7 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
     }
     src->has_offset = false;
     apu_voice_set_direct(hw_voice_idx, src->direct, src->direct_gain[0], src->direct_gain[1]);
+    apu_voice_set_lowpass(hw_voice_idx, source_lowpass(src));
     {
         float sends[APU_VOICE_SENDS];
         source_sends(src, &calc, sends);

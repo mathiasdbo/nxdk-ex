@@ -47,6 +47,7 @@ static voice_direct_t s_voice_direct[APU_VOICE_MAX_SLOTS];
 
 /* Effect sends of each slot (apu_voice_set_sends): absolute linear gains */
 static float s_voice_send[APU_VOICE_MAX_SLOTS][APU_VOICE_SENDS];
+static float s_voice_lowpass[APU_VOICE_MAX_SLOTS];   /* gain at 5 kHz; 1 = no filter */
 
 /* Console: send n leaves on outputs 4 + 2n (left or mono) and 5 + 2n (right
  * or mono) for the GP kernel's input pair, bins 2/3 (dsp/gp_kfreeverb.asm KIN) */
@@ -202,6 +203,7 @@ int apu_voice_subsystem_init(uintptr_t apu_base, void *context_array_virt, uint3
     memset(s_voice_direct, 0, sizeof(s_voice_direct));
     for (i = 0; i < APU_VOICE_MAX_SLOTS; ++i) {
         s_voice_handle[i] = 0xFFFFu;   /* none yet: never turn off a handle another slot may hold */
+        s_voice_lowpass[i] = 1.0f;
     }
     for (i = 0; i < APU_VP_MAX_HANDLES; ++i) {
         s_handle_slot[i] = 0xFFFFu;
@@ -370,6 +372,7 @@ int apu_voice_trigger(uintptr_t apu_base, uint32_t index)
         }
         s_handle_slot[vp_handle(index)] = (uint16_t)index;
         vp_params_from_context(index, ctx, p.hrtf_entry >= 0, &p.pitch, p.bins, p.vols);
+        p.fmode = apu_vp_lowpass(s_voice_lowpass[index], &p.fc);
         if (apu_vp_voice_start(base, vp_handle(index), &p) != 0) {
             s_voice_contexts[index].active = 0u;
             return -2;
@@ -554,6 +557,19 @@ void apu_voice_set_sends(uint32_t index, const float sends[APU_VOICE_SENDS])
     }
 }
 
+void apu_voice_set_lowpass(uint32_t index, float gain_hf)
+{
+    if (index >= APU_VOICE_MAX_SLOTS) {
+        return;
+    }
+    s_voice_lowpass[index] = (gain_hf > 0.0f) ? ((gain_hf < 1.0f) ? gain_hf : 1.0f) : 0.0f;
+}
+
+float apu_voice_debug_lowpass(uint32_t index)
+{
+    return (index < APU_VOICE_MAX_SLOTS) ? s_voice_lowpass[index] : 1.0f;
+}
+
 void apu_voice_set_direction(uint32_t index, const float local_pos[3])
 {
     if (index >= APU_VOICE_MAX_SLOTS || local_pos == NULL) {
@@ -575,9 +591,11 @@ void apu_voice_commit(uintptr_t apu_base, uint32_t index)
     {
         uint32_t h = vp_handle(index);
         int entry = s_slot_hrtf[index] ? apu_hrtf_entry_for_local(s_voice_local[index]) : -1;
+        uint32_t fc, fmode = apu_vp_lowpass(s_voice_lowpass[index], &fc);
         /* the bins were set at start and do not change with the pan */
         vp_params_from_context(index, &s_voice_contexts[index], entry >= 0, &pitch, bins, vols);
         apu_vp_voice_update((apu_base != 0) ? apu_base : s_apu_base, h, pitch, vols, entry);
+        apu_vp_voice_set_filter((apu_base != 0) ? apu_base : s_apu_base, h, fmode, fc);
     }
 }
 
