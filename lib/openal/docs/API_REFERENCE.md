@@ -216,7 +216,10 @@ void alXboxEffectProgram(ALuint effect, const ALuint *words, ALsizei count, ALui
 - After attaching the effect again, all changed words reach the kernel in the same 0.67 ms frame.
 
 **Running:**
-- The kernel's input is the slot's sends. Its output is added to the dry mix.
+- The kernel's input is the slot's sends, on a bin pair (left, right). Its output is added to the dry mix.
+- **Send levels on the pair:** a stereo source sends each channel at the whole send gain, so a send of 1 is
+  exactly 0 dB (the samples arrive unscaled). A mono source sends half the gain on each bin, so their sum is
+  the send.
 - Code loads while the GP runs, without a restart.
 
 How to write a kernel: [`GP_KERNELS.md`](GP_KERNELS.md).
