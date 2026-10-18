@@ -5,7 +5,8 @@
  *
  * Supported: effect types AL_EFFECT_NULL, AL_EFFECT_REVERB and
  * AL_EFFECT_EAXREVERB (every other type is AL_INVALID_VALUE, as the extension
- * allows), filter type AL_FILTER_NULL, AL_EFX_MAX_SLOTS slots of which one may
+ * allows), filter types AL_FILTER_NULL and AL_FILTER_LOWPASS (the voice filter;
+ * highpass and bandpass are AL_INVALID_VALUE), AL_EFX_MAX_SLOTS slots of which one may
  * hold an effect at a time (the GP runs one program), and up to
  * AL_EFX_MAX_SENDS sends per source.
  */
@@ -539,13 +540,35 @@ AL_API void AL_APIENTRY alGetEffectfv(ALuint effect, ALenum param, ALfloat *valu
 
 /* ------------------------------------------------------------------ filters */
 
+/* AL_LOWPASS_GAIN / AL_LOWPASS_GAINHF: 0..1, default 1 (EFX 1.0) */
+static void filter_defaults(al_efx_filter_props_t *p, ALenum type) {
+    p->type = type;
+    p->gain = 1.0f;
+    p->gain_hf = 1.0f;
+}
+
+ALfloat al_efx_filter_gain(const al_efx_filter_props_t *f) {
+    return (f && f->type == AL_FILTER_LOWPASS) ? f->gain : 1.0f;
+}
+
+ALfloat al_efx_filter_gain_hf(const al_efx_filter_props_t *f) {
+    return (f && f->type == AL_FILTER_LOWPASS) ? f->gain_hf : 1.0f;
+}
+
+static ALfloat *filter_field(al_efx_filter_props_t *p, ALenum param) {
+    if (p->type != AL_FILTER_LOWPASS) return NULL;
+    if (param == AL_LOWPASS_GAIN) return &p->gain;
+    if (param == AL_LOWPASS_GAINHF) return &p->gain_hf;
+    return NULL;
+}
+
 AL_API void AL_APIENTRY alGenFilters(ALsizei n, ALuint *filters) {
     ALsizei k;
     if (!gen_names(n, filters, &s_filters[0].in_use, sizeof(filter_t), AL_EFX_MAX_FILTERS)) return;
     for (k = 0; k < n; k++) {
         filter_t *f = &s_filters[filters[k] - 1u];
         f->in_use = true;
-        f->props.type = AL_FILTER_NULL;
+        filter_defaults(&f->props, AL_FILTER_NULL);
     }
 }
 
@@ -572,12 +595,12 @@ AL_API void AL_APIENTRY alFilteri(ALuint filter, ALenum param, ALint value) {
         alSetError(AL_INVALID_ENUM);   /* AL_FILTER_NULL has no parameters */
         return;
     }
-    /* Lowpass, highpass and bandpass wait for the VP filter probe (phase8-00) */
-    if (value != AL_FILTER_NULL) {
+    /* Lowpass on the voice filter; highpass and bandpass are not supported */
+    if (value != AL_FILTER_NULL && value != AL_FILTER_LOWPASS) {
         alSetError(AL_INVALID_VALUE);
         return;
     }
-    f->props.type = value;
+    filter_defaults(&f->props, value);
 }
 
 AL_API void AL_APIENTRY alFilteriv(ALuint filter, ALenum param, const ALint *values) {
@@ -589,9 +612,22 @@ AL_API void AL_APIENTRY alFilteriv(ALuint filter, ALenum param, const ALint *val
 }
 
 AL_API void AL_APIENTRY alFilterf(ALuint filter, ALenum param, ALfloat value) {
-    (void)param;
-    (void)value;
-    alSetError(get_filter(filter) ? AL_INVALID_ENUM : AL_INVALID_NAME);
+    filter_t *f = get_filter(filter);
+    ALfloat *field;
+    if (!f) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+    field = filter_field(&f->props, param);
+    if (!field) {
+        alSetError(AL_INVALID_ENUM);
+        return;
+    }
+    if (!isfinite(value) || value < 0.0f || value > 1.0f) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    *field = value;
 }
 
 AL_API void AL_APIENTRY alFilterfv(ALuint filter, ALenum param, const ALfloat *values) {
@@ -624,12 +660,22 @@ AL_API void AL_APIENTRY alGetFilteriv(ALuint filter, ALenum param, ALint *values
 }
 
 AL_API void AL_APIENTRY alGetFilterf(ALuint filter, ALenum param, ALfloat *value) {
-    (void)param;
+    filter_t *f = get_filter(filter);
+    ALfloat *field;
     if (!value) {
         alSetError(AL_INVALID_VALUE);
         return;
     }
-    alSetError(get_filter(filter) ? AL_INVALID_ENUM : AL_INVALID_NAME);
+    if (!f) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+    field = filter_field(&f->props, param);
+    if (!field) {
+        alSetError(AL_INVALID_ENUM);
+        return;
+    }
+    *value = *field;
 }
 
 AL_API void AL_APIENTRY alGetFilterfv(ALuint filter, ALenum param, ALfloat *values) {
@@ -821,8 +867,12 @@ AL_API void AL_APIENTRY alGetAuxiliaryEffectSlotfv(ALuint slot, ALenum param, AL
 /* ------------------------------------------------------------------ sources and listener */
 
 void al_efx_source_defaults(al_efx_source_t *s) {
+    int i;
     memset(s, 0, sizeof(*s));
-    s->direct_filter.type = AL_FILTER_NULL;
+    filter_defaults(&s->direct_filter, AL_FILTER_NULL);
+    for (i = 0; i < AL_EFX_MAX_SENDS; i++) {
+        filter_defaults(&s->send[i].filter, AL_FILTER_NULL);
+    }
     s->air_absorption_factor = AL_DEFAULT_AIR_ABSORPTION_FACTOR;
     s->room_rolloff_factor = AL_DEFAULT_ROOM_ROLLOFF_FACTOR;
     s->cone_outer_gain_hf = AL_DEFAULT_CONE_OUTER_GAINHF;
@@ -883,7 +933,11 @@ bool al_efx_source_seti(al_efx_source_t *s, ALenum param, ALint value) {
                     return true;
                 }
             }
-            s->direct_filter.type = f ? f->props.type : AL_FILTER_NULL;
+            if (f) {
+                s->direct_filter = f->props;   /* a copy, as the extension says */
+            } else {
+                filter_defaults(&s->direct_filter, AL_FILTER_NULL);
+            }
             return true;
         }
         case AL_DIRECT_FILTER_GAINHF_AUTO:
@@ -925,7 +979,11 @@ bool al_efx_source_set3i(al_efx_source_t *s, ALenum param, ALint slot_id, ALint 
     if (old && old->refs > 0u) old->refs--;
     if (slot) slot->refs++;
     s->send[send].slot = (ALuint)slot_id;
-    s->send[send].filter.type = f ? f->props.type : AL_FILTER_NULL;
+    if (f) {
+        s->send[send].filter = f->props;
+    } else {
+        filter_defaults(&s->send[send].filter, AL_FILTER_NULL);
+    }
     return true;
 }
 

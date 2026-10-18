@@ -108,6 +108,8 @@ typedef struct {
     uint32_t loop_start;    /* looping voices: frames [loop_start, loop_end) repeat (loop_end 0 = the whole buffer) */
     uint32_t loop_end;
     uint32_t start_frame;   /* first frame played (CBO at start) */
+    uint32_t fmode;         /* voice filter: CFG_MISC FMODE (0 = off, 1 = lowpass), apu_vp_lowpass() */
+    uint32_t fc;            /* its TAR_FCA / TAR_FCB word: damping (31:16) | cutoff (15:0, s4.12 octaves) */
 } apu_vp_voice_params_t;
 
 /**
@@ -207,6 +209,9 @@ int apu_vp_voice_start(uintptr_t bar0, uint32_t handle, const apu_vp_voice_param
  * Update pitch, the eight output volumes and (for handles below 64, if
  * hrtf_entry >= 0 and HRTF is available) the HRTF entry of a running voice.
  */
+/** Set a running voice's filter (FMODE and TAR_FCA/FCB; written only when it changed). */
+void apu_vp_voice_set_filter(uintptr_t bar0, uint32_t handle, uint32_t fmode, uint32_t fc);
+
 void apu_vp_voice_update(uintptr_t bar0, uint32_t handle, int16_t pitch, const uint16_t vols[APU_VP_OUTPUTS],
                          int hrtf_entry);
 
@@ -285,6 +290,21 @@ int16_t apu_vp_pitch_from_ratio(float ratio);
 
 /** 12-bit attenuation (1/64 dB, 0 = unity, 0xFFF = mute) for a linear gain. */
 uint16_t apu_vp_atten_from_gain(float gain);
+
+/*
+ * Voice filter as a lowpass (EFX_PLAN.md 2.1 / 3.7): FMODE 1 is a 2-pole
+ * lowpass, cutoff 8 kHz x 2^(c / 0x1000) in the low half of TAR_FCA, damping
+ * in the high half (APU_VP_LP_DAMPING: Butterworth). apu_vp_lowpass() fits it
+ * to an EFX AL_LOWPASS_GAINHF: the gain at APU_VP_LP_REF_HZ (5 kHz, the
+ * extension's reference). Returns the FMODE (0: no filter, gain_hf about 1)
+ * and writes the FCA word to *fc.
+ */
+#define APU_VP_LP_DAMPING   0xB505u      /* sqrt(2), 0x8000 = 1 */
+#define APU_VP_LP_REF_HZ    5000.0f
+#define APU_VP_LP_ZERO_HZ   8000.0f      /* cutoff word 0 */
+#define APU_VP_LP_CUT_MIN   (-0x7000)    /* about 62 Hz */
+#define APU_VP_LP_CUT_MAX   0x1000       /* 16 kHz: above it the filter is off */
+uint32_t apu_vp_lowpass(float gain_hf, uint32_t *fc);
 
 /** Pack eight 12-bit output attenuations into TAR_VOLA/B/C. */
 void apu_vp_pack_volumes(const uint16_t vols[APU_VP_OUTPUTS], uint32_t *vola, uint32_t *volb, uint32_t *volc);
