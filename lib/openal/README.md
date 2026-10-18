@@ -15,8 +15,8 @@ facts come from public sources (xemu, XboxDevWiki) and our own console probes.
 - HRTF (64 voices), the GP reverb;
 - clean program exit.
 
-The measurements are in [`docs/XEMU_VERIFICATION.md`](docs/XEMU_VERIFICATION.md) section 8.1b. For using it from
-a game engine, start with [`docs/ENGINE_INTEGRATION.md`](docs/ENGINE_INTEGRATION.md); the Xash3D port plan is
+The measurements are in [`docs/XEMU_VERIFICATION.md`](docs/XEMU_VERIFICATION.md) section 8.1b. The API reference is
+[`docs/API_REFERENCE.md`](docs/API_REFERENCE.md). For using it from a game engine, start with [`docs/ENGINE_INTEGRATION.md`](docs/ENGINE_INTEGRATION.md); the Xash3D port plan is
 [`docs/XASH3D_INTEGRATION_PLAN.md`](docs/XASH3D_INTEGRATION_PLAN.md).
 
 ## Backends
@@ -45,6 +45,8 @@ The sound itself does not depend on it: the output thread keeps the codec fed ev
 screens.
 
 ## API
+
+Every call, token, range and error is in [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md). In short:
 
 - **ALC:** `alcOpenDevice` (`NULL`, the default name, `"MCPX APU"`, `"DirectSound3D"`, `"DirectSound"`),
   `alcCloseDevice`, `alcCreateContext`, `alcMakeContextCurrent`, `alcDestroyContext`, `alcGetCurrentContext`,
@@ -136,5 +138,6 @@ links showcase sources needs an `EXTRA_<test>` entry in the Makefile and a branc
 - `dsp/`: the GP programs in DSP56300 assembly; `tools/dsp56asm.py` assembles them into headers in `src/`
   (the example kernel's image into `dsp/gp_kecho.h`); `tools/dsp56sim.py` runs them on the host.
 - `tests/`: host tests and runners.
-- `docs/`: hardware findings, the engine guide (`ENGINE_INTEGRATION.md`), writing GP kernels (`GP_KERNELS.md`),
+- `docs/`: the API reference (`API_REFERENCE.md`), hardware findings, the engine guide (`ENGINE_INTEGRATION.md`),
+  writing GP kernels (`GP_KERNELS.md`),
   plans.
