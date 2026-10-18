@@ -284,6 +284,16 @@ AL_API ALboolean AL_APIENTRY alIsBuffer(ALuint buffer) {
     return s_buffers[buffer - 1].in_use ? AL_TRUE : AL_FALSE;
 }
 
+/* AL_EXT_FLOAT32: -1 .. 1 floats to 16-bit, clipped, rounded to nearest (NaN: 0) */
+static int16_t float_to_s16(float f) {
+    float v;
+    if (!(f == f)) return 0;
+    v = f * 32767.0f;
+    if (v >= 32767.0f) return 32767;
+    if (v <= -32768.0f) return -32768;
+    return (int16_t)(v >= 0.0f ? v + 0.5f : v - 0.5f);
+}
+
 AL_API void AL_APIENTRY alBufferData(ALuint buffer, ALenum format, const ALvoid *data, ALsizei size, ALsizei freq) {
     ensure_subsystem_initialized();
 
@@ -295,6 +305,29 @@ AL_API void AL_APIENTRY alBufferData(ALuint buffer, ALenum format, const ALvoid 
 
     if (buf->ref_count > 0) {
         alSetError(AL_INVALID_OPERATION);
+        return;
+    }
+
+    if (format == AL_FORMAT_MONO_FLOAT32 || format == AL_FORMAT_STEREO_FLOAT32) {
+        ALsizei frame = (format == AL_FORMAT_STEREO_FLOAT32) ? 8 : 4, n, i;
+        const float *in = (const float *)data;
+        int16_t *pcm;
+        if (size <= 0 || freq <= 0 || (size % frame) != 0 || data == NULL) {
+            alSetError(AL_INVALID_VALUE);
+            return;
+        }
+        n = size / 4;
+        pcm = (int16_t *)malloc((size_t)n * sizeof(int16_t));
+        if (!pcm) {
+            alSetError(AL_OUT_OF_MEMORY);
+            return;
+        }
+        for (i = 0; i < n; i++) {
+            pcm[i] = float_to_s16(in[i]);
+        }
+        alBufferData(buffer, (format == AL_FORMAT_STEREO_FLOAT32) ? AL_FORMAT_STEREO16 : AL_FORMAT_MONO16, pcm,
+                     n * (ALsizei)sizeof(int16_t), freq);
+        free(pcm);
         return;
     }
 

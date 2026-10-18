@@ -221,6 +221,58 @@ typedef void (AL_APIENTRY *LPALXBOXEFFECTPROGRAM)(ALuint effect, const ALuint *w
 
 /*
  * ============================================================================
+ * OpenAL Soft compatible extensions (the same names, tokens and meaning)
+ * ============================================================================
+ *
+ * AL_EXT_FLOAT32: alBufferData takes 32-bit float samples (-1 .. 1, clipped),
+ *   converted to 16-bit when the buffer is loaded (AL_BITS then reports 16,
+ *   AL_SIZE the 16-bit size). alBufferDataStatic does not take them
+ *   (AL_INVALID_ENUM: a static buffer is played as it is).
+ */
+#define AL_FORMAT_MONO_FLOAT32                   0x10010
+#define AL_FORMAT_STEREO_FLOAT32                 0x10011
+
+/*
+ * AL_EXT_source_distance_model: alEnable(AL_SOURCE_DISTANCE_MODEL) makes each
+ *   source use its own alSourcei(src, AL_DISTANCE_MODEL, model) (default
+ *   AL_INVERSE_DISTANCE_CLAMPED) instead of alDistanceModel's.
+ */
+#define AL_SOURCE_DISTANCE_MODEL                 0x200
+
+/*
+ * AL_SOFT_gain_clamp_ex: alGetFloat(AL_GAIN_LIMIT_SOFT), the largest gain a
+ *   source reaches after AL_MAX_GAIN: 1 here (a voice's volume attenuates only).
+ */
+#define AL_GAIN_LIMIT_SOFT                       0x200E
+
+/*
+ * AL_SOFT_direct_channels: alSourcei(src, AL_DIRECT_CHANNELS_SOFT, AL_TRUE)
+ *   plays a multichannel buffer's channels straight to the matching outputs.
+ *   Stereo always plays left to left and right to right here, so the flag is
+ *   stored and read back.
+ */
+#define AL_DIRECT_CHANNELS_SOFT                  0x1033
+
+/*
+ * AL_SOFT_source_spatialize: alSourcei(src, AL_SOURCE_SPATIALIZE_SOFT, v)
+ *   AL_AUTO_SOFT (default): mono buffers are spatialized, stereo ones are not
+ *   (OpenAL 1.1: no distance, cone or Doppler on multichannel sounds);
+ *   AL_FALSE: not spatialized: a mono sound plays centred (-3 dB on each side,
+ *   as a centred panned source), with AL_GAIN and the listener gain only;
+ *   AL_TRUE: spatialized: a stereo sound also takes distance, cone and Doppler
+ *   (its two channels keep their sides; they are not positioned apart).
+ */
+#define AL_SOURCE_SPATIALIZE_SOFT                0x1214
+#define AL_AUTO_SOFT                             0x0002
+
+/*
+ * ALC_EXT_disconnect: alcGetIntegerv(dev, ALC_CONNECTED): ALC_TRUE while the
+ *   device is open (the APU and the AC97 cannot be unplugged).
+ */
+#define ALC_CONNECTED                            0x313
+
+/*
+ * ============================================================================
  * AL_XBOX_source_control (engine control of hardware voices)
  * ============================================================================
  *

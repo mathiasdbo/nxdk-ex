@@ -94,6 +94,9 @@ static void source_reset_defaults(ALsource *src, ALuint id) {
     src->cone_outer_angle = 360.0f;
     src->cone_outer_gain = 0.0f;
     src->lfe_gain = 0.0f;
+    src->spatialize = AL_AUTO_SOFT;
+    src->direct_channels = AL_FALSE;
+    src->distance_model = AL_INVERSE_DISTANCE_CLAMPED;
     src->saved_prd_index = 0;
     src->saved_sample_pos_frac = 0;
     src->play_seq = 0;
@@ -208,6 +211,42 @@ static void source_drop_stream(ALsource *src) {
  * ============================================================================
  */
 
+/* AL_EXT_source_distance_model: alEnable(AL_SOURCE_DISTANCE_MODEL) */
+static bool s_source_distance_model;
+
+static ALenum source_distance_model(const ALsource *src) {
+    return s_source_distance_model ? src->distance_model : apu_spatial_get_distance_model();
+}
+
+/* AL_SOFT_source_spatialize: AL_AUTO_SOFT spatializes mono buffers only */
+static bool source_spatialized(const ALsource *src) {
+    const ALbuffer *pb;
+    if (src->spatialize == AL_TRUE) return true;
+    if (src->spatialize == AL_FALSE) return false;
+    pb = al_source_play_buffer(src);
+    return pb == NULL || pb->channels == 1;
+}
+
+/* A mono source played without spatialization: centred, as a centred panned
+ * voice (-3 dB a side), through the voice's direct mode */
+#define AL_SOURCE_CENTRE_GAIN 0.70710678f
+
+static bool source_flat_mono(const ALsource *src) {
+    const ALbuffer *pb = al_source_play_buffer(src);
+    return !src->direct && !source_spatialized(src) && (pb == NULL || pb->channels == 1);
+}
+
+/* The voice's direct mode: AL_XBOX_DIRECT_GAINS, or a centred unspatialized mono source */
+static void source_set_voice_direct(uint32_t idx, const ALsource *src) {
+    if (src->direct) {
+        apu_voice_set_direct(idx, true, src->direct_gain[0], src->direct_gain[1]);
+    } else if (source_flat_mono(src)) {
+        apu_voice_set_direct(idx, true, AL_SOURCE_CENTRE_GAIN, AL_SOURCE_CENTRE_GAIN);
+    } else {
+        apu_voice_set_direct(idx, false, src->direct_gain[0], src->direct_gain[1]);
+    }
+}
+
 void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc) {
     if (!src || !calc) {
         return;
@@ -234,7 +273,7 @@ void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc) {
             src->reference_distance,
             src->max_distance,
             src->rolloff_factor,
-            apu_spatial_get_distance_model()
+            source_distance_model(src)
         );
 
         float origin[3] = {0.0f, 0.0f, 0.0f};
@@ -262,7 +301,7 @@ void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc) {
             src->reference_distance,
             src->max_distance,
             src->rolloff_factor,
-            apu_spatial_get_distance_model()
+            source_distance_model(src)
         );
 
         calc->cone_gain = apu_calc_cone_gain(
@@ -282,6 +321,13 @@ void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc) {
             apu_spatial_get_doppler_factor(),
             apu_spatial_get_speed_of_sound()
         );
+    }
+
+    /* AL_SOFT_source_spatialize: an unspatialized source takes no distance, cone or Doppler */
+    if (!source_spatialized(src)) {
+        calc->distance_gain = 1.0f;
+        calc->cone_gain = 1.0f;
+        calc->doppler_pitch = 1.0f;
     }
 
     /* Combine into effective gain: clamp(source_gain * distance_gain * cone_gain, min_gain, max_gain) * listener_gain */
@@ -321,8 +367,9 @@ void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc) {
     apu_calc_panning_51(calc->local_pos[0], calc->local_pos[2], src->lfe_gain, &calc->pan_gains_51);
     apu_calc_mixbin_gains_51(&calc->pan_gains_51, calc->mixbin_gain);
 
-    if (src->direct) {
-        /* AL_XBOX_DIRECT_GAINS: the engine spatializes. Gain is AL_GAIN (within
+    if (src->direct || source_flat_mono(src)) {
+        /* AL_XBOX_DIRECT_GAINS: the engine spatializes (or an unspatialized
+         * mono source, centred). Gain is AL_GAIN (within
          * min/max) times the listener gain; the pan is the engine's left/right
          * pair (the hardware backend takes it at full precision from
          * apu_voice_set_direct()); no Doppler, ITD or elevation filter. */
@@ -335,8 +382,8 @@ void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc) {
         calc->itd_delay_left = calc->itd_delay_right = 0;
         apu_get_biquad_passthrough_q14(&calc->hrtf_coeffs);
         memset(calc->mixbin_gain, 0, sizeof(calc->mixbin_gain));
-        calc->mixbin_gain[0] = (uint8_t)(src->direct_gain[0] * 255.0f + 0.5f);
-        calc->mixbin_gain[1] = (uint8_t)(src->direct_gain[1] * 255.0f + 0.5f);
+        calc->mixbin_gain[0] = (uint8_t)((src->direct ? src->direct_gain[0] : AL_SOURCE_CENTRE_GAIN) * 255.0f + 0.5f);
+        calc->mixbin_gain[1] = (uint8_t)((src->direct ? src->direct_gain[1] : AL_SOURCE_CENTRE_GAIN) * 255.0f + 0.5f);
     }
     /* AL_DIRECT_FILTER: its AL_LOWPASS_GAIN scales the dry sound (its GAINHF is
      * the voice filter, source_lowpass) */
@@ -349,7 +396,7 @@ void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc) {
      * (the distance clamped to AL_MAX_DISTANCE, AL_METERS_PER_UNIT metres a unit).
      * Direct mode spatializes in the engine: only the filter applies. */
     calc->gain_hf = al_efx_filter_gain_hf(&src->efx.direct_filter);
-    if (!src->direct && src->efx.direct_gain_hf_auto) {
+    if (!src->direct && source_spatialized(src) && src->efx.direct_gain_hf_auto) {
         if (src->efx.cone_outer_gain_hf < 1.0f) {
             const float origin[3] = {0.0f, 0.0f, 0.0f};
             calc->gain_hf *= apu_calc_cone_gain(src->position, src->direction,
@@ -442,9 +489,9 @@ static bool s_reverb_enabled;
 
 static float efx_send_gain(const ALsource *src, const AL_SPATIAL_CALC *calc, const al_efx_slot_t *slot, uint32_t n) {
     float g = src->gain * al_efx_filter_gain(&src->efx.send[n].filter);
-    if (!src->direct) {
+    if (!src->direct && source_spatialized(src)) {
         g *= apu_calc_distance_gain(calc->distance, src->reference_distance, src->max_distance,
-                                    al_efx_room_rolloff(&src->efx, slot), apu_spatial_get_distance_model());
+                                    al_efx_room_rolloff(&src->efx, slot), source_distance_model(src));
         if (src->efx.send_gain_auto) {
             g *= calc->cone_gain;
         }
@@ -531,7 +578,7 @@ static void source_update_hw(const ALsource *src, unsigned fields) {
         }
     }
     apu_voice_set_direction((uint32_t)src->hw_voice_idx, calc.local_pos);
-    apu_voice_set_direct((uint32_t)src->hw_voice_idx, src->direct, src->direct_gain[0], src->direct_gain[1]);
+    source_set_voice_direct((uint32_t)src->hw_voice_idx, src);
     apu_voice_set_lowpass((uint32_t)src->hw_voice_idx, source_lowpass(&calc));
     {
         float sends[APU_VOICE_SENDS];
@@ -641,7 +688,7 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
                             src->has_offset ? src->offset_frames : 0u);
     }
     src->has_offset = false;
-    apu_voice_set_direct(hw_voice_idx, src->direct, src->direct_gain[0], src->direct_gain[1]);
+    source_set_voice_direct(hw_voice_idx, src);
     apu_voice_set_lowpass(hw_voice_idx, source_lowpass(&calc));
     {
         float sends[APU_VOICE_SENDS];
@@ -1233,6 +1280,41 @@ AL_API void AL_APIENTRY alSourcei(ALuint source, ALenum param, ALint value) {
             source_update_hw(src, SRC_HW_SPATIAL);
             break;
 
+        case AL_SOURCE_SPATIALIZE_SOFT:
+            if (value != AL_TRUE && value != AL_FALSE && value != AL_AUTO_SOFT) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->spatialize = (ALenum)value;
+            source_update_hw(src, SRC_HW_SPATIAL);
+            break;
+
+        case AL_DIRECT_CHANNELS_SOFT:
+            if (value != AL_TRUE && value != AL_FALSE) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->direct_channels = (ALboolean)value;
+            break;
+
+        case AL_DISTANCE_MODEL:
+            switch (value) {
+                case AL_NONE:
+                case AL_INVERSE_DISTANCE:
+                case AL_INVERSE_DISTANCE_CLAMPED:
+                case AL_LINEAR_DISTANCE:
+                case AL_LINEAR_DISTANCE_CLAMPED:
+                case AL_EXPONENT_DISTANCE:
+                case AL_EXPONENT_DISTANCE_CLAMPED:
+                    src->distance_model = (ALenum)value;
+                    source_update_hw(src, SRC_HW_SPATIAL);
+                    break;
+                default:
+                    alSetError(AL_INVALID_VALUE);
+                    return;
+            }
+            break;
+
         case AL_SEC_OFFSET:
         case AL_SAMPLE_OFFSET:
         case AL_BYTE_OFFSET: {
@@ -1312,6 +1394,9 @@ AL_API void AL_APIENTRY alSourceiv(ALuint source, ALenum param, const ALint *val
         case AL_BUFFER:
         case AL_LOOPING:
         case AL_SOURCE_RELATIVE:
+        case AL_SOURCE_SPATIALIZE_SOFT:
+        case AL_DIRECT_CHANNELS_SOFT:
+        case AL_DISTANCE_MODEL:
         case AL_SEC_OFFSET:
         case AL_SAMPLE_OFFSET:
         case AL_BYTE_OFFSET:
@@ -1520,6 +1605,18 @@ AL_API void AL_APIENTRY alGetSourcei(ALuint source, ALenum param, ALint *value) 
 
         case AL_LOOPING:
             *value = (ALint)src->looping;
+            break;
+
+        case AL_SOURCE_SPATIALIZE_SOFT:
+            *value = (ALint)src->spatialize;
+            break;
+
+        case AL_DIRECT_CHANNELS_SOFT:
+            *value = (ALint)src->direct_channels;
+            break;
+
+        case AL_DISTANCE_MODEL:
+            *value = (ALint)src->distance_model;
             break;
 
         case AL_SOURCE_RELATIVE:
@@ -1999,6 +2096,8 @@ AL_API ALfloat AL_APIENTRY alGetFloat(ALenum param) {
             return 1.0f;
         case AL_SPEED_OF_SOUND:
             return apu_spatial_get_speed_of_sound();
+        case AL_GAIN_LIMIT_SOFT:
+            return 1.0f;   /* AL_SOFT_gain_clamp_ex: a voice's volume only attenuates */
         default:
             alSetError(AL_INVALID_ENUM);
             return 0.0f;
@@ -2023,6 +2122,9 @@ AL_API void AL_APIENTRY alGetFloatv(ALenum param, ALfloat *values) {
             break;
         case AL_SPEED_OF_SOUND:
             *values = apu_spatial_get_speed_of_sound();
+            break;
+        case AL_GAIN_LIMIT_SOFT:
+            *values = 1.0f;
             break;
         default:
             alSetError(AL_INVALID_ENUM);
@@ -2234,6 +2336,11 @@ AL_API void AL_APIENTRY alEnable(ALenum capability) {
         al_source_effects_changed();
         return;
     }
+    if (capability == AL_SOURCE_DISTANCE_MODEL) {
+        s_source_distance_model = true;
+        al_source_update_all_spatial();
+        return;
+    }
     alSetError(AL_INVALID_ENUM);
 }
 
@@ -2247,6 +2354,11 @@ AL_API void AL_APIENTRY alDisable(ALenum capability) {
         al_source_effects_changed();
         return;
     }
+    if (capability == AL_SOURCE_DISTANCE_MODEL) {
+        s_source_distance_model = false;
+        al_source_update_all_spatial();
+        return;
+    }
     alSetError(AL_INVALID_ENUM);
 }
 
@@ -2256,6 +2368,9 @@ AL_API ALboolean AL_APIENTRY alIsEnabled(ALenum capability) {
     }
     if (capability == AL_XBOX_REVERB) {
         return s_reverb_enabled ? AL_TRUE : AL_FALSE;
+    }
+    if (capability == AL_SOURCE_DISTANCE_MODEL) {
+        return s_source_distance_model ? AL_TRUE : AL_FALSE;
     }
     alSetError(AL_INVALID_ENUM);
     return AL_FALSE;

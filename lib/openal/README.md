@@ -77,6 +77,12 @@ Every call, token, range and error is in [`docs/API_REFERENCE.md`](docs/API_REFE
 | `AL_XBOX_adpcm` | `AL_FORMAT_MONO_XBOX_ADPCM` / `AL_FORMAT_STEREO_XBOX_ADPCM`: `.xwav` data decoded by the APU (3.11) |
 | `AL_EXT_STATIC_BUFFER` | `alBufferDataStatic`: a buffer plays the application's memory in place, any range of it (3.10) |
 | `AL_SOFT_loop_points` | a buffer's loop section: play the intro once, then repeat `[start, end)` in hardware |
+| `AL_EXT_FLOAT32` | `AL_FORMAT_MONO_FLOAT32` / `AL_FORMAT_STEREO_FLOAT32`, converted to 16-bit when loaded |
+| `AL_EXT_source_distance_model` | `alEnable(AL_SOURCE_DISTANCE_MODEL)`: a distance model per source (`AL_DISTANCE_MODEL`) |
+| `AL_SOFT_source_spatialize` | `AL_SOURCE_SPATIALIZE_SOFT`: spatialize stereo sounds, or play mono ones unspatialized |
+| `AL_SOFT_direct_channels` | `AL_DIRECT_CHANNELS_SOFT`, accepted (stereo always plays straight to left and right) |
+| `AL_SOFT_gain_clamp_ex` | `alGetFloat(AL_GAIN_LIMIT_SOFT)`: 1 |
+| `ALC_EXT_disconnect` | `alcGetIntegerv(ALC_CONNECTED)`: true while the device is open |
 | `ALC_EXT_EFX` | the OpenAL Effects Extension 1.0: slots, sends, reverb / EAX reverb on the GP (`ENGINE_INTEGRATION.md` 3.12) |
 | `AL_XBOX_gp_program` | `AL_EFFECT_XBOX_GP_PROGRAM`, `alXboxEffectProgram`, `AL_XBOX_GP_PARAM0 + n`: an EFX effect that runs your own GP DSP kernel (3.13, `docs/GP_KERNELS.md`) |
 | `AL_XBOX_hardware_status` | `alXboxGetHardwareStatus`: voices, free voices, sample memory, backend, AV pack, HRTF / reverb running, GP load |

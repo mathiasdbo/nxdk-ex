@@ -97,6 +97,7 @@ costs speed.
 | `AL_FORMAT_MONO8`, `AL_FORMAT_STEREO8` | 8-bit unsigned PCM |
 | `AL_FORMAT_MONO16`, `AL_FORMAT_STEREO16` | 16-bit signed PCM |
 | `AL_FORMAT_MONO_XBOX_ADPCM`, `AL_FORMAT_STEREO_XBOX_ADPCM` | `AL_XBOX_adpcm`: Xbox IMA ADPCM, 36-byte blocks of 64 frames per channel, the size a whole number of blocks; decoded by the APU (3.11). `AL_BITS` reports 4 |
+| `AL_FORMAT_MONO_FLOAT32`, `AL_FORMAT_STEREO_FLOAT32` | `AL_EXT_FLOAT32`: 32-bit float, −1..1 (clipped), converted to 16-bit when loaded, so `AL_BITS` reports 16 and `AL_SIZE` the 16-bit size. `alBufferDataStatic` does not take them (`AL_INVALID_ENUM`) |
 | `AL_FORMAT_QUAD*`, `AL_FORMAT_51CHN*` | reserved, `AL_INVALID_ENUM` |
 
 **Static buffers:**
@@ -136,6 +137,14 @@ on a console (64 on xemu). The others wait in virtual standby, or stop if `AL_XB
 | `AL_XBOX_VIRTUALIZE` | `alSourcei` | `AL_TRUE` (default) / `AL_FALSE` | without a voice: wait in standby, or stop (`AL_STOPPED`) so you can mix it yourself |
 | `AL_XBOX_HAS_VOICE` | `alGetSourcei` | `AL_TRUE` / `AL_FALSE` | whether the source holds a hardware voice now |
 | `AL_XBOX_REVERB_SEND` | `alSourcef` | 0..1, default 0 | how much goes to the `AL_XBOX_reverb` room (7.1) |
+
+### 5.1b OpenAL Soft source attributes
+
+| Attribute | Call | Values | Meaning |
+|---|---|---|---|
+| `AL_SOURCE_SPATIALIZE_SOFT` | `alSourcei` | `AL_AUTO_SOFT` (default), `AL_TRUE`, `AL_FALSE` | auto: mono buffers are spatialized, stereo ones are not (no distance, cone or Doppler, as OpenAL 1.1 says). `AL_TRUE`: a stereo sound takes distance, cone and Doppler too (its channels keep their sides). `AL_FALSE`: a mono sound plays centred (−3 dB a side), with `AL_GAIN` and the listener gain only, and no HRTF |
+| `AL_DISTANCE_MODEL` | `alSourcei` / get | the 1.1 models, default `AL_INVERSE_DISTANCE_CLAMPED` | the source's own model, used while `alEnable(AL_SOURCE_DISTANCE_MODEL)` is on (`AL_EXT_source_distance_model`) |
+| `AL_DIRECT_CHANNELS_SOFT` | `alSourcei` / get | `AL_FALSE` (default) / `AL_TRUE` | stored: stereo always plays left to left, right to right |
 
 ### 5.2 EFX source attributes (`AL/efx.h`)
 
@@ -315,8 +324,12 @@ alXboxOutputCallback(cb, user);                             /* NULL removes it *
 ## 9. Global state
 
 - **Supported:** `alDistanceModel` (every 1.1 model), `alDopplerFactor`, `alSpeedOfSound`, the `alGet{Boolean,
-  Integer,Float,Double}[v]` queries, `alEnable` / `alDisable` / `alIsEnabled` for `AL_XBOX_HRTF` and
-  `AL_XBOX_REVERB`, `alIsExtensionPresent`, `alGetProcAddress`, `alGetEnumValue`.
+  Integer,Float,Double}[v]` queries, `alEnable` / `alDisable` / `alIsEnabled` for `AL_XBOX_HRTF`,
+  `AL_XBOX_REVERB` and `AL_SOURCE_DISTANCE_MODEL`, `alIsExtensionPresent`, `alGetProcAddress`.
+- **`alGetEnumValue` / `alcGetEnumValue`:** the value of a token by name, for the 1.1 tokens, the EFX ones used
+  here, the Xbox source and effect tokens and the extensions above (0 for a name not known).
+- **`alGetFloat(AL_GAIN_LIMIT_SOFT)`** (`AL_SOFT_gain_clamp_ex`): 1, since a voice's volume only attenuates.
+- **`alcGetIntegerv(dev, ALC_CONNECTED)`** (`ALC_EXT_disconnect`): `ALC_TRUE` while the device is open.
 - **Listener:** `AL_POSITION`, `AL_VELOCITY`, `AL_ORIENTATION`, `AL_GAIN`, and `AL_METERS_PER_UNIT` (6.5).
 
 ## 10. Not supported
