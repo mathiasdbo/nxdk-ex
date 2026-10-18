@@ -17,6 +17,10 @@
  *   6  back to the reverb: its code reloaded, AL_XBOX_REVERB_ACTIVE
  *  6b  AL_FILTER_LOWPASS: 500 Hz + 5 kHz through direct filters, plain and HRTF
  *      voices; the 5 kHz level against GAINHF, GAIN on both, a live change
+ *  6c  AL_EFFECT_ECHO (library kernel): the two taps and the spread, then feedback
+ *  6d  air absorption and cone outer GAINHF: the 5 kHz level
+ *  6e  a stereo source at a distance: AL_AUTO_SOFT (no attenuation), AL_TRUE
+ *  6f  ALC_SOFT_pause_device: silence while paused, the source still playing
  *   7  listening: an HRTF source circling, a panned one and a stereo one, all
  *      sending to the slot; reverb and echo settings change every 15 s;
  *      output health logged every minute, 5 minutes (then plays on)
@@ -502,6 +506,130 @@ static void phase_lowpass(void) {
     save_log();
 }
 
+/* ---------------------------------------------------------------- 6c-6f: phase 9 */
+
+static ALCdevice *s_dev;
+
+static void phase_efx_echo(void) {
+    ALuint fx = 0;
+    uint32_t r0 = apu_gp_debug_code_restarts(), n;
+    logf_("-- 6c AL_EFFECT_ECHO (library kernel): DELAY 0.05, LRDELAY 0.05, SPREAD -1, no feedback\n");
+    logf_("   (expected: L +2400 only, R +4800 only, against the centred dry click)\n");
+    p_alGenEffects(1, &fx);
+    p_alEffecti(fx, AL_EFFECT_TYPE, AL_EFFECT_ECHO);
+    p_alEffectf(fx, AL_ECHO_DELAY, 0.05f);
+    p_alEffectf(fx, AL_ECHO_LRDELAY, 0.05f);
+    p_alEffectf(fx, AL_ECHO_FEEDBACK, 0.0f);
+    p_alEffectf(fx, AL_ECHO_DAMPING, 0.0f);
+    p_alEffectf(fx, AL_ECHO_SPREAD, -1.0f);
+    attach(fx);
+    run_for(100);
+    logf_("   attach: AL error 0x%x; %s\n", (unsigned)alGetError(),
+          apu_gp_debug_code_restarts() == r0 ? "code through the P window" : "GP RESTARTED");
+    log_load("efx echo");
+    n = capture(800, play_a);
+    log_peaks("efx echo", n);
+    logf_("   FEEDBACK 0.5, DAMPING 0.5, SPREAD 0 (expected: both ears +2400, +4800, then every 4800, darker)\n");
+    p_alEffectf(fx, AL_ECHO_FEEDBACK, 0.5f);
+    p_alEffectf(fx, AL_ECHO_DAMPING, 0.5f);
+    p_alEffectf(fx, AL_ECHO_SPREAD, 0.0f);
+    attach(fx);
+    run_for(100);
+    n = capture(1300, play_a);
+    log_peaks("efx echo fb", n);
+    attach(s_reverb);
+    p_alDeleteEffects(1, &fx);
+    run_for(100);
+    save_log();
+}
+
+static void log_tones(const char *what, double r500, double r5k, ALuint src, const char *expect) {
+    double p500, p5k;
+    (void)src;
+    measure_tones(&p500, &p5k);
+    logf_("   %s: 5 kHz %s dB, 500 Hz %s dB (%s)\n", what, dbs(db10(sqrt(p5k / r5k))),
+          dbs(db10(sqrt(p500 / r500))), expect);
+}
+
+static void phase_hf_auto(void) {
+    ALuint b = make_tones(), src;
+    double r500, r5k;
+    logf_("-- 6d air absorption and cone outer GAINHF on the voice lowpass (21 units ahead, reference 1)\n");
+    src = make_source(b);
+    alSource3f(src, AL_POSITION, 0.0f, 0.0f, -21.0f);
+    alSourcei(src, AL_LOOPING, AL_TRUE);
+    alSourcePlay(src);
+    measure_tones(&r500, &r5k);
+    alSourcef(src, AL_AIR_ABSORPTION_FACTOR, 10.0f);
+    log_tones("AIR_ABSORPTION_FACTOR 10 (20 m)", r500, r5k, src, "expected 5 kHz -10.0");
+    alSourcef(src, AL_AIR_ABSORPTION_FACTOR, 0.0f);
+    alSource3f(src, AL_DIRECTION, 0.0f, 0.0f, -1.0f);   /* pointing away from the listener */
+    alSourcef(src, AL_CONE_INNER_ANGLE, 30.0f);
+    alSourcef(src, AL_CONE_OUTER_ANGLE, 90.0f);
+    alSourcef(src, AL_CONE_OUTER_GAIN, 1.0f);
+    alSourcef(src, AL_CONE_OUTER_GAINHF, 0.25f);
+    log_tones("CONE_OUTER_GAINHF 0.25, outside the cone", r500, r5k, src, "expected 5 kHz -12.0");
+    alSourcei(src, AL_DIRECT_FILTER_GAINHF_AUTO, AL_FALSE);
+    log_tones("the same, GAINHF_AUTO off", r500, r5k, src, "expected 0.0 both");
+    alSourceStop(src);
+    alDeleteSources(1, &src);
+    alDeleteBuffers(1, &b);
+    logf_("   AL error 0x%x\n", (unsigned)alGetError());
+    save_log();
+}
+
+static void phase_spatialize(void) {
+    static int16_t pcm[2 * TONE_FRAMES];
+    ALuint b = 0, src;
+    double r, p;
+    uint32_t i, n;
+    logf_("-- 6e stereo and AL_SOFT_source_spatialize: a stereo 500 Hz tone 10 units ahead\n");
+    for (i = 0; i < TONE_FRAMES; i++) {
+        pcm[2u * i] = pcm[2u * i + 1u] = (int16_t)(8000.0f * sinf(TWO_PI * 500.0f * (float)i / 48000.0f));
+    }
+    alGenBuffers(1, &b);
+    alBufferData(b, AL_FORMAT_STEREO16, pcm, (ALsizei)sizeof(pcm), 48000);
+    src = make_source(b);
+    alSourcei(src, AL_LOOPING, AL_TRUE);
+    alSourcePlay(src);
+    run_for(150);
+    n = capture(400, NULL);
+    r = tone_power(n, 500.0);
+    alSource3f(src, AL_POSITION, 0.0f, 0.0f, -10.0f);
+    run_for(150);
+    n = capture(400, NULL);
+    p = tone_power(n, 500.0);
+    logf_("   AL_AUTO_SOFT at 10 units: %s dB (expected 0.0: stereo is not spatialized)\n", dbs(db10(sqrt(p / r))));
+    alSourcei(src, AL_SOURCE_SPATIALIZE_SOFT, AL_TRUE);
+    run_for(150);
+    n = capture(400, NULL);
+    p = tone_power(n, 500.0);
+    logf_("   AL_TRUE at 10 units: %s dB (expected -20.0)\n", dbs(db10(sqrt(p / r))));
+
+    logf_("-- 6f ALC_SOFT_pause_device\n");
+    alSourcei(src, AL_SOURCE_SPATIALIZE_SOFT, AL_AUTO_SOFT);
+    alcDevicePauseSOFT(s_dev);
+    run_for(150);
+    n = capture(400, NULL);
+    p = tone_power(n, 500.0);
+    {
+        ALint st = 0;
+        alGetSourcei(src, AL_SOURCE_STATE, &st);
+        logf_("   paused: %s dB (expected silence), source %s\n", dbs(db10(sqrt(p / r))),
+              st == AL_PLAYING ? "AL_PLAYING" : "NOT PLAYING");
+    }
+    alcDeviceResumeSOFT(s_dev);
+    run_for(150);
+    n = capture(400, NULL);
+    p = tone_power(n, 500.0);
+    logf_("   resumed: %s dB (expected 0.0); ALC error 0x%x, AL error 0x%x\n", dbs(db10(sqrt(p / r))),
+          (unsigned)alcGetError(s_dev), (unsigned)alGetError());
+    alSourceStop(src);
+    alDeleteSources(1, &src);
+    alDeleteBuffers(1, &b);
+    save_log();
+}
+
 /* ---------------------------------------------------------------- 7: listening */
 
 #define LOOP_FRAMES 96000u   /* 2 s */
@@ -663,6 +791,7 @@ int main(void) {
         ctx = dev ? alcCreateContext(dev, attrs) : NULL;
     }
     alcMakeContextCurrent(ctx);
+    s_dev = dev;
     alcGetIntegerv(dev, ALC_MAX_AUXILIARY_SENDS, 1, &sends);
     logf_("ALC_EXT_EFX %s, %d sends; entry points %s; GP program %s\n",
           alcIsExtensionPresent(dev, ALC_EXT_EFX_NAME) ? "present" : "MISSING", (int)sends,
@@ -686,6 +815,9 @@ int main(void) {
     phase_echo();
     phase_back();
     phase_lowpass();
+    phase_efx_echo();
+    phase_hf_auto();
+    phase_spatialize();
     phase_listen();
     return 0;
 }
