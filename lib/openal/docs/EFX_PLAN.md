@@ -85,6 +85,9 @@ Toolchain note: nxdk's pdclib `lrint*()` is an `assert(0)` stub; round by hand.
 - A send is two voice outputs: send 0 = outputs 4/5, send 1 = outputs 6/7. Stereo voices put left on the even
   output, right on the odd one; mono voices feed both. Each output carries half the send's gain, so L + R, which
   mono-input kernels (the reverb) read, is the send; stereo-input kernels (Half-Life) read the pair.
+  **Since phase 9:** a stereo source into a custom kernel (`AL_EFFECT_XBOX_GP_PROGRAM`) sends each channel at
+  the whole send gain instead, so send 1 is attenuation 0 and the kernel reads the samples unscaled (the Xash
+  port asked for it: 0.5 is not exact in 1/64 dB steps, so a doubled half cannot be bit-exact).
 - **As built (phase8-03):** with one effect per device every send goes to the kernel's input pair, **bins 2/3**,
   whatever its slot; a send whose slot does not hold the active effect is muted. Moving a send or an effect
   between slots therefore only changes volumes, which a playing voice takes live, so nothing waits for the
