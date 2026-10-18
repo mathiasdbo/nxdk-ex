@@ -273,12 +273,19 @@ def test_efx_echo():
     left, right = run_echo(gp, 24, {(2, 5): half})
     assert hits(left) == [(105, 0x2000), (355, 0x1000), (605, 0x800)], 'feedback left: %s' % hits(left)
     assert hits(right) == [(255, 0x2000), (505, 0x1000), (755, 0x800)], 'feedback right: %s' % hits(right)
-    # damping pole 0.5: the line takes 0.5 s, then halves a sample (1 - p) p^n
+    # damping pole 0.5 with feedback 0.5: the first echo of each tap is undamped,
+    # the fed-back copy is lowpassed, (1 - p) p^n, so the repeats get darker
+    gp = new_kernel_gp(EFX_ECHO)
+    load_custom(gp, [100, 250, half, half, half, 0, 0, half], s['K_SCRATCH_BYTES'])
+    left, right = run_echo(gp, 24, {(2, 5): half})
+    h, hr = dict(hits(left)), dict(hits(right))
+    assert h.get(105) == 0x2000 and hr.get(255) == 0x2000, 'damping, first echo: %s' % hits(left)[:4]
+    assert h.get(355) == 0x800 and h.get(356) == 0x400 and h.get(357) == 0x200, 'damping, repeat: %s' % hits(left)[:5]
+    # no feedback: damping leaves the taps alone
     gp = new_kernel_gp(EFX_ECHO)
     load_custom(gp, [100, 250, 0, half, half, 0, 0, 0], s['K_SCRATCH_BYTES'])
     left, _ = run_echo(gp, 6, {(2, 5): half})
-    h = dict(hits(left))
-    assert h.get(105) == 0x1000 and h.get(106) == 0x800 and h.get(107) == 0x400, 'damping: %s' % hits(left)[:4]
+    assert hits(left) == [(105, 0x2000)], 'damping, no feedback: %s' % hits(left)
     # delays below 32 samples are clamped (a tap must lie in written blocks)
     gp = new_kernel_gp(EFX_ECHO)
     load_custom(gp, [3, 3, 0, 0, half, 0, 0, 0], s['K_SCRATCH_BYTES'])

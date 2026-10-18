@@ -6,8 +6,8 @@
 ; One delay line, two taps:
 ;   t1 = line[t - D1], t2 = line[t - D2]          D2 = DELAY + LRDELAY
 ;   OUT L += G1L t1 + G2L t2;  OUT R += G1R t1 + G2R t2   (SPREAD, constant power)
-;   line[t] = lp(m + FEEDBACK t2)                  lp: one pole, DAMPING
-; so each repeat is darker than the one before.
+;   line[t] = m + FEEDBACK lp(t2)                  lp: one pole, DAMPING
+; so the first echo is the input as it came and each repeat is darker.
 ; Parameters (KPARAM + n), set by the library from the EFX echo:
 ;   0  D1 in samples, 1  D2 in samples (both clamped to 32 .. MAXDLY)
 ;   2  feedback, 3  damping pole, 4..7  G1L G1R G2L G2R (all Q23)
@@ -99,7 +99,7 @@ ready   move    #T1,r0
         move    x:KPARAM+7,y1           ; G2R
         jsr     taps
 
-; the line's next block: lp(m + FEEDBACK t2)
+; the line's next block: m + FEEDBACK lp(t2)
         move    x:KIN,r4
         move    x:KIN,a
         add     #32,a
@@ -110,18 +110,18 @@ ready   move    #T1,r0
         move    x:KPARAM+3,y1           ; damping pole
         move    x:LPST,b
         do      #32,line_end
+        move    x:(r1)+,x1              ; t2
+        tfr     b,a
+        sub     x1,a                    ; lp - t2
+        move    a,x0
+        tfr     x1,b
+        mac     x0,y1,b                 ; lp = t2 + p (lp - t2)
+        move    b,x1                    ; lp (limited)
         move    x:(r4)+,a               ; left bin
         move    x:(r5)+,x0
         add     x0,a                    ; m
-        move    x:(r1)+,x0
-        mac     x0,y0,a                 ; s = m + FEEDBACK t2
-        move    a,x1                    ; s (limited)
-        tfr     b,a
-        sub     x1,a                    ; lp - s
-        move    a,x0
-        tfr     x1,b
-        mac     x0,y1,b                 ; lp = s + p (lp - s)
-        move    b,x:(r2)+
+        mac     x1,y0,a                 ; m + FEEDBACK lp
+        move    a,x:(r2)+
 line_end
         move    b,x:LPST
 
