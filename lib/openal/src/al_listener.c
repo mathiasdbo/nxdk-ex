@@ -230,6 +230,8 @@ AL_API void AL_APIENTRY alListenerf(ALenum param, ALfloat value) {
         case AL_METERS_PER_UNIT:
             if (!al_efx_set_meters_per_unit(value)) {
                 alSetError(AL_INVALID_VALUE);
+            } else {
+                al_source_update_all_spatial();   /* air absorption depends on it */
             }
             break;
 

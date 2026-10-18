@@ -67,6 +67,8 @@ typedef struct AL_SPATIAL_CALC {
     float distance_gain;      /**< Distance attenuation gain factor [0.0..1.0+] */
     float cone_gain;          /**< Directional sound cone gain factor [0.0..1.0] */
     float effective_gain;     /**< Combined clamped gain multiplied by listener gain */
+    float gain_hf;            /**< High-frequency gain at 5 kHz for the voice filter (EFX: the direct filter's
+                                   GAINHF x, with AL_DIRECT_FILTER_GAINHF_AUTO, cone outer GAINHF and air absorption) */
     float doppler_pitch;      /**< Doppler pitch multiplier (>1 approaching, <1 receding) */
     uint16_t itd_delay_left;  /**< ITD left ear delay tap in samples [0..64] */
     uint16_t itd_delay_right; /**< ITD right ear delay tap in samples [0..64] */

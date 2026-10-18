@@ -94,8 +94,9 @@ Toolchain note: nxdk's pdclib `lrint*()` is an `assert(0)` stub; round by hand.
   live-`VBIN` probe. The per-slot pairs (slot k on bins 2+2k / 3+2k) come with several kernels.
 - Send volume = source gain x distance attenuation with `AL_ROOM_ROLLOFF_FACTOR` (and the effect's room
   rolloff, as the spec adds them) x send-filter gain. `AL_AUXILIARY_SEND_FILTER_GAIN_AUTO` follows the spec;
-  the HF parts (`AL_AIR_ABSORPTION_FACTOR`, `AL_CONE_OUTER_GAINHF`, `*_GAINHF_AUTO`) are stored and wait for
-  filters. `AL_METERS_PER_UNIT` on the listener is stored (used by air absorption later).
+  the HF parts wait for filters. **Phase 9:** `AL_AIR_ABSORPTION_FACTOR` and `AL_CONE_OUTER_GAINHF` (with
+  `AL_DIRECT_FILTER_GAINHF_AUTO`) multiply into the voice lowpass's `GAINHF`; the send HF auto flag stays stored
+  (one filter per voice). `AL_METERS_PER_UNIT` on the listener scales the air absorption's distances.
 - `AL_EFFECTSLOT_GAIN` is the reverb's wet gain on the GP (one word, live); for a custom kernel it scales the
   sends into it (the kernel has no word for it). `AL_EFFECTSLOT_AUXILIARY_SEND_AUTO`
   is stored and honoured with the source auto flags.
