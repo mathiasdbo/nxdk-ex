@@ -1,7 +1,7 @@
 # ALC_EXT_EFX on the APU: implementation plan
 
-Branch `feat/openal-efx`. Workflow phase 8 (`.agents/workflow/state.json`). Status: phase8-00 (console probe) done,
-results in 2.1; phase8-01..04 done on the host, phase8-02's reverb confirmed on a console (2.1); phase 05 to do.
+Branch `feat/openal-efx`. Workflow phase 8 (`.agents/workflow/state.json`). Status: phase 1 done (phase8-00..05);
+the reverb, the custom echo kernel and the sends confirmed on a console (2.1).
 
 ## 1. Goal
 
@@ -49,7 +49,7 @@ Also from the tree:
 
 ### 2.1 Console results (phase8-00, 2026-10-17)
 
-`samples/apu_efx_probe`, log `E:pu_efx_probe.txt`; RMS on a 5657 tone, frame rate 1493-1505/s throughout.
+`samples/apu_efx_probe`, log `E:\apu_efx_probe.txt`; RMS on a 5657 tone, frame rate 1493-1505/s throughout.
 
 | Probe | Result |
 |---|---|
@@ -58,6 +58,7 @@ Also from the tree:
 | Live re-route | `CFG_VBIN` and the `CFG_FMT` bin bits move a playing voice's outputs at once. Dry bins: no click (largest step 1048 against the tone's 1044). The moved send starts abruptly (step 3062): a live move needs a volume ramp. Not needed by 3.2 (only volumes change) |
 | VP filter | Live writes work. `FMODE` 0 and `FMODE` 2 with Q 0 are flat (within the +-3 dB of the band estimate). **`FMODE` 1: resonant 2-pole lowpass on `TAR_FCA`**: cutoff s4.12 in octaves (-0x1000 = one octave down, 0 about 8 kHz), Q (31:16) is damping (0: +25..33 dB peak, 0x4000: about +6 dB, about -12 dB/octave above). `FMODE` 2 with Q 0x4000: a boost around the cutoff (+7..+14 dB). `FMODE` 3 looks like 1 and 2 in series. FCA and FCB were written together; which mode uses which is open |
 | Mailbox / GP | (phase8-02 on the real loop) `apu_gp_reverb`: decay -29.8 / -9.9 dB at 0.5 s for T60 1 / 3 s (expected -30 / -10), waits max 810 polls, 0 timeouts, 0 underruns over 64 s: identical to the monolithic program |
+| EFX sample (phase8-05, 2026-10-18) | `samples/openal_efx`, all through the AL API. EFX reverb T60 1.5 s: -19.9 dB over 0.5 s (expected -20); send off: -41 dB. Echo kernel: loaded through the P window (no GP restart in any load of the run); dry -> echo exactly +1000 samples on both ears at -3.0 dB (wet 1, dry centre-panned), wet 0.5 gives -9.1; delay 2400 by re-attach: no reload, mailbox acknowledged after 1 frame, echo exactly +2400; feedback 0.5: +4800 / +9600 / +14400 / +19200 at -3.0 / -9.1 / -15.1 / -21.1 dB; sends 0 and 1 into one slot both echo +1000. GP load: reverb 34 %, echo 4 %. 5 min with the effect switching every 15 s (HRTF, panned and stereo sources): 0 underruns / padded / slips, zero-copy lead 1016..1056 |
 
 Toolchain note: nxdk's pdclib `lrint*()` is an `assert(0)` stub; round by hand.
 

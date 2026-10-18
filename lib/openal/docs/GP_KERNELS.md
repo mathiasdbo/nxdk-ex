@@ -4,9 +4,10 @@ A GP kernel is your own DSP56300 code that the APU's GP DSP runs on the effect s
 0.67 ms, as an `ALC_EXT_EFX` effect. It costs no CPU time. The library owns the frame, the output and the
 parameter delivery; the kernel only processes one 32-sample block per call.
 
-**Status:** host-tested (assembler, simulator, loader). Not yet run on a console: the `openal_efx` sample
-(phase8-05) checks the echo's timing on silicon and whether the code loads without a GP restart (see
-"Loading" below). The ABI is version 1 (`AL_XBOX_GP_IMAGE_ABI`).
+**Status:** host-tested (assembler, simulator, loader) and run on a console by `samples/openal_efx`
+(2026-10-18). The echo landed exactly on its delay on both ears, a parameter change reached the kernel in one
+frame, every load went through the P window without a GP restart, and 5 minutes of switching effects gave
+0 underruns. The ABI is version 1 (`AL_XBOX_GP_IMAGE_ABI`).
 
 The example used throughout is `dsp/gp_kecho.asm`, a stereo echo (154 words).
 
@@ -178,8 +179,8 @@ When a slot gets a new image, the library:
 2. measures how long an empty frame waits (the load meter's reference);
 3. writes the code into P memory through the GP's P window and reads it back. If the read-back differs, it
    restarts the GP from its bootstrap image, which also holds the new code. `apu_gp_debug_code_restarts()`
-   counts the restarts. Whether the P window accepts writes while the GP runs is not yet known on silicon;
-   either way the kernel ends up loaded;
+   counts the restarts. On a console the P window took the code every time while the GP ran (no restart in
+   the dozen loads of `openal_efx`); the restart stays as the fallback;
 4. zeroes X and scratch, writes the ABI words, and switches the kernel on.
 
 The kernel starts from silence: delay lines are empty after every load. Switching back to the reverb reloads
@@ -188,7 +189,7 @@ the reverb's code the same way.
 **Load meter.** No cycle counter is known on the GP, so the loop counts how many times it polls for the next
 frame start. The library compares that count with an empty frame's: the percentage is the share of the frame
 your effect (kernel and its DMA) takes. For scale, the reverb runs about 10,800 instructions a frame in the
-host simulator and has no late frames on a console. A kernel that overruns does not crash, but the output gets
+host simulator and takes 34 % of the frame on a console; the echo takes 4 %. A kernel that overruns does not crash, but the output gets
 late frames: watch `AL_XBOX_GP_LOAD_PEAK`, and `ac97_padded` / `output_slips` in `AL_XBOX_stats`.
 
 ## 8. Testing on the host

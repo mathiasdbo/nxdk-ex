@@ -1575,6 +1575,10 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
   With phase8-04's loop (116 words, counting its START_FRAME polls for `AL_XBOX_GP_LOAD`) the same run
   gives the same decay, 1499 frames/s, waits at most 806 polls, 0 timeouts, 0 underruns / padded; the
   showcase's reverb mode ran 68 s with 0 underruns, padded and slips.
+* EFX sample (phase8-05, `samples/openal_efx`, 2026-10-18; numbers in EFX_PLAN.md 2.1): an EFX reverb, the echo
+  kernel loaded with `alXboxEffectProgram` (through the P window while the GP ran, no restart), echo
+  sample-exact on both ears, a parameter change acknowledged in 1 frame, feedback 6 dB a repeat, two sends into
+  one slot; GP load 34 % (reverb) / 4 % (echo); 5 min of effect switching with 0 underruns, padded and slips.
 * Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
   from a spherical-head model (Brown-Duda head-shadow shelf per ear as a 31-tap int8 FIR, Woodworth ITD in
   s6.9; 32 azimuths x elevations -30/0/30/60; no measured data, no pinna cues). `apu_vp_init()` uploads it with
