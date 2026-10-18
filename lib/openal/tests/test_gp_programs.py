@@ -33,6 +33,7 @@ import dsp56sim  # noqa: E402
 LOOP = open(os.path.join(OPENAL, 'dsp', 'gp_loop.asm'), encoding='utf-8').read()
 KERNEL = open(os.path.join(OPENAL, 'dsp', 'gp_kfreeverb.asm'), encoding='utf-8').read()
 ECHO = open(os.path.join(OPENAL, 'dsp', 'gp_kecho.asm'), encoding='utf-8').read()
+EFX_ECHO = open(os.path.join(OPENAL, 'dsp', 'gp_kefx_echo.asm'), encoding='utf-8').read()
 
 COPY_DESC = [0x4000, 1 | 2 | (1 << 10) | (32 << 14), (32 << 4) | 1, 0x1400, 0, 0, 0]   # apu_gp.c
 
@@ -244,6 +245,50 @@ def test_echo():
           '%d instructions per frame [PASS]' % gp.frame_steps)
 
 
+def new_kernel_gp(src):
+    gp = dsp56sim.Gp(LOOP, extra=(src,))
+    for i, v in enumerate(COPY_DESC):
+        gp.x[i] = v
+    gp.run_until_wait()
+    return gp
+
+
+def test_efx_echo():
+    half = 0x400000
+    # two taps, hard spread (tap 1 left, tap 2 right), no feedback, no damping
+    gp = new_kernel_gp(EFX_ECHO)
+    s = gp.symbols
+    load_custom(gp, [100, 250, 0, 0, half, 0, 0, half], s['K_SCRATCH_BYTES'])
+    left, right = run_echo(gp, 14, {(2, 5): half})
+    assert hits(left) == [(105, 0x2000)], 'tap 1: %s' % hits(left)
+    assert hits(right) == [(255, 0x2000)], 'tap 2: %s' % hits(right)
+    # the right bin is summed in too
+    gp = new_kernel_gp(EFX_ECHO)
+    load_custom(gp, [100, 250, 0, 0, half, 0, 0, half], s['K_SCRATCH_BYTES'])
+    left, _ = run_echo(gp, 6, {(3, 5): half})
+    assert hits(left) == [(105, 0x2000)], 'right bin: %s' % hits(left)
+    # feedback 0.5: tap 2 goes back into the line; its copy shows on both taps
+    gp = new_kernel_gp(EFX_ECHO)
+    load_custom(gp, [100, 250, half, 0, half, 0, 0, half], s['K_SCRATCH_BYTES'])
+    left, right = run_echo(gp, 24, {(2, 5): half})
+    assert hits(left) == [(105, 0x2000), (355, 0x1000), (605, 0x800)], 'feedback left: %s' % hits(left)
+    assert hits(right) == [(255, 0x2000), (505, 0x1000), (755, 0x800)], 'feedback right: %s' % hits(right)
+    # damping pole 0.5: the line takes 0.5 s, then halves a sample (1 - p) p^n
+    gp = new_kernel_gp(EFX_ECHO)
+    load_custom(gp, [100, 250, 0, half, half, 0, 0, 0], s['K_SCRATCH_BYTES'])
+    left, _ = run_echo(gp, 6, {(2, 5): half})
+    h = dict(hits(left))
+    assert h.get(105) == 0x1000 and h.get(106) == 0x800 and h.get(107) == 0x400, 'damping: %s' % hits(left)[:4]
+    # delays below 32 samples are clamped (a tap must lie in written blocks)
+    gp = new_kernel_gp(EFX_ECHO)
+    load_custom(gp, [3, 3, 0, 0, half, 0, 0, 0], s['K_SCRATCH_BYTES'])
+    left, _ = run_echo(gp, 6, {(2, 40): half})
+    assert hits(left) == [(72, 0x2000)], 'clamp: %s' % hits(left)
+    assert gp.x[s['TMOUT']] == 0, 'a DMA wait timed out'
+    print('[6] EFX echo kernel: two taps, spread, both bins summed, feedback through tap 2, damping, clamp; '
+          '%d instructions per frame [PASS]' % gp.frame_steps)
+
+
 def main():
     test_copy()
     with tempfile.TemporaryDirectory(prefix='gpsim_') as tmp:
@@ -255,6 +300,7 @@ def main():
     gp = test_mailbox()
     test_burn(gp)
     test_echo()
+    test_efx_echo()
     print('=== GP programs on the host: all passed ===')
 
 

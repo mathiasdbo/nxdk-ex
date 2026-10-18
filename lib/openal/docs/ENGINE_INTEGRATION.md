@@ -317,8 +317,13 @@ alSource3i(src, AL_AUXILIARY_SEND_FILTER, (ALint)slot, 0, AL_FILTER_NULL);   /* 
 - **What there is:**
   - `ALC_EXT_EFX` 1.0 in the device's extension string. Every EFX function is available through
     `alGetProcAddress`.
-  - Effect types: `AL_EFFECT_NULL`, `AL_EFFECT_REVERB`, `AL_EFFECT_EAXREVERB` and `AL_EFFECT_XBOX_GP_PROGRAM`
-    (3.13). Other types give `AL_INVALID_VALUE`, as the extension allows.
+  - Effect types: `AL_EFFECT_NULL`, `AL_EFFECT_REVERB`, `AL_EFFECT_EAXREVERB`, `AL_EFFECT_ECHO` (below) and
+    `AL_EFFECT_XBOX_GP_PROGRAM` (3.13). Other types give `AL_INVALID_VALUE`, as the extension allows.
+  - **`AL_EFFECT_ECHO`** runs on a library kernel on the GP, with every EFX echo parameter: two taps at `DELAY`
+    and `DELAY + LRDELAY` from one delay line, panned by `SPREAD` (constant power), the second tap fed back
+    by `FEEDBACK` through a one-pole lowpass set by `DAMPING`, so each repeat is darker. The input is the
+    slot's sends summed to mono. Taps closer than 32 samples (0.67 ms) are moved to 32. `AL_EFFECTSLOT_GAIN`
+    scales the sends into it. Parameter changes reach it when the effect is attached again, in one frame.
   - Filters: `AL_FILTER_NULL` and `AL_FILTER_LOWPASS` (below). Highpass and bandpass give `AL_INVALID_VALUE`.
   - Up to 4 slots and 256 effects and filters. `ALC_MAX_AUXILIARY_SENDS` is 2 (the default; larger requests are
     clamped).

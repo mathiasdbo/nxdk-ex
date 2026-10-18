@@ -63,7 +63,8 @@ Every call, token, range and error is in [`docs/API_REFERENCE.md`](docs/API_REFE
   `alGetInteger*`, `alGetFloat*`, `alEnable`/`alDisable`/`alIsEnabled` (`AL_XBOX_HRTF`, `AL_XBOX_REVERB`).
 - **Effects (`ALC_EXT_EFX` 1.0, `AL/efx.h`):** effects, filters and auxiliary effect slots with every EFX
   function and token; source sends and send filters, the EFX source and listener parameters. Effect types
-  null, reverb and EAX reverb (on the GP's reverb) and `AL_EFFECT_XBOX_GP_PROGRAM` (your own GP kernel);
+  null, reverb and EAX reverb (on the GP's reverb), echo (a library GP kernel) and `AL_EFFECT_XBOX_GP_PROGRAM`
+  (your own GP kernel);
   filters `AL_FILTER_NULL` and `AL_FILTER_LOWPASS` (on the voice's hardware filter). 4 slots, one of them
   holding an effect at a time; 2 sends per source.
 

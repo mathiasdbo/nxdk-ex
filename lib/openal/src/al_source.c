@@ -499,8 +499,8 @@ static float efx_send_gain(const ALsource *src, const AL_SPATIAL_CALC *calc, con
     if (g < src->min_gain) g = src->min_gain;
     if (g > src->max_gain) g = src->max_gain;
     g *= al_listener_get_gain();
-    if (slot && slot->props.type == AL_EFFECT_XBOX_GP_PROGRAM) {
-        g *= slot->gain;
+    if (al_efx_slot_is_kernel(slot)) {
+        g *= slot->gain;   /* a kernel has no word for it: scale its input */
     }
     return (g < 0.0f) ? 0.0f : ((g > 1.0f) ? 1.0f : g);
 }

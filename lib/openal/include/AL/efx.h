@@ -107,6 +107,22 @@ extern "C" {
 #define AL_ECHO_FEEDBACK                         0x0004
 #define AL_ECHO_SPREAD                           0x0005
 
+#define AL_ECHO_MIN_DELAY                        (0.0f)
+#define AL_ECHO_MAX_DELAY                        (0.207f)
+#define AL_ECHO_DEFAULT_DELAY                    (0.1f)
+#define AL_ECHO_MIN_LRDELAY                      (0.0f)
+#define AL_ECHO_MAX_LRDELAY                      (0.404f)
+#define AL_ECHO_DEFAULT_LRDELAY                  (0.1f)
+#define AL_ECHO_MIN_DAMPING                      (0.0f)
+#define AL_ECHO_MAX_DAMPING                      (0.99f)
+#define AL_ECHO_DEFAULT_DAMPING                  (0.5f)
+#define AL_ECHO_MIN_FEEDBACK                     (0.0f)
+#define AL_ECHO_MAX_FEEDBACK                     (1.0f)
+#define AL_ECHO_DEFAULT_FEEDBACK                 (0.5f)
+#define AL_ECHO_MIN_SPREAD                       (-1.0f)
+#define AL_ECHO_MAX_SPREAD                       (1.0f)
+#define AL_ECHO_DEFAULT_SPREAD                   (-1.0f)
+
 /* Flanger */
 #define AL_FLANGER_WAVEFORM                      0x0001
 #define AL_FLANGER_PHASE                         0x0002

@@ -18,9 +18,9 @@ Branch `feat/openal-soft-gap`. Workflow phase 9 (`.agents/workflow/state.json`).
 |---|---|---|
 | phase9-01 | Air absorption and cone outer GAINHF on the voice lowpass, with `AL_DIRECT_FILTER_GAINHF_AUTO`. **Done** | none (EFX tokens) |
 | phase9-02 | Stereo sends into a custom kernel at full gain per channel (Xash port request: an exact 0 dB transport). **Done** (#47) | none (behaviour) |
-| phase9-03 | OpenAL Soft extensions done on the CPU: `AL_SOFT_deferred_updates`, `AL_SOFT_source_latency`, `AL_SOFT_direct_channels`, `AL_SOFT_source_spatialize`, `AL_EXT_source_distance_model`, `AL_SOFT_gain_clamp_ex`, `AL_EXT_FLOAT32` (converted at upload), `ALC_SOFT_pause_device`, `ALC_SOFT_HRTF` (switches the APU HRTF) | adds the extensions' own tokens |
+| phase9-03 | **Done** (c53a77f, 1258140). OpenAL Soft extensions done on the CPU: `AL_SOFT_deferred_updates`, `AL_SOFT_source_latency`, `AL_SOFT_direct_channels`, `AL_SOFT_source_spatialize`, `AL_EXT_source_distance_model`, `AL_SOFT_gain_clamp_ex`, `AL_EXT_FLOAT32` (converted at upload), `ALC_SOFT_pause_device`, `ALC_SOFT_HRTF` (switches the APU HRTF) | adds the extensions' own tokens |
 | phase9-04 | Several effects at once: relocatable kernel images (`dsp56asm.py` relocations), a GP loop that runs one kernel per active slot, slot k on bins 2+2k / 3+2k, sends routed by `VBIN` with a volume ramp on a move, shared budgets checked at attach | `AL_INVALID_OPERATION` only when the budgets are full |
-| phase9-05 | `AL_EFFECT_ECHO` as a library kernel (delay, LR delay, damping, feedback, spread) | EFX tokens |
+| phase9-05 | `AL_EFFECT_ECHO` as a library kernel (delay, LR delay, damping, feedback, spread). **Done** on the host (`dsp/gp_kefx_echo.asm`: 169 words, 3 descriptors, 128 KiB scratch, about 1940 instructions a frame in the simulator); console check in phase9-08 | EFX tokens (+ the echo's min / max / default constants in `efx.h`) |
 | phase9-06 | `AL_EFFECT_CHORUS` and `AL_EFFECT_FLANGER` (modulated delays read from scratch) | EFX tokens |
 | phase9-07 | On-chip effects: ring modulator, distortion, equalizer, compressor, autowah | EFX tokens |
 | phase9-08 | Sample, docs, console run | - |
