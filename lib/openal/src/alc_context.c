@@ -598,7 +598,7 @@ ALC_API const ALCchar * ALC_APIENTRY alcGetString(ALCdevice *device, ALCenum par
             return "MCPX APU 5.1 Surround\0";
 
         case ALC_EXTENSIONS:
-            return "ALC_EXT_EFX";
+            return "ALC_EXT_EFX ALC_EXT_disconnect";
 
         case ALC_CAPTURE_DEVICE_SPECIFIER:
         case ALC_CAPTURE_DEFAULT_DEVICE_SPECIFIER:
@@ -692,6 +692,15 @@ ALC_API void ALC_APIENTRY alcGetIntegerv(ALCdevice *device, ALCenum param, ALCsi
             *values = alc_aux_sends(device);
             break;
 
+        /* ALC_EXT_disconnect */
+        case ALC_CONNECTED:
+            if (device == NULL) {
+                alc_set_error(NULL, ALC_INVALID_DEVICE);
+                return;
+            }
+            *values = device->is_open ? ALC_TRUE : ALC_FALSE;
+            break;
+
         case ALC_XBOX_TOPOLOGY:
             if (device != NULL) {
                 *values = (ALCint)device->topology;
@@ -715,7 +724,7 @@ ALC_API void ALC_APIENTRY alcGetIntegerv(ALCdevice *device, ALCenum param, ALCsi
 ALC_API ALCboolean ALC_APIENTRY alcIsExtensionPresent(ALCdevice *device, const ALCchar *extname) {
     (void)device;
     /* Keep in sync with alcGetString(ALC_EXTENSIONS) */
-    if (extname != NULL && strcmp(extname, ALC_EXT_EFX_NAME) == 0) {
+    if (extname != NULL && (strcmp(extname, ALC_EXT_EFX_NAME) == 0 || strcmp(extname, "ALC_EXT_disconnect") == 0)) {
         return ALC_TRUE;
     }
     return ALC_FALSE;
@@ -726,9 +735,159 @@ ALC_API void * ALC_APIENTRY alcGetProcAddress(ALCdevice *device, const ALCchar *
     return alc_lookup_proc(funcname);
 }
 
+/* alcGetEnumValue / alGetEnumValue: the tokens by name (0: not known) */
+static const struct { const char *name; int value; } s_alc_enums[] = {
+    { "ALC_FALSE", ALC_FALSE },
+    { "ALC_TRUE", ALC_TRUE },
+    { "ALC_FREQUENCY", ALC_FREQUENCY },
+    { "ALC_REFRESH", ALC_REFRESH },
+    { "ALC_SYNC", ALC_SYNC },
+    { "ALC_MONO_SOURCES", ALC_MONO_SOURCES },
+    { "ALC_STEREO_SOURCES", ALC_STEREO_SOURCES },
+    { "ALC_NO_ERROR", ALC_NO_ERROR },
+    { "ALC_INVALID_DEVICE", ALC_INVALID_DEVICE },
+    { "ALC_INVALID_CONTEXT", ALC_INVALID_CONTEXT },
+    { "ALC_INVALID_ENUM", ALC_INVALID_ENUM },
+    { "ALC_INVALID_VALUE", ALC_INVALID_VALUE },
+    { "ALC_OUT_OF_MEMORY", ALC_OUT_OF_MEMORY },
+    { "ALC_MAJOR_VERSION", ALC_MAJOR_VERSION },
+    { "ALC_MINOR_VERSION", ALC_MINOR_VERSION },
+    { "ALC_ATTRIBUTES_SIZE", ALC_ATTRIBUTES_SIZE },
+    { "ALC_ALL_ATTRIBUTES", ALC_ALL_ATTRIBUTES },
+    { "ALC_DEFAULT_DEVICE_SPECIFIER", ALC_DEFAULT_DEVICE_SPECIFIER },
+    { "ALC_DEVICE_SPECIFIER", ALC_DEVICE_SPECIFIER },
+    { "ALC_EXTENSIONS", ALC_EXTENSIONS },
+    { "ALC_DEFAULT_ALL_DEVICES_SPECIFIER", ALC_DEFAULT_ALL_DEVICES_SPECIFIER },
+    { "ALC_ALL_DEVICES_SPECIFIER", ALC_ALL_DEVICES_SPECIFIER },
+    { "ALC_CAPTURE_SAMPLES", ALC_CAPTURE_SAMPLES },
+    { "ALC_EFX_MAJOR_VERSION", ALC_EFX_MAJOR_VERSION },
+    { "ALC_EFX_MINOR_VERSION", ALC_EFX_MINOR_VERSION },
+    { "ALC_MAX_AUXILIARY_SENDS", ALC_MAX_AUXILIARY_SENDS },
+    { "ALC_CONNECTED", ALC_CONNECTED },
+};
+
+static const struct { const char *name; int value; } s_al_enums[] = {
+    { "AL_NONE", AL_NONE },
+    { "AL_FALSE", AL_FALSE },
+    { "AL_TRUE", AL_TRUE },
+    { "AL_SOURCE_RELATIVE", AL_SOURCE_RELATIVE },
+    { "AL_CONE_INNER_ANGLE", AL_CONE_INNER_ANGLE },
+    { "AL_CONE_OUTER_ANGLE", AL_CONE_OUTER_ANGLE },
+    { "AL_PITCH", AL_PITCH },
+    { "AL_POSITION", AL_POSITION },
+    { "AL_DIRECTION", AL_DIRECTION },
+    { "AL_VELOCITY", AL_VELOCITY },
+    { "AL_LOOPING", AL_LOOPING },
+    { "AL_BUFFER", AL_BUFFER },
+    { "AL_GAIN", AL_GAIN },
+    { "AL_MIN_GAIN", AL_MIN_GAIN },
+    { "AL_MAX_GAIN", AL_MAX_GAIN },
+    { "AL_ORIENTATION", AL_ORIENTATION },
+    { "AL_SOURCE_STATE", AL_SOURCE_STATE },
+    { "AL_INITIAL", AL_INITIAL },
+    { "AL_PLAYING", AL_PLAYING },
+    { "AL_PAUSED", AL_PAUSED },
+    { "AL_STOPPED", AL_STOPPED },
+    { "AL_BUFFERS_QUEUED", AL_BUFFERS_QUEUED },
+    { "AL_BUFFERS_PROCESSED", AL_BUFFERS_PROCESSED },
+    { "AL_REFERENCE_DISTANCE", AL_REFERENCE_DISTANCE },
+    { "AL_ROLLOFF_FACTOR", AL_ROLLOFF_FACTOR },
+    { "AL_CONE_OUTER_GAIN", AL_CONE_OUTER_GAIN },
+    { "AL_MAX_DISTANCE", AL_MAX_DISTANCE },
+    { "AL_SEC_OFFSET", AL_SEC_OFFSET },
+    { "AL_SAMPLE_OFFSET", AL_SAMPLE_OFFSET },
+    { "AL_BYTE_OFFSET", AL_BYTE_OFFSET },
+    { "AL_SOURCE_TYPE", AL_SOURCE_TYPE },
+    { "AL_STATIC", AL_STATIC },
+    { "AL_STREAMING", AL_STREAMING },
+    { "AL_UNDETERMINED", AL_UNDETERMINED },
+    { "AL_FORMAT_MONO8", AL_FORMAT_MONO8 },
+    { "AL_FORMAT_MONO16", AL_FORMAT_MONO16 },
+    { "AL_FORMAT_STEREO8", AL_FORMAT_STEREO8 },
+    { "AL_FORMAT_STEREO16", AL_FORMAT_STEREO16 },
+    { "AL_FREQUENCY", AL_FREQUENCY },
+    { "AL_BITS", AL_BITS },
+    { "AL_CHANNELS", AL_CHANNELS },
+    { "AL_SIZE", AL_SIZE },
+    { "AL_UNUSED", AL_UNUSED },
+    { "AL_PENDING", AL_PENDING },
+    { "AL_PROCESSED", AL_PROCESSED },
+    { "AL_NO_ERROR", AL_NO_ERROR },
+    { "AL_INVALID_NAME", AL_INVALID_NAME },
+    { "AL_INVALID_ENUM", AL_INVALID_ENUM },
+    { "AL_INVALID_VALUE", AL_INVALID_VALUE },
+    { "AL_INVALID_OPERATION", AL_INVALID_OPERATION },
+    { "AL_OUT_OF_MEMORY", AL_OUT_OF_MEMORY },
+    { "AL_VENDOR", AL_VENDOR },
+    { "AL_VERSION", AL_VERSION },
+    { "AL_RENDERER", AL_RENDERER },
+    { "AL_EXTENSIONS", AL_EXTENSIONS },
+    { "AL_DOPPLER_FACTOR", AL_DOPPLER_FACTOR },
+    { "AL_DOPPLER_VELOCITY", AL_DOPPLER_VELOCITY },
+    { "AL_SPEED_OF_SOUND", AL_SPEED_OF_SOUND },
+    { "AL_DISTANCE_MODEL", AL_DISTANCE_MODEL },
+    { "AL_INVERSE_DISTANCE", AL_INVERSE_DISTANCE },
+    { "AL_INVERSE_DISTANCE_CLAMPED", AL_INVERSE_DISTANCE_CLAMPED },
+    { "AL_LINEAR_DISTANCE", AL_LINEAR_DISTANCE },
+    { "AL_LINEAR_DISTANCE_CLAMPED", AL_LINEAR_DISTANCE_CLAMPED },
+    { "AL_EXPONENT_DISTANCE", AL_EXPONENT_DISTANCE },
+    { "AL_EXPONENT_DISTANCE_CLAMPED", AL_EXPONENT_DISTANCE_CLAMPED },
+    { "AL_FORMAT_MONO_FLOAT32", AL_FORMAT_MONO_FLOAT32 },
+    { "AL_FORMAT_STEREO_FLOAT32", AL_FORMAT_STEREO_FLOAT32 },
+    { "AL_SOURCE_DISTANCE_MODEL", AL_SOURCE_DISTANCE_MODEL },
+    { "AL_GAIN_LIMIT_SOFT", AL_GAIN_LIMIT_SOFT },
+    { "AL_DIRECT_CHANNELS_SOFT", AL_DIRECT_CHANNELS_SOFT },
+    { "AL_SOURCE_SPATIALIZE_SOFT", AL_SOURCE_SPATIALIZE_SOFT },
+    { "AL_AUTO_SOFT", AL_AUTO_SOFT },
+    { "AL_LOOP_POINTS_SOFT", AL_LOOP_POINTS_SOFT },
+    { "AL_FORMAT_MONO_XBOX_ADPCM", AL_FORMAT_MONO_XBOX_ADPCM },
+    { "AL_FORMAT_STEREO_XBOX_ADPCM", AL_FORMAT_STEREO_XBOX_ADPCM },
+    { "AL_METERS_PER_UNIT", AL_METERS_PER_UNIT },
+    { "AL_DIRECT_FILTER", AL_DIRECT_FILTER },
+    { "AL_AUXILIARY_SEND_FILTER", AL_AUXILIARY_SEND_FILTER },
+    { "AL_AIR_ABSORPTION_FACTOR", AL_AIR_ABSORPTION_FACTOR },
+    { "AL_ROOM_ROLLOFF_FACTOR", AL_ROOM_ROLLOFF_FACTOR },
+    { "AL_CONE_OUTER_GAINHF", AL_CONE_OUTER_GAINHF },
+    { "AL_DIRECT_FILTER_GAINHF_AUTO", AL_DIRECT_FILTER_GAINHF_AUTO },
+    { "AL_AUXILIARY_SEND_FILTER_GAIN_AUTO", AL_AUXILIARY_SEND_FILTER_GAIN_AUTO },
+    { "AL_AUXILIARY_SEND_FILTER_GAINHF_AUTO", AL_AUXILIARY_SEND_FILTER_GAINHF_AUTO },
+    { "AL_EFFECT_TYPE", AL_EFFECT_TYPE },
+    { "AL_EFFECT_NULL", AL_EFFECT_NULL },
+    { "AL_EFFECT_REVERB", AL_EFFECT_REVERB },
+    { "AL_EFFECT_EAXREVERB", AL_EFFECT_EAXREVERB },
+    { "AL_EFFECT_XBOX_GP_PROGRAM", AL_EFFECT_XBOX_GP_PROGRAM },
+    { "AL_EFFECTSLOT_EFFECT", AL_EFFECTSLOT_EFFECT },
+    { "AL_EFFECTSLOT_GAIN", AL_EFFECTSLOT_GAIN },
+    { "AL_EFFECTSLOT_AUXILIARY_SEND_AUTO", AL_EFFECTSLOT_AUXILIARY_SEND_AUTO },
+    { "AL_EFFECTSLOT_NULL", AL_EFFECTSLOT_NULL },
+    { "AL_FILTER_TYPE", AL_FILTER_TYPE },
+    { "AL_FILTER_NULL", AL_FILTER_NULL },
+    { "AL_FILTER_LOWPASS", AL_FILTER_LOWPASS },
+    { "AL_LOWPASS_GAIN", AL_LOWPASS_GAIN },
+    { "AL_LOWPASS_GAINHF", AL_LOWPASS_GAINHF },
+    { "AL_XBOX_HRTF", AL_XBOX_HRTF },
+    { "AL_XBOX_REVERB", AL_XBOX_REVERB },
+    { "AL_XBOX_REVERB_SEND", AL_XBOX_REVERB_SEND },
+    { "AL_XBOX_DIRECT_GAINS", AL_XBOX_DIRECT_GAINS },
+    { "AL_XBOX_DIRECT_MODE", AL_XBOX_DIRECT_MODE },
+    { "AL_XBOX_PRIORITY", AL_XBOX_PRIORITY },
+    { "AL_XBOX_VIRTUALIZE", AL_XBOX_VIRTUALIZE },
+    { "AL_XBOX_HAS_VOICE", AL_XBOX_HAS_VOICE },
+    { "AL_XBOX_GP_PARAM0", AL_XBOX_GP_PARAM0 },
+};
+
 ALC_API ALCenum ALC_APIENTRY alcGetEnumValue(ALCdevice *device, const ALCchar *enumname) {
+    const char *ename = enumname;
     (void)device;
-    (void)enumname;
+    size_t i;
+    if (ename == NULL) {
+        return 0;
+    }
+    for (i = 0; i < sizeof(s_alc_enums) / sizeof(s_alc_enums[0]); i++) {
+        if (strcmp(ename, s_alc_enums[i].name) == 0) {
+            return (ALCenum)s_alc_enums[i].value;
+        }
+    }
     return 0;
 }
 
@@ -783,7 +942,9 @@ AL_API const ALchar * AL_APIENTRY alGetString(ALenum param) {
                        ? "MCPX APU (MMIO backend)"
                        : "MCPX APU (null backend)";
         case AL_EXTENSIONS:
-            return "AL_EXT_OFFSET AL_EXT_STATIC_BUFFER AL_SOFT_loop_points AL_XBOX_hardware_status AL_XBOX_hrtf "
+            return "AL_EXT_FLOAT32 AL_EXT_OFFSET AL_EXT_source_distance_model AL_EXT_STATIC_BUFFER "
+                   "AL_SOFT_direct_channels AL_SOFT_gain_clamp_ex AL_SOFT_loop_points AL_SOFT_source_spatialize "
+                   "AL_XBOX_hardware_status AL_XBOX_hrtf "
                    "AL_XBOX_adpcm AL_XBOX_output_callback AL_XBOX_pool_size "
                    "AL_XBOX_reverb AL_XBOX_source_control AL_XBOX_stats AL_XBOX_update";
         default:
@@ -798,6 +959,11 @@ AL_API ALboolean AL_APIENTRY alIsExtensionPresent(const ALchar *extname) {
     }
     /* Keep in sync with the alGetString(AL_EXTENSIONS) list */
     if (strcmp(extname, "AL_EXT_OFFSET") == 0 ||
+        strcmp(extname, "AL_EXT_FLOAT32") == 0 ||
+        strcmp(extname, "AL_EXT_source_distance_model") == 0 ||
+        strcmp(extname, "AL_SOFT_direct_channels") == 0 ||
+        strcmp(extname, "AL_SOFT_gain_clamp_ex") == 0 ||
+        strcmp(extname, "AL_SOFT_source_spatialize") == 0 ||
         strcmp(extname, "AL_SOFT_loop_points") == 0 ||
         strcmp(extname, "AL_XBOX_hardware_status") == 0 ||
         strcmp(extname, "AL_XBOX_hrtf") == 0 ||
@@ -819,7 +985,15 @@ AL_API void * AL_APIENTRY alGetProcAddress(const ALchar *fname) {
 }
 
 AL_API ALenum AL_APIENTRY alGetEnumValue(const ALchar *ename) {
-    (void)ename;
+    size_t i;
+    if (ename == NULL) {
+        return 0;
+    }
+    for (i = 0; i < sizeof(s_al_enums) / sizeof(s_al_enums[0]); i++) {
+        if (strcmp(ename, s_al_enums[i].name) == 0) {
+            return (ALenum)s_al_enums[i].value;
+        }
+    }
     return 0;
 }
 
