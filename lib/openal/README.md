@@ -118,6 +118,7 @@ links showcase sources needs an `EXTRA_<test>` entry in the Makefile and a branc
 **Console samples:**
 - `openal_engine` (engine features), `openal_stream` (streaming), `openal_hrtf`;
 - `openal_showcase` (a 3D demo of everything, mode 6 is the reverb);
+- `openal_efx` (EFX reverb, the echo kernel, sends; measures the echo's delay from the final mix);
 - the `apu_*` probes behind the hardware findings.
 
 ## Layout

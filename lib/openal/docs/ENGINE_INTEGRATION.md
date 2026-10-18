@@ -373,7 +373,7 @@ alAuxiliaryEffectSloti(slot, AL_EFFECTSLOT_EFFECT, (ALint)fx);       /* loads an
 - **Example:** `dsp/gp_kecho.asm` is a stereo echo with delay (32-16384 samples), feedback and wet parameters.
 - **Writing a kernel:** the ABI, the memory map, DMA, building the image and testing it in the host simulator
   are in `docs/GP_KERNELS.md`.
-- **Status:** host-tested; the console run comes with the `openal_efx` sample.
+- **Status:** host-tested; `samples/openal_efx` is the console check.
 
 ## 4. Things to know
 
@@ -395,4 +395,7 @@ alAuxiliaryEffectSloti(slot, AL_EFFECTSLOT_EFFECT, (ALint)fx);       /* loads an
 `samples/openal_engine` exercises loop points, direct gains, offsets, the pitch range, the voice budget and
 buffer churn, and logs to `E:\openal_engine_N.txt` (a new file each run). `samples/openal_stream` covers streaming and the output
 thread. Mode 6 of `samples/openal_showcase` plays dry recordings through every reverb preset;
-`samples/apu_gp_reverb` measures the reverb's decay on the console.
+`samples/apu_gp_reverb` measures the reverb's decay on the console. `samples/openal_efx` runs EFX the way a
+port does (entry points from `alGetProcAddress`): an EFX reverb, the echo kernel through `alXboxEffectProgram`
+with its delay measured from the final mix, live parameters, two sends into one slot, then 5 minutes of
+listening with the effects changing, and logs to `E:\openal_efx.txt`.
