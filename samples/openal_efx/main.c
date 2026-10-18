@@ -15,6 +15,8 @@
  *   4  feedback: echoes at D, 2D, 3D, 6 dB apart
  *   5  two sources on sends 0 and 1 into one slot
  *   6  back to the reverb: its code reloaded, AL_XBOX_REVERB_ACTIVE
+ *  6b  AL_FILTER_LOWPASS: 500 Hz + 5 kHz through direct filters, plain and HRTF
+ *      voices; the 5 kHz level against GAINHF, GAIN on both, a live change
  *   7  listening: an HRTF source circling, a panned one and a stereo one, all
  *      sending to the slot; reverb and echo settings change every 15 s;
  *      output health logged every minute, 5 minutes (then plays on)
@@ -405,6 +407,101 @@ static void phase_back(void) {
     save_log();
 }
 
+/* ---------------------------------------------------------------- 6b: lowpass */
+
+#define TONE_FRAMES 48000u
+
+static ALuint make_tones(void) {
+    static int16_t pcm[TONE_FRAMES];
+    ALuint b;
+    uint32_t i;
+    for (i = 0; i < TONE_FRAMES; i++) {   /* whole cycles in 960 samples: exact Goertzel bins */
+        float t = (float)i / 48000.0f;
+        pcm[i] = (int16_t)(5000.0f * sinf(TWO_PI * 500.0f * t) + 5000.0f * sinf(TWO_PI * 5000.0f * t));
+    }
+    alGenBuffers(1, &b);
+    alBufferData(b, AL_FORMAT_MONO16, pcm, (ALsizei)sizeof(pcm), 48000);
+    return b;
+}
+
+/* Tone power of the left channel at `hz` over 960-sample blocks */
+static double tone_power(uint32_t n, double hz) {
+    double c = 2.0 * cos(6.283185307179586 * hz / 48000.0), acc = 0.0;
+    uint32_t blk, i, blocks = n / 960u;
+    for (blk = 0; blk < blocks; blk++) {
+        double s1 = 0.0, s2 = 0.0;
+        for (i = 0; i < 960u; i++) {
+            double s = s_cap[2u * (blk * 960u + i)] + c * s1 - s2;
+            s2 = s1;
+            s1 = s;
+        }
+        acc += s1 * s1 + s2 * s2 - c * s1 * s2;
+    }
+    return blocks ? acc / blocks : 0.0;
+}
+
+static void measure_tones(double *p500, double *p5k) {
+    uint32_t n;
+    run_for(150);   /* the voice's volume ramp and a filter change settle */
+    n = capture(400, NULL);
+    *p500 = tone_power(n, 500.0);
+    *p5k = tone_power(n, 5000.0);
+}
+
+static void lowpass_on(ALuint src, const char *kind) {
+    static const float ghf[] = { 0.9f, 0.7f, 0.5f, 0.25f, 0.1f, 0.03f };
+    double r500, r5k, p500, p5k;
+    ALuint f = 0;
+    uint32_t i;
+    LPALGENFILTERS gen = (LPALGENFILTERS)alGetProcAddress("alGenFilters");
+    LPALFILTERI fi = (LPALFILTERI)alGetProcAddress("alFilteri");
+    LPALFILTERF ff = (LPALFILTERF)alGetProcAddress("alFilterf");
+    LPALDELETEFILTERS del = (LPALDELETEFILTERS)alGetProcAddress("alDeleteFilters");
+    gen(1, &f);
+    fi(f, AL_FILTER_TYPE, AL_FILTER_LOWPASS);
+    alSourcei(src, AL_LOOPING, AL_TRUE);
+    alSourcePlay(src);
+    measure_tones(&r500, &r5k);
+    for (i = 0; i < sizeof(ghf) / sizeof(ghf[0]); i++) {
+        ff(f, AL_LOWPASS_GAINHF, ghf[i]);
+        alSourcei(src, AL_DIRECT_FILTER, (ALint)f);   /* live, while it plays */
+        measure_tones(&p500, &p5k);
+        logf_("   %s GAINHF %d.%02d: 5 kHz %s dB (expected %s), 500 Hz %s dB\n", kind, (int)ghf[i],
+              (int)(ghf[i] * 100.0f + 0.5f) % 100, dbs(db10(sqrt(p5k / r5k))), dbs(db10(ghf[i])),
+              dbs(db10(sqrt(p500 / r500))));
+    }
+    ff(f, AL_LOWPASS_GAINHF, 1.0f);
+    ff(f, AL_LOWPASS_GAIN, 0.5f);
+    alSourcei(src, AL_DIRECT_FILTER, (ALint)f);
+    measure_tones(&p500, &p5k);
+    logf_("   %s GAIN 0.5, GAINHF 1: 500 Hz %s dB, 5 kHz %s dB (expected -6.0 both)\n", kind,
+          dbs(db10(sqrt(p500 / r500))), dbs(db10(sqrt(p5k / r5k))));
+    alSourcei(src, AL_DIRECT_FILTER, AL_FILTER_NULL);
+    measure_tones(&p500, &p5k);
+    logf_("   %s no filter again: 500 Hz %s dB, 5 kHz %s dB\n", kind, dbs(db10(sqrt(p500 / r500))),
+          dbs(db10(sqrt(p5k / r5k))));
+    alSourceStop(src);
+    del(1, &f);
+}
+
+static void phase_lowpass(void) {
+    ALuint b = make_tones(), plain, hrtf;
+    logf_("-- 6b AL_FILTER_LOWPASS: 500 Hz + 5 kHz, levels against the same voice unfiltered\n");
+    plain = make_source(b);
+    lowpass_on(plain, "plain");
+    alEnable(AL_XBOX_HRTF);
+    hrtf = make_source(b);
+    alSource3f(hrtf, AL_POSITION, 0.0f, 0.0f, -1.0f);   /* straight ahead */
+    logf_("   HRTF %s\n", status(AL_XBOX_HRTF_ACTIVE) ? "active" : "NOT ACTIVE (the HRTF line measures a panned voice)");
+    lowpass_on(hrtf, "HRTF ");
+    alDisable(AL_XBOX_HRTF);
+    alDeleteSources(1, &plain);
+    alDeleteSources(1, &hrtf);
+    alDeleteBuffers(1, &b);
+    logf_("   AL error 0x%x\n", (unsigned)alGetError());
+    save_log();
+}
+
 /* ---------------------------------------------------------------- 7: listening */
 
 #define LOOP_FRAMES 96000u   /* 2 s */
@@ -588,6 +685,7 @@ int main(void) {
     phase_reverb();
     phase_echo();
     phase_back();
+    phase_lowpass();
     phase_listen();
     return 0;
 }

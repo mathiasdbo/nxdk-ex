@@ -27,11 +27,11 @@ static int near(float a, float b, float tol) {
     return fabsf(a - b) <= tol;
 }
 
-/* The response at `hz` of the filter apu_vp_lowpass() chose (the model of EFX_PLAN.md 2.1) */
-static float butterworth_at(uint32_t fc, float hz) {
-    int16_t cut = (int16_t)(fc & 0xFFFFu);
-    float f0 = APU_VP_LP_ZERO_HZ * powf(2.0f, (float)cut / 4096.0f);
-    return 1.0f / sqrtf(1.0f + powf(hz / f0, 4.0f));
+static int16_t cut_of(float gain_hf) {
+    uint32_t fc = 0;
+    uint32_t mode = apu_vp_lowpass(gain_hf, &fc);
+    assert(mode == 1u && (fc >> 16) == APU_VP_LP_DAMPING);
+    return (int16_t)(fc & 0xFFFFu);
 }
 
 static void test_object(void) {
@@ -76,21 +76,27 @@ static void test_object(void) {
 }
 
 static void test_fit(void) {
-    static const float gs[] = { 0.9f, 0.7f, 0.5f, 0.3f, 0.1f, 0.05f };
-    uint32_t fc, i;
+    uint32_t fc;
+    float g;
+    int16_t prev = 0;
 
-    printf("[2] GAINHF at 5 kHz -> the voice filter's cutoff\n");
+    printf("[2] GAINHF at 5 kHz -> the voice filter's cutoff (the levels measured on a console)\n");
     assert(apu_vp_lowpass(1.0f, &fc) == 0u && fc == 0u);       /* no high cut: no filter */
-    assert(apu_vp_lowpass(0.9999f, &fc) == 0u);
-    assert(apu_vp_lowpass(0.999f, &fc) == 0u);                 /* cutoff above 16 kHz: off */
-    for (i = 0; i < sizeof(gs) / sizeof(gs[0]); i++) {
-        assert(apu_vp_lowpass(gs[i], &fc) == 1u);
-        assert((fc >> 16) == APU_VP_LP_DAMPING);
-        assert(near(butterworth_at(fc, 5000.0f), gs[i], 0.003f));
+    assert(apu_vp_lowpass(0.999f, &fc) == 0u);                 /* within 0.05 dB */
+    /* measured points: -1.6 dB at -0x400, -4.7 dB at -0x1000, -15.0 dB at -0x2000, -40.0 dB at -0x4000 */
+    assert(abs(cut_of(powf(10.0f, -1.6f / 20.0f)) + 0x400) <= 2);
+    assert(abs(cut_of(powf(10.0f, -4.7f / 20.0f)) + 0x1000) <= 2);
+    assert(abs(cut_of(powf(10.0f, -15.0f / 20.0f)) + 0x2000) <= 2);
+    assert(abs(cut_of(0.01f) + 0x4000) <= 2);
+    assert(cut_of(0.5f) < -0x1000 && cut_of(0.5f) > -0x1800);  /* -6 dB: between -4.7 and -9.1 */
+    assert(cut_of(0.0f) == APU_VP_LP_CUT_MIN && cut_of(1e-6f) == APU_VP_LP_CUT_MIN);
+    assert(cut_of(0.99f) < 0);
+    /* lower GAINHF, lower cutoff, all the way down */
+    for (g = 0.99f; g > 0.0002f; g *= 0.9f) {
+        int16_t c = cut_of(g);
+        assert(c <= prev);
+        prev = c;
     }
-    assert(apu_vp_lowpass(0.0f, &fc) == 1u && (int16_t)(fc & 0xFFFFu) == APU_VP_LP_CUT_MIN);
-    assert(apu_vp_lowpass(0.5f, &fc) == 1u && (int16_t)(fc & 0xFFFFu) < -0x1000 &&
-           (int16_t)(fc & 0xFFFFu) > -0x2000);                 /* about 3.8 kHz */
 }
 
 static void test_source(uint8_t *mmio) {

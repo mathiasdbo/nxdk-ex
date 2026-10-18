@@ -292,18 +292,17 @@ int16_t apu_vp_pitch_from_ratio(float ratio);
 uint16_t apu_vp_atten_from_gain(float gain);
 
 /*
- * Voice filter as a lowpass (EFX_PLAN.md 2.1 / 3.7): FMODE 1 is a 2-pole
- * lowpass, cutoff 8 kHz x 2^(c / 0x1000) in the low half of TAR_FCA, damping
- * in the high half (APU_VP_LP_DAMPING: Butterworth). apu_vp_lowpass() fits it
- * to an EFX AL_LOWPASS_GAINHF: the gain at APU_VP_LP_REF_HZ (5 kHz, the
- * extension's reference). Returns the FMODE (0: no filter, gain_hf about 1)
- * and writes the FCA word to *fc.
+ * Voice filter as a lowpass (EFX_PLAN.md 2.1 / 3.7, apu_filter_probe): FMODE 1
+ * is a 2-pole lowpass on TAR_FCA (TAR_FCB must be 0: HRTF voices apply it too).
+ * Cutoff in the low half, 8 kHz x 2^(c / 0x1000) for c < 0 (0 and above: no
+ * filtering); damping in the high half, APU_VP_LP_DAMPING flat (Butterworth:
+ * -3.3 dB at the cutoff). apu_vp_lowpass() picks the cutoff whose measured
+ * level at 5 kHz (the EFX reference) is AL_LOWPASS_GAINHF. Returns the FMODE
+ * (0: no filter) and writes the FCA word to *fc.
  */
-#define APU_VP_LP_DAMPING   0xB505u      /* sqrt(2), 0x8000 = 1 */
-#define APU_VP_LP_REF_HZ    5000.0f
-#define APU_VP_LP_ZERO_HZ   8000.0f      /* cutoff word 0 */
-#define APU_VP_LP_CUT_MIN   (-0x7000)    /* about 62 Hz */
-#define APU_VP_LP_CUT_MAX   0x1000       /* 16 kHz: above it the filter is off */
+#define APU_VP_LP_DAMPING   0xB505u      /* sqrt(2) if 0x8000 = 1 */
+#define APU_VP_LP_ZERO_HZ   8000.0f      /* the cutoff word 0 extrapolated */
+#define APU_VP_LP_CUT_MIN   (-0x7000)    /* about 62 Hz, -76 dB at 5 kHz */
 uint32_t apu_vp_lowpass(float gain_hf, uint32_t *fc);
 
 /** Pack eight 12-bit output attenuations into TAR_VOLA/B/C. */
