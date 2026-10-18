@@ -15,6 +15,9 @@
  *   4  FMODE 2 with FCB: cutoff sweep at Q 0xB505 and 0x4000
  *   5  other voices: an HRTF voice and a stereo voice with FMODE 1
  *   6  a cutoff change on a playing voice: the largest sample step across it
+ * Round 2 (the default; PROBE_ROUND1 for the steps above):
+ *   7  the top of the range: cutoffs -0x800 .. -1 (where does it switch off?)
+ *   8  HRTF voices: cutoffs -0x800 .. -0x5000 (their offset against plain voices)
  *
  * Log appended to E:\apu_filter_probe.txt.
  */
@@ -372,12 +375,40 @@ static void step_live(void) {
           (unsigned long)max_step(got));
 }
 
+static void step_top(void) {
+    static const int32_t cuts[] = { -0x800, -0x700, -0x600, -0x500, -0x400, -0x300, -0x200, -0x100, -0x80, -0x40, -1 };
+    uint32_t i;
+    char what[48];
+    logf_("7 the top of the range, FMODE 1, Q %04x (plain voice)\n", QBW);
+    header();
+    for (i = 0; i < sizeof(cuts) / sizeof(cuts[0]); i++) {
+        set_filter(1, fc(QBW, cuts[i]), 0);
+        cut_name(what, sizeof(what), "F1", QBW, cuts[i]);
+        measure(what, 0);
+    }
+}
+
+static void step_hrtf(void) {
+    static const int32_t cuts[] = { -0x800, -0x1000, -0x1800, -0x2000, -0x2800, -0x3000, -0x4000, -0x5000 };
+    uint32_t i;
+    char what[48];
+    logf_("8 HRTF voice, FMODE 1, Q %04x (against itself with FMODE 0)\n", QBW);
+    header();
+    if (voice_play(V_HRTF) != 0) return;
+    reference();
+    for (i = 0; i < sizeof(cuts) / sizeof(cuts[0]); i++) {
+        set_filter(1, fc(QBW, cuts[i]), 0);
+        cut_name(what, sizeof(what), "HRTF", QBW, cuts[i]);
+        measure(what, 0);
+    }
+}
+
 /* ---------------------------------------------------------------- main */
 
 int main(void) {
     uint32_t rate;
     XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
-    logf_("\n=== apu_filter_probe: 25 tones 50 Hz .. 20 kHz, levels in 0.1 dB against FMODE 0\n");
+    logf_("\n=== apu_filter_probe round 2: 25 tones 50 Hz .. 20 kHz, levels in 0.1 dB against FMODE 0\n");
     save_log();
     apu_vp_debug_set_flags(APU_VP_DBG_NO_AC97 | APU_VP_DBG_AC97_COPY);   /* the 64 KiB ring, read by the CPU */
     if (apu_vp_init(BAR0) != 0) {
@@ -400,6 +431,7 @@ int main(void) {
         logf_("reference: plain voice, FMODE 0; tone power sum %lu (x1000)\n", (unsigned long)(l / 1000.0));
     }
     save_log();
+#ifdef PROBE_ROUND1
     step_q();
     save_log();
     step_cut();
@@ -411,6 +443,11 @@ int main(void) {
     step_voices();
     save_log();
     step_live();
+#else
+    step_top();
+    save_log();
+    step_hrtf();
+#endif
     voice_stop();
     rate = frame_rate(100);
     logf_("done, %lu frames/s\n", (unsigned long)rate);
