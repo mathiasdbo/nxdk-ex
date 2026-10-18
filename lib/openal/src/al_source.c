@@ -778,6 +778,7 @@ void al_source_update_frame(void) {
     apu_voice_mgr_update(al_source_get_apu_base());
     s_tick_voice_cycles += apu_platform_cycles() - t1;
     reverb_sync();   /* in the update's unsplit rest (ALXBOXSTATS) */
+    al_efx_timed_service();
 }
 
 
@@ -1749,9 +1750,11 @@ AL_API void AL_APIENTRY alSourcePlayv(ALsizei n, const ALuint *sources) {
         alSetError(AL_INVALID_VALUE);
         return;
     }
+    apu_voice_batch(al_source_get_apu_base(), true);   /* all of them start on the same APU frame */
     for (ALsizei i = 0; i < n; i++) {
         alSourcePlay(sources[i]);
     }
+    apu_voice_batch(al_source_get_apu_base(), false);
 }
 
 AL_API void AL_APIENTRY alSourcePausev(ALsizei n, const ALuint *sources) {
@@ -1760,9 +1763,11 @@ AL_API void AL_APIENTRY alSourcePausev(ALsizei n, const ALuint *sources) {
         alSetError(AL_INVALID_VALUE);
         return;
     }
+    apu_voice_batch(al_source_get_apu_base(), true);   /* same frame where the VP allows it (apu_vp.h) */
     for (ALsizei i = 0; i < n; i++) {
         alSourcePause(sources[i]);
     }
+    apu_voice_batch(al_source_get_apu_base(), false);
 }
 
 AL_API void AL_APIENTRY alSourceStopv(ALsizei n, const ALuint *sources) {
@@ -1771,9 +1776,11 @@ AL_API void AL_APIENTRY alSourceStopv(ALsizei n, const ALuint *sources) {
         alSetError(AL_INVALID_VALUE);
         return;
     }
+    apu_voice_batch(al_source_get_apu_base(), true);   /* same frame where the VP allows it (apu_vp.h) */
     for (ALsizei i = 0; i < n; i++) {
         alSourceStop(sources[i]);
     }
+    apu_voice_batch(al_source_get_apu_base(), false);
 }
 
 AL_API void AL_APIENTRY alSourceRewindv(ALsizei n, const ALuint *sources) {
@@ -2128,6 +2135,70 @@ bool al_source_debug_sends(ALuint source, float out[APU_VOICE_SENDS]) {
 void al_source_effects_changed(void) {
     reverb_apply();
     al_source_update_all_spatial();   /* who sends where */
+}
+
+/* Host tests: a stream clock and GP of their own (al_source_debug_clock) */
+static bool s_dbg_clock, s_dbg_busy;
+static uint32_t s_dbg_pos, s_dbg_frame, s_dbg_at;
+
+void al_source_debug_clock(bool on, uint32_t pos, uint32_t gp_frame, bool busy) {
+    s_dbg_clock = on;
+    s_dbg_pos = pos;
+    s_dbg_frame = gp_frame;
+    s_dbg_busy = busy;
+}
+
+uint32_t al_source_debug_timed_frame(void) {
+    return s_dbg_at;
+}
+
+/* What alXboxEffectSlotAtSample needs from a streaming source (al_efx.c) */
+al_source_clock_t al_source_stream_clock(ALuint source, uint32_t *pos, uint32_t *gp_frame, float *per_frame) {
+    ALsource *src = al_source_get(source);
+    const ALbuffer *ring;
+    if (!src || !src->stream) {
+        return AL_SOURCE_CLOCK_NONE;
+    }
+    if (src->state == AL_STOPPED) {
+        return AL_SOURCE_CLOCK_STOPPED;
+    }
+    ring = al_stream_ring_buffer(src->stream);
+    if (src->state != AL_PLAYING || src->hw_voice_idx < 0 || !ring || ring->frequency <= 0) {
+        return AL_SOURCE_CLOCK_WAIT;
+    }
+    if (!s_dbg_clock && !apu_gp_ready()) {
+        return AL_SOURCE_CLOCK_STOPPED;         /* no GP to time it: at once, like an attach */
+    }
+    source_update_stream(src);                  /* the position as of now */
+    if (src->state != AL_PLAYING) {
+        return AL_SOURCE_CLOCK_STOPPED;
+    }
+    *pos = s_dbg_clock ? s_dbg_pos : al_stream_read_pos(src->stream);
+    *gp_frame = s_dbg_clock ? s_dbg_frame : apu_gp_frames(al_source_get_apu_base());
+    *per_frame = 32.0f * (float)ring->frequency * src->pitch / 48000.0f;
+    return AL_SOURCE_CLOCK_RUN;
+}
+
+bool al_source_gp_timed_busy(void) {
+    if (s_dbg_clock) {
+        return s_dbg_busy;
+    }
+    return apu_gp_ready() && apu_gp_mailbox_pending(al_source_get_apu_base());
+}
+
+void al_source_gp_params_at(uint32_t frame) {
+    apu_reverb_params_t p;
+    apu_gp_kernel_t k;
+    const uint32_t *params = NULL;
+    s_dbg_at = frame;
+    if (s_dbg_clock) {
+        s_dbg_busy = true;                      /* the GP holds it until the test lets it go */
+    }
+    if (apu_gp_ready() && !apu_vp_front_end_ok() && gp_effect(&p, &k, &params) == GP_KERNEL &&
+        apu_gp_kernel_params_at(al_source_get_apu_base(), &k, params, frame) == 0) {
+        return;
+    }
+    al_source_effects_changed();   /* not the running kernel's parameters: as an attach */
 }
 
 AL_API void AL_APIENTRY alXboxReverbPreset(ALint preset) {

@@ -205,6 +205,31 @@ AL_API void AL_APIENTRY alXboxEffectProgram(ALuint effect, const ALuint *words, 
 typedef void (AL_APIENTRY *LPALXBOXEFFECTPROGRAM)(ALuint effect, const ALuint *words, ALsizei count, ALuint flags);
 
 /*
+ * Changes timed to a stream (AL_XBOX_gp_program):
+ *
+ *   alXboxEffectSlotAtSample(slot, effect, source, sample);
+ *
+ * attaches `effect` to `slot` (copying it now, like AL_EFFECTSLOT_EFFECT) at
+ * the 0.67 ms GP frame that mixes frame `sample` of the streaming source
+ * `source`: its stream position, the frames it has played since its queue
+ * started (32 bits, wrapping; what an engine that mixes ahead counts). The
+ * effect must run the kernel the slot already runs (the same image) with new
+ * parameters, and the slot must be the active one; otherwise, or with 16
+ * changes already queued, AL_INVALID_OPERATION. A source that is not
+ * streaming gives AL_INVALID_OPERATION, a name that is no source
+ * AL_INVALID_NAME. Changes apply in the order they were queued, each one
+ * frame-exact (to a frame, against the position the library last read from
+ * the voice), never early; one whose sample has passed applies at the next
+ * frame. While the source is paused or not started they wait; a stopped
+ * source's apply at once. The GP holds one change at a time, so the next one
+ * goes out at the first alXboxUpdateVoices after it: changes closer together
+ * than that are late by up to one update. AL_EFFECTSLOT_EFFECT, or deleting
+ * the slot, drops the changes still queued for it.
+ */
+AL_API void AL_APIENTRY alXboxEffectSlotAtSample(ALuint slot, ALuint effect, ALuint source, ALuint sample);
+typedef void (AL_APIENTRY *LPALXBOXEFFECTSLOTATSAMPLE)(ALuint slot, ALuint effect, ALuint source, ALuint sample);
+
+/*
  * ============================================================================
  * AL_SOFT_loop_points (same token and semantics as OpenAL Soft)
  * ============================================================================

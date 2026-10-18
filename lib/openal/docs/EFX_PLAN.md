@@ -126,7 +126,8 @@ As built:
 | X:$07 / X:$0F | IDLE (START_FRAME polls before this frame) / IDLMIN (the smallest since the CPU wrote $7FFFFF): the load meter |
 | X:$10-$1F | CNT, FLAGS (bit 0 kernel on), BURN, SPINS, SPMAX, TMOUT, MB_SEQ, MB_ACK, MB_N, K_RHEAD, K_WHEAD, OUTLP, OUTST[4] |
 | X:$20 / X:$40 | OUT L / OUT R (32 words each): the dry bins 0/1, the kernel adds to them, then the output lowpass |
-| X:$60-$DF | mailbox: 64 (address, value) pairs |
+| X:$60-$DD | mailbox: 63 (address, value) pairs |
+| X:$DE | mailbox: the frame (X:CNT, mod 2^24) to apply it at; the CPU writes it with every post |
 | X:$E0-$BFF, all of Y | the kernel; the reverb: KIN (input pair address) at $E0, coefficients $E1-$E5, tables, chains at $1B0, blocks from $340 to $97F |
 | scratch from byte $2000 | the kernel's delay lines |
 

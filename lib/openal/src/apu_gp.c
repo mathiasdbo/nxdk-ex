@@ -68,6 +68,7 @@ static uint32_t s_default_image[DEFAULT_IMAGE_WORDS];
 static const uint32_t *s_image;                      /* apu_gp_debug_set_program(); NULL = the default */
 static uint32_t s_image_words;
 static uint32_t s_mb_seq;                            /* the last mailbox sequence number posted */
+static bool s_mb_timed;                              /* and it waits for its frame (apu_gp_kernel_params_at) */
 
 static const uint32_t *image_words(uint32_t *count) {
     if (s_image) {
@@ -193,6 +194,7 @@ static void loop_x_init(uintptr_t bar0) {
     reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * GP_LOOP_IDLE, 0);
     reg_wr(bar0, MCPX_APU_GP_XMEM + 4u * GP_LOOP_IDLMIN, IDLE_NONE);
     s_mb_seq = 0;
+    s_mb_timed = false;
 }
 
 static void free_all(void) {
@@ -347,28 +349,81 @@ static bool mailbox_idle(uintptr_t bar0) {
 #endif
 }
 
-int apu_gp_mailbox(uintptr_t bar0, const apu_reverb_word_t *w, uint32_t n) {
+bool apu_gp_mailbox_pending(uintptr_t bar0) {
+    return s_ready && (reg_rd(bar0, XREG(GP_LOOP_MB_ACK)) & 0xFFFFFFu) != s_mb_seq;
+}
+
+#if !defined(OPENAL_TARGET_XBOX)
+/* No GP on the host: the loop's part, for a post that waits for its frame */
+static apu_reverb_word_t s_host_mb[GP_LOOP_MB_MAX];
+static uint32_t s_host_mb_n, s_host_mb_at;
+
+static void host_mailbox_apply(uintptr_t bar0) {
+    write_words(bar0, s_host_mb, s_host_mb_n);
+    reg_wr(bar0, XREG(GP_LOOP_MB_ACK), s_mb_seq);
+}
+
+void apu_gp_debug_host_frames(uintptr_t bar0, uint32_t n) {
+    while (n--) {
+        uint32_t cnt = reg_rd(bar0, XREG(GP_LOOP_CNT)) & 0xFFFFFFu;
+        if (s_mb_timed && apu_gp_mailbox_pending(bar0) && ((cnt - s_host_mb_at) & 0xFFFFFFu) < 0x800000u) {
+            host_mailbox_apply(bar0);
+        }
+        reg_wr(bar0, XREG(GP_LOOP_CNT), (cnt + 1u) & 0xFFFFFFu);
+    }
+}
+#endif
+
+/* The pairs, the frame to apply them at, then the sequence number: the loop
+ * takes them at the start of frame `at` (or its next frame, if that is past) */
+static void mailbox_post(uintptr_t bar0, const apu_reverb_word_t *w, uint32_t n, uint32_t at, bool timed) {
     uint32_t i;
-    if (!s_ready || s_image != NULL || n > GP_LOOP_MB_MAX || (n && !w)) {
-        return -1;
-    }
-    if (!mailbox_idle(bar0)) {
-        /* The GP is not taking frames: nothing would apply it */
-        write_words(bar0, w, n);
-        return 1;
-    }
     for (i = 0; i < n; i++) {
         reg_wr(bar0, XREG(GP_LOOP_MBOX + 2u * i), w[i].addr);
         reg_wr(bar0, XREG(GP_LOOP_MBOX + 2u * i + 1u), w[i].value & 0xFFFFFFu);
     }
     reg_wr(bar0, XREG(GP_LOOP_MB_N), n);
+    reg_wr(bar0, XREG(GP_LOOP_MB_AT), at & 0xFFFFFFu);
     s_mb_seq = (s_mb_seq + 1u) & 0xFFFFFFu;
-    reg_wr(bar0, XREG(GP_LOOP_MB_SEQ), s_mb_seq);   /* last: the loop takes the pairs at its next frame */
+    reg_wr(bar0, XREG(GP_LOOP_MB_SEQ), s_mb_seq);   /* last */
+    s_mb_timed = timed;
 #if !defined(OPENAL_TARGET_XBOX)
-    /* No GP on the host: apply it the way the loop would */
-    write_words(bar0, w, n);
-    reg_wr(bar0, XREG(GP_LOOP_MB_ACK), s_mb_seq);
+    if (timed) {
+        memcpy(s_host_mb, w, n * sizeof(*w));
+        s_host_mb_n = n;
+        s_host_mb_at = at & 0xFFFFFFu;
+    } else {
+        s_host_mb_n = 0;
+        write_words(bar0, w, n);   /* the way the loop would, at once */
+        reg_wr(bar0, XREG(GP_LOOP_MB_ACK), s_mb_seq);
+    }
 #endif
+}
+
+/* A timed post still waiting for its frame: let it apply now, so that an
+ * immediate change lands after it */
+static void mailbox_release(uintptr_t bar0) {
+    if (s_mb_timed && apu_gp_mailbox_pending(bar0)) {
+#if defined(OPENAL_TARGET_XBOX)
+        reg_wr(bar0, XREG(GP_LOOP_MB_AT), apu_gp_frames(bar0));
+#else
+        host_mailbox_apply(bar0);
+#endif
+    }
+    s_mb_timed = false;
+}
+
+int apu_gp_mailbox(uintptr_t bar0, const apu_reverb_word_t *w, uint32_t n) {
+    if (!s_ready || s_image != NULL || n > GP_LOOP_MB_MAX || (n && !w)) {
+        return -1;
+    }
+    mailbox_release(bar0);
+    if (!mailbox_idle(bar0)) {
+        /* The GP is not taking frames: nothing would apply it */
+        write_words(bar0, w, n);
+        return 1;
+    }
+    mailbox_post(bar0, w, n, apu_gp_frames(bar0), false);
     return 0;
 }
 
@@ -448,6 +503,8 @@ bool apu_gp_reverb_on(void) {
 
 /* Stop whichever kernel runs (the loop skips it from its next frame) */
 static void kernel_stop(uintptr_t bar0) {
+    mailbox_release(bar0);   /* a timed post holds the old kernel's words: let it land first */
+    (void)mailbox_idle(bar0);
     if (s_reverb_on || s_custom_on) {
         reg_wr(bar0, XREG(REVERB_FLAGS_X), 0);
     }
@@ -536,6 +593,31 @@ int apu_gp_kernel_parse(const uint32_t *image, uint32_t count, apu_gp_kernel_t *
     out->words = count - APU_GP_IMAGE_HEADER;
     out->scratch_bytes = image[2];
     out->descriptors = image[3];
+    return 0;
+}
+
+int apu_gp_kernel_params_at(uintptr_t bar0, const apu_gp_kernel_t *k, const uint32_t params[APU_GP_KERNEL_PARAMS],
+                            uint32_t frame) {
+    apu_reverb_word_t w[APU_GP_KERNEL_PARAMS];
+    uint32_t i, n = 0;
+
+    if (!s_ready || s_image != NULL || !k || !params || !s_custom_on || !kernel_code_loaded(k->code, k->words)) {
+        return -1;
+    }
+    if (apu_gp_mailbox_pending(bar0)) {
+        return 1;
+    }
+    for (i = 0; i < APU_GP_KERNEL_PARAMS; i++) {
+        if (params[i] != s_params[i]) {
+            w[n].addr = (uint16_t)(GP_LOOP_KPARAM + i);
+            w[n].value = params[i] & 0xFFFFFFu;
+            n++;
+        }
+    }
+    if (n) {
+        mailbox_post(bar0, w, n, frame, true);
+    }
+    memcpy(s_params, params, sizeof(s_params));
     return 0;
 }
 
