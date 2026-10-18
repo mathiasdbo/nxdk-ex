@@ -21,6 +21,7 @@
  *  6d  air absorption and cone outer GAINHF: the 5 kHz level
  *  6e  a stereo source at a distance: AL_AUTO_SOFT (no attenuation), AL_TRUE
  *  6f  ALC_SOFT_pause_device: silence while paused, the source still playing
+ *  6g  AL_EFFECT_CHORUS and AL_EFFECT_FLANGER (library kernel): fixed taps, feedback, the LFO's load
  *   7  listening: an HRTF source circling, a panned one and a stereo one, all
  *      sending to the slot; reverb and echo settings change every 15 s;
  *      output health logged every minute, 5 minutes (then plays on)
@@ -631,6 +632,47 @@ static void phase_spatialize(void) {
     save_log();
 }
 
+static void phase_efx_chorus(void) {
+    ALuint fx = 0;
+    uint32_t r0 = apu_gp_debug_code_restarts(), n;
+    logf_("-- 6g AL_EFFECT_CHORUS (library kernel): DELAY 0.01, DEPTH 0 (a fixed tap), no feedback\n");
+    logf_("   (expected: both ears +480 at +3.0 dB against the centred dry click)\n");
+    p_alGenEffects(1, &fx);
+    p_alEffecti(fx, AL_EFFECT_TYPE, AL_EFFECT_CHORUS);
+    p_alEffectf(fx, AL_CHORUS_DELAY, 0.01f);
+    p_alEffectf(fx, AL_CHORUS_DEPTH, 0.0f);
+    p_alEffectf(fx, AL_CHORUS_FEEDBACK, 0.0f);
+    attach(fx);
+    run_for(100);
+    logf_("   attach: AL error 0x%x; %s\n", (unsigned)alGetError(),
+          apu_gp_debug_code_restarts() == r0 ? "code through the P window" : "GP RESTARTED");
+    n = capture(800, play_a);
+    log_peaks("chorus", n);
+    logf_("   AL_EFFECT_FLANGER: DELAY 0.004, DEPTH 0, FEEDBACK 0.5 (expected: +192 at +3.0, then every 192, 6 dB apart)\n");
+    p_alEffecti(fx, AL_EFFECT_TYPE, AL_EFFECT_FLANGER);
+    p_alEffectf(fx, AL_FLANGER_DELAY, 0.004f);
+    p_alEffectf(fx, AL_FLANGER_DEPTH, 0.0f);
+    p_alEffectf(fx, AL_FLANGER_FEEDBACK, 0.5f);
+    attach(fx);
+    run_for(100);
+    n = capture(800, play_a);
+    log_peaks("flanger", n);
+    logf_("   the chorus's defaults (triangle, 1.1 Hz, DEPTH 0.1, 16 ms, FEEDBACK 0.25), then sine:\n");
+    p_alEffecti(fx, AL_EFFECT_TYPE, AL_EFFECT_CHORUS);
+    attach(fx);
+    run_for(100);
+    log_load("chorus triangle");
+    p_alEffecti(fx, AL_CHORUS_WAVEFORM, AL_CHORUS_WAVEFORM_SINUSOID);
+    attach(fx);
+    run_for(100);
+    log_load("chorus sine");
+    logf_("   AL error 0x%x\n", (unsigned)alGetError());
+    attach(s_reverb);
+    p_alDeleteEffects(1, &fx);
+    run_for(100);
+    save_log();
+}
+
 /* ---------------------------------------------------------------- 7: listening */
 
 #define LOOP_FRAMES 96000u   /* 2 s */
@@ -819,6 +861,7 @@ int main(void) {
     phase_efx_echo();
     phase_hf_auto();
     phase_spatialize();
+    phase_efx_chorus();
     phase_listen();
     return 0;
 }
