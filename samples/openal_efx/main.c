@@ -529,7 +529,7 @@ static void phase_efx_echo(void) {
     log_load("efx echo");
     n = capture(800, play_a);
     log_peaks("efx echo", n);
-    logf_("   FEEDBACK 0.5, DAMPING 0.5, SPREAD 0 (expected: both ears +2400, +4800, then every 4800, darker)\n");
+    logf_("   FEEDBACK 0.5, DAMPING 0.5, SPREAD 0 (expected: both ears +2400, +4800 at 0 dB, then one every 2400, each darker)\n");
     p_alEffectf(fx, AL_ECHO_FEEDBACK, 0.5f);
     p_alEffectf(fx, AL_ECHO_DAMPING, 0.5f);
     p_alEffectf(fx, AL_ECHO_SPREAD, 0.0f);
@@ -579,7 +579,7 @@ static void phase_hf_auto(void) {
 }
 
 static void phase_spatialize(void) {
-    static int16_t pcm[2 * TONE_FRAMES];
+    int16_t *pcm = malloc(2u * TONE_FRAMES * sizeof(int16_t));
     ALuint b = 0, src;
     double r, p;
     uint32_t i, n;
@@ -588,7 +588,8 @@ static void phase_spatialize(void) {
         pcm[2u * i] = pcm[2u * i + 1u] = (int16_t)(8000.0f * sinf(TWO_PI * 500.0f * (float)i / 48000.0f));
     }
     alGenBuffers(1, &b);
-    alBufferData(b, AL_FORMAT_STEREO16, pcm, (ALsizei)sizeof(pcm), 48000);
+    alBufferData(b, AL_FORMAT_STEREO16, pcm, (ALsizei)(2u * TONE_FRAMES * sizeof(int16_t)), 48000);
+    free(pcm);
     src = make_source(b);
     alSourcei(src, AL_LOOPING, AL_TRUE);
     alSourcePlay(src);
