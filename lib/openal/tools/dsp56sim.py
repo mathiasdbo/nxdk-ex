@@ -284,7 +284,7 @@ class Gp:
     # ---------------------------------------------------------- ALU
     def alu(self, mn, ops):
         ops = [o.lower() for o in dsp56asm.split_operands(ops)]
-        if mn in ('clr', 'tst', 'neg', 'abs', 'asl', 'asr', 'not', 'rnd', 'inc', 'dec'):
+        if mn in ('clr', 'tst', 'neg', 'abs', 'asl', 'asr', 'lsr', 'not', 'rnd', 'inc', 'dec'):
             d = ops[0]
             v = self.reg[d]
             if mn == 'clr':
@@ -297,6 +297,9 @@ class Gp:
                 v = v << 1
             elif mn == 'asr':
                 v = v >> 1
+            elif mn == 'lsr':
+                u = v & ((1 << 56) - 1)         # D1 only, logically; D2 and D0 stay
+                v = sx56((u & ~(MASK24 << 24)) | ((((u >> 24) & MASK24) >> 1) << 24))
             elif mn == 'inc':
                 v = v + 1
             elif mn == 'dec':

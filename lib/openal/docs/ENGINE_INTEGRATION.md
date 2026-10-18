@@ -317,13 +317,21 @@ alSource3i(src, AL_AUXILIARY_SEND_FILTER, (ALint)slot, 0, AL_FILTER_NULL);   /* 
 - **What there is:**
   - `ALC_EXT_EFX` 1.0 in the device's extension string. Every EFX function is available through
     `alGetProcAddress`.
-  - Effect types: `AL_EFFECT_NULL`, `AL_EFFECT_REVERB`, `AL_EFFECT_EAXREVERB`, `AL_EFFECT_ECHO` (below) and
-    `AL_EFFECT_XBOX_GP_PROGRAM` (3.13). Other types give `AL_INVALID_VALUE`, as the extension allows.
+  - Effect types: `AL_EFFECT_NULL`, `AL_EFFECT_REVERB`, `AL_EFFECT_EAXREVERB`, `AL_EFFECT_ECHO`,
+    `AL_EFFECT_CHORUS`, `AL_EFFECT_FLANGER` (below) and `AL_EFFECT_XBOX_GP_PROGRAM` (3.13). Other types give
+    `AL_INVALID_VALUE`, as the extension allows.
   - **`AL_EFFECT_ECHO`** runs on a library kernel on the GP, with every EFX echo parameter: two taps at `DELAY`
     and `DELAY + LRDELAY` from one delay line, panned by `SPREAD` (constant power), the second tap fed back
     by `FEEDBACK` through a one-pole lowpass set by `DAMPING`, so each repeat is darker. The input is the
     slot's sends summed to mono. Taps closer than 32 samples (0.67 ms) are moved to 32. `AL_EFFECTSLOT_GAIN`
     scales the sends into it. Parameter changes reach it when the effect is attached again, in one frame.
+  - **`AL_EFFECT_CHORUS` and `AL_EFFECT_FLANGER`** run on one library kernel (they differ only in their ranges
+    and defaults), with every EFX parameter: two taps, left and right, at `DELAY` swung by an LFO by up to
+    `DEPTH x DELAY`, the right LFO `PHASE` degrees ahead, `RATE` Hz, `WAVEFORM` triangle or sine (a parabola
+    within 0.11 % of a sine). Taps are interpolated between samples and may reach 0 (the flanger's sweep);
+    the taps' average goes back into the line by `FEEDBACK`. The input is the slot's sends summed to mono.
+    The line is all of the GP's Y RAM (2048 samples), so the kernel needs no scratch memory and no DMA;
+    about 4900 instructions a frame (about 10 % of the GP). `AL_EFFECTSLOT_GAIN` scales the sends into it.
   - Filters: `AL_FILTER_NULL` and `AL_FILTER_LOWPASS` (below). Highpass and bandpass give `AL_INVALID_VALUE`.
   - Up to 4 slots and 256 effects and filters. `ALC_MAX_AUXILIARY_SENDS` is 2 (the default; larger requests are
     clamped).

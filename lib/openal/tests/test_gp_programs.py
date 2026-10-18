@@ -20,6 +20,7 @@ tools/dsp56sim.py, against apu_reverb.c's host reference.
 Run by tests/run_tests.py with NXDK_AL_CLANG and NXDK_AL_LIB set (the
 reference helper tests/gpsim_reverb_ref.c is linked against the library).
 """
+import math
 import os
 import subprocess
 import sys
@@ -34,6 +35,7 @@ LOOP = open(os.path.join(OPENAL, 'dsp', 'gp_loop.asm'), encoding='utf-8').read()
 KERNEL = open(os.path.join(OPENAL, 'dsp', 'gp_kfreeverb.asm'), encoding='utf-8').read()
 ECHO = open(os.path.join(OPENAL, 'dsp', 'gp_kecho.asm'), encoding='utf-8').read()
 EFX_ECHO = open(os.path.join(OPENAL, 'dsp', 'gp_kefx_echo.asm'), encoding='utf-8').read()
+EFX_CHORUS = open(os.path.join(OPENAL, 'dsp', 'gp_kefx_chorus.asm'), encoding='utf-8').read()
 
 COPY_DESC = [0x4000, 1 | 2 | (1 << 10) | (32 << 14), (32 << 4) | 1, 0x1400, 0, 0, 0]   # apu_gp.c
 
@@ -296,6 +298,101 @@ def test_efx_echo():
           '%d instructions per frame [PASS]' % gp.frame_steps)
 
 
+def chorus_words(delay, depth, fb, rate, phase, wave):
+    """The library's words (al_efx.c chorus_params): delays in samples, rate in Hz, phase in degrees."""
+    q = lambda v: max(-0x800000, min(0x7FFFFF, int(round(v * 0x800000))))
+    return [q(delay / 2048.0), q(depth * delay / 2048.0), q(fb), q(2.0 * rate / 48000.0),
+            q(phase / 180.0), wave]
+
+
+def chorus_model(words, m, n):
+    """The kernel's algorithm in floating point: the left and right outputs (16-bit) for input m."""
+    D, DD, fb = words[0] * 2048.0 / 0x800000, words[1] * 2048.0 / 0x800000, words[2] / 0x800000
+    line, w, ph = [0.0] * 2048, 0, 0
+    left, right = [], []
+
+    def wave(raw):
+        p = sx(raw) / 0x800000
+        if words[5]:
+            return 1.0 - 2.0 * abs(p)
+        y = 4.0 * p * (1.0 - abs(p))
+        return y + 0.225 * (y * abs(y) - y)
+
+    def tap(raw):
+        d = max(0.0, D + DD * wave(raw))
+        i = int(d)
+        f = d - i
+        s0, s1 = line[(w - i) % 2048], line[(w - i - 1) % 2048]
+        return s0 + f * (s1 - s0)
+
+    for t in range(n):
+        x = m[t] / 0x800000
+        line[w] = x
+        ph = (ph + words[3]) & 0xFFFFFF
+        tl, tr = tap(ph), tap((ph + words[4]) & 0xFFFFFF)
+        line[w] = x + fb * (tl + tr) / 2.0
+        left.append(int(tl * 32768.0))
+        right.append(int(tr * 32768.0))
+        w = (w + 1) % 2048
+    return left, right
+
+
+def test_efx_chorus():
+    half = 0x400000
+    s = None
+
+    def run(words, frames, impulses):
+        gp = new_kernel_gp(EFX_CHORUS)
+        load_custom(gp, words, gp.symbols['K_SCRATCH_BYTES'])
+        gp.y = [0x123456] * 0x800          # Y RAM is not cleared by the loader: the kernel must
+        return gp, run_echo(gp, frames, impulses)
+
+    # a whole-sample delay, no LFO: both taps 100 samples late, at the input's level
+    gp, (left, right) = run(chorus_words(100, 0, 0, 0, 0, 1), 6, {(2, 5): half})
+    s = gp.symbols
+    assert hits(left) == [(105, 0x4000)] and hits(right) == [(105, 0x4000)], 'delay: %s %s' % (hits(left), hits(right))
+    # the right bin is summed in too
+    _, (left, _) = run(chorus_words(100, 0, 0, 0, 0, 1), 6, {(3, 5): half})
+    assert hits(left) == [(105, 0x4000)], 'right bin: %s' % hits(left)
+    # half a sample: linear interpolation over two samples
+    _, (left, _) = run(chorus_words(100.5, 0, 0, 0, 0, 1), 6, {(2, 5): half})
+    assert hits(left) == [(105, 0x2000), (106, 0x2000)], 'fraction: %s' % hits(left)
+    # no delay (a flanger sweeping through zero): the same sample
+    _, (left, _) = run(chorus_words(0, 0, 0, 0, 0, 1), 2, {(2, 5): half})
+    assert hits(left) == [(5, 0x4000)], 'zero delay: %s' % hits(left)
+    # feedback 0.5 from the taps' average back into the line
+    _, (left, _) = run(chorus_words(100, 0, 0.5, 0, 0, 1), 12, {(2, 5): half})
+    assert hits(left) == [(105, 0x4000), (205, 0x2000), (305, 0x1000)], 'feedback: %s' % hits(left)
+
+    # a 440 Hz tone through the moving taps, against the model, both waveforms
+    n = 32 * 160
+    tone = [int(0x200000 * math.sin(2 * math.pi * 440 * t / 48000)) for t in range(n)]
+    for wave, phase, fb in ((0, 90, 0.25), (1, -90, -0.5)):
+        words = chorus_words(480, 0.5, fb, 10, phase, wave)
+        gp = new_kernel_gp(EFX_CHORUS)
+        load_custom(gp, words, s['K_SCRATCH_BYTES'])
+        left, right = [], []
+        for f in range(n // 32):
+            fifo = gp.frame({0: [0] * 32, 1: [0] * 32, 2: tone[32 * f:32 * f + 32], 3: [0] * 32})
+            left += fifo[0::2]
+            right += fifo[1::2]
+        ml, mr = chorus_model(words, tone, n)
+        err = max(max(abs(a - b) for a, b in zip(left, ml)), max(abs(a - b) for a, b in zip(right, mr)))
+        assert err <= 4, 'wave %d: %d LSB from the model' % (wave, err)
+        assert max(left) > 0x1800 and left != right, 'wave %d: no output, or no PHASE' % wave
+    # the sine's approximation against the real one
+    worst = 0.0
+    for k in range(-1024, 1024):
+        p = k / 1024.0
+        y = 4.0 * p * (1.0 - abs(p))
+        worst = max(worst, abs(y + 0.225 * (y * abs(y) - y) - math.sin(math.pi * p)))
+    assert worst < 0.0011, worst
+    assert gp.x[s['TMOUT']] == 0, 'a DMA wait timed out'
+    print('[7] EFX chorus / flanger kernel: delay, both bins, interpolation, zero delay, feedback, sine and '
+          'triangle LFOs against the model (sine within %.4f); %d instructions per frame [PASS]'
+          % (worst, gp.frame_steps))
+
+
 def main():
     test_copy()
     with tempfile.TemporaryDirectory(prefix='gpsim_') as tmp:
@@ -308,6 +405,7 @@ def main():
     test_burn(gp)
     test_echo()
     test_efx_echo()
+    test_efx_chorus()
     print('=== GP programs on the host: all passed ===')
 
 

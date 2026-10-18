@@ -42,6 +42,10 @@ typedef struct {
     ALfloat air_absorption_gain_hf, hf_reference, lf_reference, room_rolloff_factor;
     ALint decay_hf_limit;
     ALfloat echo_delay, echo_lr_delay, echo_damping, echo_feedback, echo_spread;   /* AL_EFFECT_ECHO */
+    ALint chorus_waveform, chorus_phase;                                          /* AL_EFFECT_CHORUS */
+    ALfloat chorus_rate, chorus_depth, chorus_feedback, chorus_delay;
+    ALint flanger_waveform, flanger_phase;                                        /* AL_EFFECT_FLANGER */
+    ALfloat flanger_rate, flanger_depth, flanger_feedback, flanger_delay;
 } al_efx_reverb_t;
 
 /* An effect's state: what an effect object holds and what a slot copies */
