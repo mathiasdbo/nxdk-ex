@@ -542,8 +542,19 @@ static void source_sends(const ALsource *src, const AL_SPATIAL_CALC *calc, float
  * Refresh the requested voice context fields from a single spatial
  * computation. Paused sources are updated too so that a resume is current.
  */
+/* AL_SOFT_deferred_updates: changes wait for alProcessUpdatesSOFT */
+static bool s_defer_updates;
+
+/* ALC_SOFT_pause_device: playing voices are held paused */
+static bool s_device_paused;
+
 static void source_update_hw(const ALsource *src, unsigned fields) {
-    NVAPU_VOICE_CONTEXT_3D *ctx = source_live_context(src);
+    NVAPU_VOICE_CONTEXT_3D *ctx;
+    if (s_defer_updates) {
+        ((ALsource *)src)->hw_pending |= fields;
+        return;
+    }
+    ctx = source_live_context(src);
     if (!ctx) {
         return;
     }
@@ -704,8 +715,24 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
     }
     apu_voice_pause(al_source_get_apu_base(), hw_voice_idx, 0);
     apu_voice_trigger(al_source_get_apu_base(), hw_voice_idx);
+    if (s_device_paused) {
+        apu_voice_pause(al_source_get_apu_base(), hw_voice_idx, 1);   /* waits for alcDeviceResumeSOFT */
+    }
     if (src->stream) {
         al_stream_arm(src->stream, hw_voice_idx);
+    }
+}
+
+void al_source_set_device_paused(bool paused) {
+    if (paused == s_device_paused) {
+        return;
+    }
+    s_device_paused = paused;
+    for (size_t i = 0; i < s_source_end; i++) {
+        ALsource *src = &g_sources[i];
+        if (src->in_use && src->state == AL_PLAYING && src->hw_voice_idx >= 0) {
+            apu_voice_pause(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx, paused ? 1 : 0);
+        }
     }
 }
 
@@ -1761,7 +1788,9 @@ AL_API void AL_APIENTRY alSourcePlay(ALuint source) {
     /* If paused and HW voice is intact, unpause directly. Spatial, gain and
      * pitch updates were applied while paused, so the context is current. */
     if (src->state == AL_PAUSED && src->hw_voice_idx >= 0) {
-        apu_voice_pause(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx, 0);
+        if (!s_device_paused) {
+            apu_voice_pause(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx, 0);
+        }
         src->state = AL_PLAYING;
         return;
     }
@@ -2051,6 +2080,8 @@ AL_API void AL_APIENTRY alSpeedOfSound(ALfloat value) {
 AL_API ALint AL_APIENTRY alGetInteger(ALenum param) {
     ensure_subsystem_initialized();
     switch (param) {
+        case AL_DEFERRED_UPDATES_SOFT:
+            return s_defer_updates ? AL_TRUE : AL_FALSE;
         case AL_DISTANCE_MODEL:
             return (ALint)apu_spatial_get_distance_model();
         case AL_DOPPLER_FACTOR:
@@ -2070,6 +2101,9 @@ AL_API void AL_APIENTRY alGetIntegerv(ALenum param, ALint *values) {
     }
     ensure_subsystem_initialized();
     switch (param) {
+        case AL_DEFERRED_UPDATES_SOFT:
+            *values = s_defer_updates ? AL_TRUE : AL_FALSE;
+            break;
         case AL_DISTANCE_MODEL:
             *values = (ALint)apu_spatial_get_distance_model();
             break;
@@ -2374,4 +2408,299 @@ AL_API ALboolean AL_APIENTRY alIsEnabled(ALenum capability) {
     }
     alSetError(AL_INVALID_ENUM);
     return AL_FALSE;
+}
+
+/*
+ * ============================================================================
+ * AL_SOFT_deferred_updates
+ * ============================================================================
+ */
+
+AL_API void AL_APIENTRY alDeferUpdatesSOFT(void) {
+    ensure_subsystem_initialized();
+    s_defer_updates = true;
+}
+
+AL_API void AL_APIENTRY alProcessUpdatesSOFT(void) {
+    ensure_subsystem_initialized();
+    if (!s_defer_updates) {
+        return;
+    }
+    s_defer_updates = false;
+    for (size_t i = 0; i < s_source_end; i++) {
+        ALsource *src = &g_sources[i];
+        if (src->in_use && src->hw_pending != 0u) {
+            unsigned f = src->hw_pending;
+            src->hw_pending = 0u;
+            source_update_hw(src, f);
+        }
+    }
+}
+
+/*
+ * ============================================================================
+ * AL_SOFT_source_latency
+ * ============================================================================
+ */
+
+/* How far the codec plays behind the APU's mix, in frames (0 without output) */
+static uint32_t output_latency_frames(void) {
+    apu_ac97_stats_t a;
+    apu_ac97_get_stats(&a);
+    if (a.zero_copy) {
+        return a.lead_last;
+    }
+    return (a.threaded || a.chunks > 0u) ? APU_AC97_PRIME * APU_AC97_CHUNK_FRAMES : 0u;
+}
+
+static bool is_offset_param(ALenum param) {
+    return param == AL_SEC_OFFSET || param == AL_SAMPLE_OFFSET || param == AL_BYTE_OFFSET;
+}
+
+/* The values of a vector source parameter */
+static int source_param_count(ALenum param) {
+    switch (param) {
+        case AL_POSITION:
+        case AL_VELOCITY:
+        case AL_DIRECTION:
+        case AL_AUXILIARY_SEND_FILTER:
+            return 3;
+        case AL_XBOX_DIRECT_GAINS:
+        case AL_LOOP_POINTS_SOFT:
+        case AL_SAMPLE_OFFSET_LATENCY_SOFT:
+        case AL_SEC_OFFSET_LATENCY_SOFT:
+            return 2;
+        default:
+            return 1;
+    }
+}
+
+static void source_seek_double(ALuint source, ALenum param, double v) {
+    ALsource *src = al_source_get(source);
+    uint32_t frames;
+    if (!src) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+    if (!offset_to_frames(src, param, v, &frames)) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    source_seek(src, frames);
+}
+
+AL_API void AL_APIENTRY alSourcedSOFT(ALuint source, ALenum param, ALdouble value) {
+    if (is_offset_param(param)) {
+        source_seek_double(source, param, value);
+        return;
+    }
+    if (param == AL_SAMPLE_OFFSET_LATENCY_SOFT || param == AL_SEC_OFFSET_LATENCY_SOFT) {
+        alSetError(AL_INVALID_OPERATION);   /* read only */
+        return;
+    }
+    alSourcef(source, param, (ALfloat)value);
+}
+
+AL_API void AL_APIENTRY alSource3dSOFT(ALuint source, ALenum param, ALdouble v1, ALdouble v2, ALdouble v3) {
+    alSource3f(source, param, (ALfloat)v1, (ALfloat)v2, (ALfloat)v3);
+}
+
+AL_API void AL_APIENTRY alSourcedvSOFT(ALuint source, ALenum param, const ALdouble *values) {
+    ALfloat f[3];
+    int i, n = source_param_count(param);
+    if (!values) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    if (n == 1) {
+        alSourcedSOFT(source, param, values[0]);
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        f[i] = (ALfloat)values[i];
+    }
+    alSourcefv(source, param, f);
+}
+
+AL_API void AL_APIENTRY alGetSourcedSOFT(ALuint source, ALenum param, ALdouble *value) {
+    ALfloat f = 0.0f;
+    if (!value) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    if (is_offset_param(param)) {
+        ALsource *src = al_source_get(source);
+        if (!src) {
+            alSetError(AL_INVALID_NAME);
+            return;
+        }
+        *value = frames_to_offset(src, param, source_position(src));
+        return;
+    }
+    if (source_param_count(param) != 1) {
+        alSetError(AL_INVALID_ENUM);   /* a pair: alGetSourcedvSOFT */
+        return;
+    }
+    alGetSourcef(source, param, &f);
+    *value = (ALdouble)f;
+}
+
+AL_API void AL_APIENTRY alGetSource3dSOFT(ALuint source, ALenum param, ALdouble *v1, ALdouble *v2, ALdouble *v3) {
+    ALfloat a = 0.0f, b = 0.0f, c = 0.0f;
+    if (!v1 || !v2 || !v3) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    alGetSource3f(source, param, &a, &b, &c);
+    *v1 = a;
+    *v2 = b;
+    *v3 = c;
+}
+
+AL_API void AL_APIENTRY alGetSourcedvSOFT(ALuint source, ALenum param, ALdouble *values) {
+    ALfloat f[3] = { 0.0f, 0.0f, 0.0f };
+    int i, n = source_param_count(param);
+    if (!values) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    if (param == AL_SEC_OFFSET_LATENCY_SOFT) {
+        ALsource *src = al_source_get(source);
+        if (!src) {
+            alSetError(AL_INVALID_NAME);
+            return;
+        }
+        values[0] = frames_to_offset(src, AL_SEC_OFFSET, source_position(src));
+        values[1] = (double)output_latency_frames() / 48000.0;
+        return;
+    }
+    if (param == AL_SAMPLE_OFFSET_LATENCY_SOFT) {
+        alSetError(AL_INVALID_ENUM);   /* the 64-bit form: alGetSourcei64vSOFT */
+        return;
+    }
+    if (n == 1) {
+        alGetSourcedSOFT(source, param, values);
+        return;
+    }
+    alGetSourcefv(source, param, f);
+    for (i = 0; i < n; i++) {
+        values[i] = (ALdouble)f[i];
+    }
+}
+
+static bool fits_int(ALint64SOFT v) {
+    return v >= -2147483647LL - 1LL && v <= 2147483647LL;
+}
+
+AL_API void AL_APIENTRY alSourcei64SOFT(ALuint source, ALenum param, ALint64SOFT value) {
+    if (is_offset_param(param)) {
+        source_seek_double(source, param, (double)value);
+        return;
+    }
+    if (param == AL_SAMPLE_OFFSET_LATENCY_SOFT || param == AL_SEC_OFFSET_LATENCY_SOFT) {
+        alSetError(AL_INVALID_OPERATION);
+        return;
+    }
+    if (!fits_int(value)) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    alSourcei(source, param, (ALint)value);
+}
+
+AL_API void AL_APIENTRY alSource3i64SOFT(ALuint source, ALenum param, ALint64SOFT v1, ALint64SOFT v2,
+                                         ALint64SOFT v3) {
+    if (!fits_int(v1) || !fits_int(v2) || !fits_int(v3)) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    alSource3i(source, param, (ALint)v1, (ALint)v2, (ALint)v3);
+}
+
+AL_API void AL_APIENTRY alSourcei64vSOFT(ALuint source, ALenum param, const ALint64SOFT *values) {
+    ALint v[3];
+    int i, n = source_param_count(param);
+    if (!values) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    if (n == 1) {
+        alSourcei64SOFT(source, param, values[0]);
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        if (!fits_int(values[i])) {
+            alSetError(AL_INVALID_VALUE);
+            return;
+        }
+        v[i] = (ALint)values[i];
+    }
+    alSourceiv(source, param, v);
+}
+
+AL_API void AL_APIENTRY alGetSourcei64SOFT(ALuint source, ALenum param, ALint64SOFT *value) {
+    ALint v = 0;
+    if (!value) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    if (is_offset_param(param)) {
+        ALsource *src = al_source_get(source);
+        if (!src) {
+            alSetError(AL_INVALID_NAME);
+            return;
+        }
+        *value = (ALint64SOFT)frames_to_offset(src, param, source_position(src));
+        return;
+    }
+    if (source_param_count(param) != 1) {
+        alSetError(AL_INVALID_ENUM);
+        return;
+    }
+    alGetSourcei(source, param, &v);
+    *value = v;
+}
+
+AL_API void AL_APIENTRY alGetSource3i64SOFT(ALuint source, ALenum param, ALint64SOFT *v1, ALint64SOFT *v2,
+                                            ALint64SOFT *v3) {
+    ALint a = 0, b = 0, c = 0;
+    if (!v1 || !v2 || !v3) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    alGetSource3i(source, param, &a, &b, &c);
+    *v1 = a;
+    *v2 = b;
+    *v3 = c;
+}
+
+AL_API void AL_APIENTRY alGetSourcei64vSOFT(ALuint source, ALenum param, ALint64SOFT *values) {
+    ALint v[3] = { 0, 0, 0 };
+    int i, n = source_param_count(param);
+    if (!values) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    if (param == AL_SAMPLE_OFFSET_LATENCY_SOFT) {
+        ALsource *src = al_source_get(source);
+        if (!src) {
+            alSetError(AL_INVALID_NAME);
+            return;
+        }
+        values[0] = (ALint64SOFT)((ALuint64SOFT)source_position(src) << 32);   /* 32.32, no fraction */
+        values[1] = (ALint64SOFT)output_latency_frames() * 1000000000LL / 48000LL;
+        return;
+    }
+    if (param == AL_SEC_OFFSET_LATENCY_SOFT) {
+        alSetError(AL_INVALID_ENUM);   /* the double form: alGetSourcedvSOFT */
+        return;
+    }
+    if (n == 1) {
+        alGetSourcei64SOFT(source, param, values);
+        return;
+    }
+    alGetSourceiv(source, param, v);
+    for (i = 0; i < n; i++) {
+        values[i] = v[i];
+    }
 }
