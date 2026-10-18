@@ -93,6 +93,27 @@ extern "C" {
 #define AL_CHORUS_FEEDBACK                       0x0005
 #define AL_CHORUS_DELAY                          0x0006
 
+#define AL_CHORUS_WAVEFORM_SINUSOID              0
+#define AL_CHORUS_WAVEFORM_TRIANGLE              1
+#define AL_CHORUS_MIN_WAVEFORM                   (0)
+#define AL_CHORUS_MAX_WAVEFORM                   (1)
+#define AL_CHORUS_DEFAULT_WAVEFORM               (1)
+#define AL_CHORUS_MIN_PHASE                      (-180)
+#define AL_CHORUS_MAX_PHASE                      (180)
+#define AL_CHORUS_DEFAULT_PHASE                  (90)
+#define AL_CHORUS_MIN_RATE                       (0.0f)
+#define AL_CHORUS_MAX_RATE                       (10.0f)
+#define AL_CHORUS_DEFAULT_RATE                   (1.1f)
+#define AL_CHORUS_MIN_DEPTH                      (0.0f)
+#define AL_CHORUS_MAX_DEPTH                      (1.0f)
+#define AL_CHORUS_DEFAULT_DEPTH                  (0.1f)
+#define AL_CHORUS_MIN_FEEDBACK                   (-1.0f)
+#define AL_CHORUS_MAX_FEEDBACK                   (1.0f)
+#define AL_CHORUS_DEFAULT_FEEDBACK               (0.25f)
+#define AL_CHORUS_MIN_DELAY                      (0.0f)
+#define AL_CHORUS_MAX_DELAY                      (0.016f)
+#define AL_CHORUS_DEFAULT_DELAY                  (0.016f)
+
 /* Distortion */
 #define AL_DISTORTION_EDGE                       0x0001
 #define AL_DISTORTION_GAIN                       0x0002
@@ -130,6 +151,27 @@ extern "C" {
 #define AL_FLANGER_DEPTH                         0x0004
 #define AL_FLANGER_FEEDBACK                      0x0005
 #define AL_FLANGER_DELAY                         0x0006
+
+#define AL_FLANGER_WAVEFORM_SINUSOID             0
+#define AL_FLANGER_WAVEFORM_TRIANGLE             1
+#define AL_FLANGER_MIN_WAVEFORM                  (0)
+#define AL_FLANGER_MAX_WAVEFORM                  (1)
+#define AL_FLANGER_DEFAULT_WAVEFORM              (1)
+#define AL_FLANGER_MIN_PHASE                     (-180)
+#define AL_FLANGER_MAX_PHASE                     (180)
+#define AL_FLANGER_DEFAULT_PHASE                 (0)
+#define AL_FLANGER_MIN_RATE                      (0.0f)
+#define AL_FLANGER_MAX_RATE                      (10.0f)
+#define AL_FLANGER_DEFAULT_RATE                  (0.27f)
+#define AL_FLANGER_MIN_DEPTH                     (0.0f)
+#define AL_FLANGER_MAX_DEPTH                     (1.0f)
+#define AL_FLANGER_DEFAULT_DEPTH                 (1.0f)
+#define AL_FLANGER_MIN_FEEDBACK                  (-1.0f)
+#define AL_FLANGER_MAX_FEEDBACK                  (1.0f)
+#define AL_FLANGER_DEFAULT_FEEDBACK              (-0.5f)
+#define AL_FLANGER_MIN_DELAY                     (0.0f)
+#define AL_FLANGER_MAX_DELAY                     (0.004f)
+#define AL_FLANGER_DEFAULT_DELAY                 (0.002f)
 
 /* Frequency shifter */
 #define AL_FREQUENCY_SHIFTER_FREQUENCY           0x0001
