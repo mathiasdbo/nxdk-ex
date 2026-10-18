@@ -133,6 +133,10 @@ int main(void) {
     assert(voice_dw(70, MCPX_VOICE_PAR_OFFSET) == 0);                 /* CBO */
     assert(voice_dw(70, MCPX_VOICE_CUR_PSH_SAMPLE) == 0);             /* LBO */
     assert(((voice_dw(70, MCPX_VOICE_TAR_VOLA) >> 4) & 0xFFF) == 0x181);
+    /* the current volumes start at the targets: no ramp from unity in the first frame */
+    assert(voice_dw(70, MCPX_VOICE_CUR_VOLA) == voice_dw(70, MCPX_VOICE_TAR_VOLA));
+    assert(voice_dw(70, MCPX_VOICE_CUR_VOLB) == voice_dw(70, MCPX_VOICE_TAR_VOLB));
+    assert(voice_dw(70, MCPX_VOICE_CUR_VOLC) == voice_dw(70, MCPX_VOICE_TAR_VOLC));
     assert(voice_dw(70, MCPX_VOICE_PAR_STATE) == MCPX_PAR_STATE_ACTIVE_VOICE);
     assert(reg(MCPX_APU_TVL2D) == 70);
     assert(apu_vp_voice_active(70));

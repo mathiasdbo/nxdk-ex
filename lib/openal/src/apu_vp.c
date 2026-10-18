@@ -949,6 +949,13 @@ int apu_vp_voice_start(uintptr_t bar0, uint32_t h, const apu_vp_voice_params_t *
     *voice_dw(h, MCPX_VOICE_TAR_VOLA) = vola;
     *voice_dw(h, MCPX_VOICE_TAR_VOLB) = volb;
     *voice_dw(h, MCPX_VOICE_TAR_VOLC) = volc;
+    /* The voice starts at its volumes: a zeroed current volume is unity on all
+     * eight outputs, which the VP would ramp down to the targets over the first
+     * frame (a muted output on a used bin, such as send 1 on bins 2 / 3, adds
+     * the sound once more, fading from 0 dB) */
+    *voice_dw(h, MCPX_VOICE_CUR_VOLA) = vola;
+    *voice_dw(h, MCPX_VOICE_CUR_VOLB) = volb;
+    *voice_dw(h, MCPX_VOICE_CUR_VOLC) = volc;
     *voice_dw(h, MCPX_VOICE_TAR_PITCH_LINK) = ((uint32_t)(uint16_t)p->pitch << 16) | MCPX_APU_LIST_END;
     if (hrtf != MCPX_HRTF_NONE) {
         latch_hrtf(bar0, h, hrtf);

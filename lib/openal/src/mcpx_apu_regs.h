@@ -127,6 +127,9 @@
 #define MCPX_VOICE_CFG_HRTF_TARGET 0x1Cu        /* handle 15:0 */
 #define MCPX_VOICE_CUR_PSL_START 0x20u          /* BA 23:0 */
 #define MCPX_VOICE_CUR_PSH_SAMPLE 0x24u         /* LBO 23:0 */
+#define MCPX_VOICE_CUR_VOLA     0x28u           /* the VP ramps these toward TAR_VOLA..C over a frame */
+#define MCPX_VOICE_CUR_VOLB     0x2Cu           /* and writes them back (XEMU_VERIFICATION round 16) */
+#define MCPX_VOICE_CUR_VOLC     0x30u
 #define MCPX_VOICE_TAR_VOLA     0x60u
 #define MCPX_VOICE_TAR_VOLB     0x64u
 #define MCPX_VOICE_TAR_VOLC     0x68u
