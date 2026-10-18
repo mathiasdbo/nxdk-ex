@@ -3,7 +3,8 @@
 This guide is for porting an engine's sound system (Xash3D, Quake-family engines, or any homebrew engine) to the
 original Xbox on this library. The library is OpenAL 1.1 plus a few extensions. On a real console it plays
 through the MCPX APU: sources run on hardware voices, the APU mixes them, and the library forwards the mix to
-the AC97 codec. Console verification of each feature is recorded in `XEMU_VERIFICATION.md` 8.1b.
+the AC97 codec. Console verification of each feature is recorded in `XEMU_VERIFICATION.md` 8.1b. Every call, with its values
+and errors, is listed in [`API_REFERENCE.md`](API_REFERENCE.md); this guide shows how to combine them.
 
 ## 1. Build and start-up
 

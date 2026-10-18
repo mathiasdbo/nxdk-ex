@@ -62,6 +62,7 @@ Code Overview
 -------------
 * `lib/hal` - Barebones Hardware Abstraction Layer for the Xbox, from OpenXDK.
 * `lib/net` - Network stack for the Xbox based on lwIP.
+* `lib/openal` - OpenAL 1.1 with EFX on the MCPX APU: hardware voices, HRTF, effects on the GP DSP. See its [README](lib/openal/README.md), the [API reference](lib/openal/docs/API_REFERENCE.md) and the [engine guide](lib/openal/docs/ENGINE_INTEGRATION.md).
 * `lib/pdclib` - Xbox port of PDCLib, a CC0-licensed C standard library.
 * `lib/pbkit` - A low level library for interfacing with the Xbox GPU.
 * `lib/sdl` - Xbox ports of SDL2 and SDL_ttf.
