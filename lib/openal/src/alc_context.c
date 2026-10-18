@@ -93,6 +93,24 @@ static const struct {
     ALC_PROC fn;
 } s_proc_table[] = {
     { "alXboxGetHardwareStatus", (ALC_PROC)alXboxGetHardwareStatus },
+    { "alDeferUpdatesSOFT",      (ALC_PROC)alDeferUpdatesSOFT },
+    { "alcDevicePauseSOFT",      (ALC_PROC)alcDevicePauseSOFT },
+    { "alcDeviceResumeSOFT",     (ALC_PROC)alcDeviceResumeSOFT },
+    { "alcGetStringiSOFT",       (ALC_PROC)alcGetStringiSOFT },
+    { "alcResetDeviceSOFT",      (ALC_PROC)alcResetDeviceSOFT },
+    { "alProcessUpdatesSOFT",    (ALC_PROC)alProcessUpdatesSOFT },
+    { "alSourcedSOFT",           (ALC_PROC)alSourcedSOFT },
+    { "alSource3dSOFT",          (ALC_PROC)alSource3dSOFT },
+    { "alSourcedvSOFT",          (ALC_PROC)alSourcedvSOFT },
+    { "alGetSourcedSOFT",        (ALC_PROC)alGetSourcedSOFT },
+    { "alGetSource3dSOFT",       (ALC_PROC)alGetSource3dSOFT },
+    { "alGetSourcedvSOFT",       (ALC_PROC)alGetSourcedvSOFT },
+    { "alSourcei64SOFT",         (ALC_PROC)alSourcei64SOFT },
+    { "alSource3i64SOFT",        (ALC_PROC)alSource3i64SOFT },
+    { "alSourcei64vSOFT",        (ALC_PROC)alSourcei64vSOFT },
+    { "alGetSourcei64SOFT",      (ALC_PROC)alGetSourcei64SOFT },
+    { "alGetSource3i64SOFT",     (ALC_PROC)alGetSource3i64SOFT },
+    { "alGetSourcei64vSOFT",     (ALC_PROC)alGetSourcei64vSOFT },
     { "alXboxUpdateVoices",      (ALC_PROC)alXboxUpdateVoices },
     { "alXboxReverbPreset",      (ALC_PROC)alXboxReverbPreset },
     { "alXboxReverbf",           (ALC_PROC)alXboxReverbf },
@@ -423,6 +441,15 @@ ALC_API ALCboolean ALC_APIENTRY alcCloseDevice(ALCdevice *device) {
  * ============================================================================
  */
 
+/* ALC_SOFT_HRTF: ALC_HRTF_SOFT switches the APU's HRTF stage (AL_XBOX_HRTF) */
+static void alc_apply_hrtf_attr(ALCint val) {
+    if (val == ALC_TRUE) {
+        apu_voice_set_hrtf_enabled(true);
+    } else if (val == ALC_FALSE) {
+        apu_voice_set_hrtf_enabled(false);
+    }   /* ALC_DONT_CARE_SOFT: as it is */
+}
+
 ALC_API ALCcontext * ALC_APIENTRY alcCreateContext(ALCdevice *device, const ALCint *attrlist) {
     if (!device || !device->is_open) {
         alc_set_error(device, ALC_INVALID_DEVICE);
@@ -467,6 +494,9 @@ ALC_API ALCcontext * ALC_APIENTRY alcCreateContext(ALCdevice *device, const ALCi
                 case ALC_MAX_AUXILIARY_SENDS:
                     /* A request: the context gets at most the hardware's two sends */
                     ctx->max_aux_sends = (val < 0) ? 0 : (val > AL_EFX_MAX_SENDS ? AL_EFX_MAX_SENDS : val);
+                    break;
+                case ALC_HRTF_SOFT:
+                    alc_apply_hrtf_attr(val);
                     break;
                 default:
                     break;
@@ -598,7 +628,7 @@ ALC_API const ALCchar * ALC_APIENTRY alcGetString(ALCdevice *device, ALCenum par
             return "MCPX APU 5.1 Surround\0";
 
         case ALC_EXTENSIONS:
-            return "ALC_EXT_EFX ALC_EXT_disconnect";
+            return "ALC_EXT_EFX ALC_EXT_disconnect ALC_SOFT_HRTF ALC_SOFT_pause_device";
 
         case ALC_CAPTURE_DEVICE_SPECIFIER:
         case ALC_CAPTURE_DEFAULT_DEVICE_SPECIFIER:
@@ -692,6 +722,19 @@ ALC_API void ALC_APIENTRY alcGetIntegerv(ALCdevice *device, ALCenum param, ALCsi
             *values = alc_aux_sends(device);
             break;
 
+        /* ALC_SOFT_HRTF */
+        case ALC_HRTF_SOFT:
+            *values = apu_voice_hrtf_enabled() ? ALC_TRUE : ALC_FALSE;
+            break;
+
+        case ALC_HRTF_STATUS_SOFT:
+            *values = apu_voice_hrtf_enabled() ? ALC_HRTF_ENABLED_SOFT : ALC_HRTF_DISABLED_SOFT;
+            break;
+
+        case ALC_NUM_HRTF_SPECIFIERS_SOFT:
+            *values = 1;
+            break;
+
         /* ALC_EXT_disconnect */
         case ALC_CONNECTED:
             if (device == NULL) {
@@ -724,10 +767,65 @@ ALC_API void ALC_APIENTRY alcGetIntegerv(ALCdevice *device, ALCenum param, ALCsi
 ALC_API ALCboolean ALC_APIENTRY alcIsExtensionPresent(ALCdevice *device, const ALCchar *extname) {
     (void)device;
     /* Keep in sync with alcGetString(ALC_EXTENSIONS) */
-    if (extname != NULL && (strcmp(extname, ALC_EXT_EFX_NAME) == 0 || strcmp(extname, "ALC_EXT_disconnect") == 0)) {
+    if (extname != NULL && (strcmp(extname, ALC_EXT_EFX_NAME) == 0 || strcmp(extname, "ALC_EXT_disconnect") == 0 ||
+                            strcmp(extname, "ALC_SOFT_HRTF") == 0 || strcmp(extname, "ALC_SOFT_pause_device") == 0)) {
         return ALC_TRUE;
     }
     return ALC_FALSE;
+}
+
+/*
+ * ============================================================================
+ * ALC_SOFT_pause_device / ALC_SOFT_HRTF
+ * ============================================================================
+ */
+
+ALC_API void ALC_APIENTRY alcDevicePauseSOFT(ALCdevice *device) {
+    if (!device || !device->is_open) {
+        alc_set_error(device, ALC_INVALID_DEVICE);
+        return;
+    }
+    al_source_set_device_paused(true);
+}
+
+ALC_API void ALC_APIENTRY alcDeviceResumeSOFT(ALCdevice *device) {
+    if (!device || !device->is_open) {
+        alc_set_error(device, ALC_INVALID_DEVICE);
+        return;
+    }
+    al_source_set_device_paused(false);
+}
+
+ALC_API const ALCchar *ALC_APIENTRY alcGetStringiSOFT(ALCdevice *device, ALCenum paramName, ALCsizei index) {
+    if (!device || !device->is_open) {
+        alc_set_error(device, ALC_INVALID_DEVICE);
+        return NULL;
+    }
+    if (paramName != ALC_HRTF_SPECIFIER_SOFT) {
+        alc_set_error(device, ALC_INVALID_ENUM);
+        return NULL;
+    }
+    if (index != 0) {
+        alc_set_error(device, ALC_INVALID_VALUE);
+        return NULL;
+    }
+    return "MCPX APU HRTF";
+}
+
+ALC_API ALCboolean ALC_APIENTRY alcResetDeviceSOFT(ALCdevice *device, const ALCint *attribs) {
+    if (!device || !device->is_open) {
+        alc_set_error(device, ALC_INVALID_DEVICE);
+        return ALC_FALSE;
+    }
+    if (attribs != NULL) {
+        size_t i;
+        for (i = 0; attribs[i] != 0; i += 2) {
+            if (attribs[i] == ALC_HRTF_SOFT) {
+                alc_apply_hrtf_attr(attribs[i + 1]);
+            }
+        }
+    }
+    return ALC_TRUE;
 }
 
 ALC_API void * ALC_APIENTRY alcGetProcAddress(ALCdevice *device, const ALCchar *funcname) {
@@ -764,6 +862,14 @@ static const struct { const char *name; int value; } s_alc_enums[] = {
     { "ALC_EFX_MINOR_VERSION", ALC_EFX_MINOR_VERSION },
     { "ALC_MAX_AUXILIARY_SENDS", ALC_MAX_AUXILIARY_SENDS },
     { "ALC_CONNECTED", ALC_CONNECTED },
+    { "ALC_HRTF_SOFT", ALC_HRTF_SOFT },
+    { "ALC_DONT_CARE_SOFT", ALC_DONT_CARE_SOFT },
+    { "ALC_HRTF_STATUS_SOFT", ALC_HRTF_STATUS_SOFT },
+    { "ALC_HRTF_DISABLED_SOFT", ALC_HRTF_DISABLED_SOFT },
+    { "ALC_HRTF_ENABLED_SOFT", ALC_HRTF_ENABLED_SOFT },
+    { "ALC_NUM_HRTF_SPECIFIERS_SOFT", ALC_NUM_HRTF_SPECIFIERS_SOFT },
+    { "ALC_HRTF_SPECIFIER_SOFT", ALC_HRTF_SPECIFIER_SOFT },
+    { "ALC_HRTF_ID_SOFT", ALC_HRTF_ID_SOFT },
 };
 
 static const struct { const char *name; int value; } s_al_enums[] = {
@@ -839,6 +945,9 @@ static const struct { const char *name; int value; } s_al_enums[] = {
     { "AL_DIRECT_CHANNELS_SOFT", AL_DIRECT_CHANNELS_SOFT },
     { "AL_SOURCE_SPATIALIZE_SOFT", AL_SOURCE_SPATIALIZE_SOFT },
     { "AL_AUTO_SOFT", AL_AUTO_SOFT },
+    { "AL_DEFERRED_UPDATES_SOFT", AL_DEFERRED_UPDATES_SOFT },
+    { "AL_SAMPLE_OFFSET_LATENCY_SOFT", AL_SAMPLE_OFFSET_LATENCY_SOFT },
+    { "AL_SEC_OFFSET_LATENCY_SOFT", AL_SEC_OFFSET_LATENCY_SOFT },
     { "AL_LOOP_POINTS_SOFT", AL_LOOP_POINTS_SOFT },
     { "AL_FORMAT_MONO_XBOX_ADPCM", AL_FORMAT_MONO_XBOX_ADPCM },
     { "AL_FORMAT_STEREO_XBOX_ADPCM", AL_FORMAT_STEREO_XBOX_ADPCM },
@@ -943,7 +1052,8 @@ AL_API const ALchar * AL_APIENTRY alGetString(ALenum param) {
                        : "MCPX APU (null backend)";
         case AL_EXTENSIONS:
             return "AL_EXT_FLOAT32 AL_EXT_OFFSET AL_EXT_source_distance_model AL_EXT_STATIC_BUFFER "
-                   "AL_SOFT_direct_channels AL_SOFT_gain_clamp_ex AL_SOFT_loop_points AL_SOFT_source_spatialize "
+                   "AL_SOFT_deferred_updates AL_SOFT_direct_channels AL_SOFT_gain_clamp_ex AL_SOFT_loop_points "
+                   "AL_SOFT_source_latency AL_SOFT_source_spatialize "
                    "AL_XBOX_hardware_status AL_XBOX_hrtf "
                    "AL_XBOX_adpcm AL_XBOX_output_callback AL_XBOX_pool_size "
                    "AL_XBOX_reverb AL_XBOX_source_control AL_XBOX_stats AL_XBOX_update";
@@ -962,6 +1072,8 @@ AL_API ALboolean AL_APIENTRY alIsExtensionPresent(const ALchar *extname) {
         strcmp(extname, "AL_EXT_FLOAT32") == 0 ||
         strcmp(extname, "AL_EXT_source_distance_model") == 0 ||
         strcmp(extname, "AL_SOFT_direct_channels") == 0 ||
+        strcmp(extname, "AL_SOFT_deferred_updates") == 0 ||
+        strcmp(extname, "AL_SOFT_source_latency") == 0 ||
         strcmp(extname, "AL_SOFT_gain_clamp_ex") == 0 ||
         strcmp(extname, "AL_SOFT_source_spatialize") == 0 ||
         strcmp(extname, "AL_SOFT_loop_points") == 0 ||

@@ -68,6 +68,7 @@ typedef struct ALsource {
     ALenum spatialize;               /* AL_SOURCE_SPATIALIZE_SOFT: AL_FALSE, AL_TRUE, AL_AUTO_SOFT */
     ALboolean direct_channels;       /* AL_DIRECT_CHANNELS_SOFT (stored) */
     ALenum distance_model;           /* AL_DISTANCE_MODEL with AL_SOURCE_DISTANCE_MODEL enabled */
+    unsigned hw_pending;             /* AL_SOFT_deferred_updates: SRC_HW_* fields held back */
     ALfloat reverb_send;             /* AL_XBOX_REVERB_SEND: 0..1 */
     ALfloat xbox_priority;           /* AL_XBOX_PRIORITY: >= 0 engine priority, < 0 the library's */
     ALboolean virtualize;            /* AL_XBOX_VIRTUALIZE */
@@ -142,6 +143,12 @@ void al_source_update_all_gains(void);
  * Called immediately when listener position/velocity/orientation or global models change.
  */
 void al_source_update_all_spatial(void);
+
+/**
+ * ALC_SOFT_pause_device: pause (true) or resume every playing source's voice,
+ * leaving the sources AL_PLAYING. While paused, voices that start stay paused.
+ */
+void al_source_set_device_paused(bool paused);
 
 /**
  * Perform complete 3D spatial calculation for a given source object.

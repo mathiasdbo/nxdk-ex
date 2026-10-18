@@ -355,6 +355,28 @@ int main(void) {
                 alSourcei(s, p, 7);
                 assert(alGetError() == AL_INVALID_VALUE);
                 alDeleteSources(1, &s);
+            } else if (strcmp(name, "AL_SOFT_deferred_updates") == 0) {
+                LPALDEFERUPDATESSOFT defer = (LPALDEFERUPDATESSOFT)ptr_to_fn(alGetProcAddress("alDeferUpdatesSOFT"));
+                LPALPROCESSUPDATESSOFT process =
+                    (LPALPROCESSUPDATESSOFT)ptr_to_fn(alGetProcAddress("alProcessUpdatesSOFT"));
+                assert(defer && process && alGetBoolean(AL_DEFERRED_UPDATES_SOFT) == AL_FALSE);
+                defer();
+                assert(alGetBoolean(AL_DEFERRED_UPDATES_SOFT) == AL_TRUE);
+                process();
+                assert(alGetBoolean(AL_DEFERRED_UPDATES_SOFT) == AL_FALSE && alGetError() == AL_NO_ERROR);
+            } else if (strcmp(name, "AL_SOFT_source_latency") == 0) {
+                LPALGETSOURCEI64VSOFT get64 =
+                    (LPALGETSOURCEI64VSOFT)ptr_to_fn(alGetProcAddress("alGetSourcei64vSOFT"));
+                LPALGETSOURCEDVSOFT getdv = (LPALGETSOURCEDVSOFT)ptr_to_fn(alGetProcAddress("alGetSourcedvSOFT"));
+                ALint64SOFT v64[2] = { -1, -1 };
+                ALdouble dv[2] = { -1.0, -1.0 };
+                ALuint s = 0;
+                assert(get64 && getdv);
+                alGenSources(1, &s);
+                get64(s, AL_SAMPLE_OFFSET_LATENCY_SOFT, v64);
+                getdv(s, AL_SEC_OFFSET_LATENCY_SOFT, dv);
+                assert(v64[0] == 0 && v64[1] >= 0 && dv[0] == 0.0 && dv[1] >= 0.0 && alGetError() == AL_NO_ERROR);
+                alDeleteSources(1, &s);
             } else if (strcmp(name, "AL_SOFT_gain_clamp_ex") == 0) {
                 assert(alGetFloat(AL_GAIN_LIMIT_SOFT) == 1.0f && alGetError() == AL_NO_ERROR);
             } else {

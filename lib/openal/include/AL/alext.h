@@ -272,6 +272,103 @@ typedef void (AL_APIENTRY *LPALXBOXEFFECTPROGRAM)(ALuint effect, const ALuint *w
 #define ALC_CONNECTED                            0x313
 
 /*
+ * AL_SOFT_deferred_updates: between alDeferUpdatesSOFT() and
+ *   alProcessUpdatesSOFT(), source and listener changes are stored but not
+ *   written to the voices; the process call writes them all at once (a frame's
+ *   changes land together). alGetBoolean(AL_DEFERRED_UPDATES_SOFT) reports the
+ *   state. Play, stop, pause and rewind act at once; EFX slot changes too.
+ */
+#define AL_DEFERRED_UPDATES_SOFT                 0xC002
+AL_API void AL_APIENTRY alDeferUpdatesSOFT(void);
+AL_API void AL_APIENTRY alProcessUpdatesSOFT(void);
+typedef void (AL_APIENTRY *LPALDEFERUPDATESSOFT)(void);
+typedef void (AL_APIENTRY *LPALPROCESSUPDATESSOFT)(void);
+
+/*
+ * AL_SOFT_source_latency: double and 64-bit integer forms of the source calls,
+ *   and two read-only pairs:
+ *   AL_SAMPLE_OFFSET_LATENCY_SOFT (alGetSourcei64vSOFT): the play position in
+ *     sample frames as 32.32 fixed point, and the output latency in ns;
+ *   AL_SEC_OFFSET_LATENCY_SOFT (alGetSourcedvSOFT): the position in seconds and
+ *     the latency in seconds.
+ *   The latency is how far the codec plays behind the APU's mix: the zero-copy
+ *   lead (about 22 ms), or the queued buffers in copy mode (about 43 ms); 0
+ *   while no output runs. The voice position has no fraction (it reads 0).
+ *   AL_SEC_OFFSET in the double forms and the offsets in the 64-bit forms keep
+ *   their full precision.
+ */
+#define AL_SAMPLE_OFFSET_LATENCY_SOFT            0x1200
+#define AL_SEC_OFFSET_LATENCY_SOFT               0x1201
+typedef signed long long ALint64SOFT;
+typedef unsigned long long ALuint64SOFT;
+AL_API void AL_APIENTRY alSourcedSOFT(ALuint source, ALenum param, ALdouble value);
+AL_API void AL_APIENTRY alSource3dSOFT(ALuint source, ALenum param, ALdouble v1, ALdouble v2, ALdouble v3);
+AL_API void AL_APIENTRY alSourcedvSOFT(ALuint source, ALenum param, const ALdouble *values);
+AL_API void AL_APIENTRY alGetSourcedSOFT(ALuint source, ALenum param, ALdouble *value);
+AL_API void AL_APIENTRY alGetSource3dSOFT(ALuint source, ALenum param, ALdouble *v1, ALdouble *v2, ALdouble *v3);
+AL_API void AL_APIENTRY alGetSourcedvSOFT(ALuint source, ALenum param, ALdouble *values);
+AL_API void AL_APIENTRY alSourcei64SOFT(ALuint source, ALenum param, ALint64SOFT value);
+AL_API void AL_APIENTRY alSource3i64SOFT(ALuint source, ALenum param, ALint64SOFT v1, ALint64SOFT v2,
+                                         ALint64SOFT v3);
+AL_API void AL_APIENTRY alSourcei64vSOFT(ALuint source, ALenum param, const ALint64SOFT *values);
+AL_API void AL_APIENTRY alGetSourcei64SOFT(ALuint source, ALenum param, ALint64SOFT *value);
+AL_API void AL_APIENTRY alGetSource3i64SOFT(ALuint source, ALenum param, ALint64SOFT *v1, ALint64SOFT *v2,
+                                            ALint64SOFT *v3);
+AL_API void AL_APIENTRY alGetSourcei64vSOFT(ALuint source, ALenum param, ALint64SOFT *values);
+typedef void (AL_APIENTRY *LPALSOURCEDSOFT)(ALuint, ALenum, ALdouble);
+typedef void (AL_APIENTRY *LPALSOURCE3DSOFT)(ALuint, ALenum, ALdouble, ALdouble, ALdouble);
+typedef void (AL_APIENTRY *LPALSOURCEDVSOFT)(ALuint, ALenum, const ALdouble *);
+typedef void (AL_APIENTRY *LPALGETSOURCEDSOFT)(ALuint, ALenum, ALdouble *);
+typedef void (AL_APIENTRY *LPALGETSOURCE3DSOFT)(ALuint, ALenum, ALdouble *, ALdouble *, ALdouble *);
+typedef void (AL_APIENTRY *LPALGETSOURCEDVSOFT)(ALuint, ALenum, ALdouble *);
+typedef void (AL_APIENTRY *LPALSOURCEI64SOFT)(ALuint, ALenum, ALint64SOFT);
+typedef void (AL_APIENTRY *LPALSOURCE3I64SOFT)(ALuint, ALenum, ALint64SOFT, ALint64SOFT, ALint64SOFT);
+typedef void (AL_APIENTRY *LPALSOURCEI64VSOFT)(ALuint, ALenum, const ALint64SOFT *);
+typedef void (AL_APIENTRY *LPALGETSOURCEI64SOFT)(ALuint, ALenum, ALint64SOFT *);
+typedef void (AL_APIENTRY *LPALGETSOURCE3I64SOFT)(ALuint, ALenum, ALint64SOFT *, ALint64SOFT *, ALint64SOFT *);
+typedef void (AL_APIENTRY *LPALGETSOURCEI64VSOFT)(ALuint, ALenum, ALint64SOFT *);
+
+/*
+ * ALC_SOFT_pause_device: alcDevicePauseSOFT(dev) pauses every playing voice;
+ *   the sources stay AL_PLAYING and their positions stop. A source started or
+ *   resumed meanwhile waits paused too. alcDeviceResumeSOFT(dev) continues
+ *   them all. The output keeps running (an effect's tail fades out).
+ */
+ALC_API void ALC_APIENTRY alcDevicePauseSOFT(ALCdevice *device);
+ALC_API void ALC_APIENTRY alcDeviceResumeSOFT(ALCdevice *device);
+typedef void (ALC_APIENTRY *LPALCDEVICEPAUSESOFT)(ALCdevice *device);
+typedef void (ALC_APIENTRY *LPALCDEVICERESUMESOFT)(ALCdevice *device);
+
+/*
+ * ALC_SOFT_HRTF: the attribute ALC_HRTF_SOFT (ALC_TRUE, ALC_FALSE,
+ *   ALC_DONT_CARE_SOFT) in alcCreateContext or alcResetDeviceSOFT switches the
+ *   APU's HRTF stage (the same switch as AL_XBOX_HRTF; a change applies at each
+ *   source's next play). alcGetIntegerv: ALC_HRTF_SOFT (on or off),
+ *   ALC_HRTF_STATUS_SOFT (ALC_HRTF_ENABLED_SOFT / ALC_HRTF_DISABLED_SOFT),
+ *   ALC_NUM_HRTF_SPECIFIERS_SOFT (1). alcGetStringiSOFT(dev,
+ *   ALC_HRTF_SPECIFIER_SOFT, 0): "MCPX APU HRTF", the computed spherical-head
+ *   model (no data sets to choose from; ALC_HRTF_ID_SOFT accepts 0).
+ *   alcResetDeviceSOFT applies ALC_HRTF_SOFT and ignores the other attributes
+ *   (the output is always 48 kHz stereo).
+ */
+#define ALC_HRTF_SOFT                            0x1992
+#define ALC_DONT_CARE_SOFT                       0x0002
+#define ALC_HRTF_STATUS_SOFT                     0x1993
+#define ALC_HRTF_DISABLED_SOFT                   0x0000
+#define ALC_HRTF_ENABLED_SOFT                    0x0001
+#define ALC_HRTF_DENIED_SOFT                     0x0002
+#define ALC_HRTF_REQUIRED_SOFT                   0x0003
+#define ALC_HRTF_HEADPHONES_DETECTED_SOFT        0x0004
+#define ALC_HRTF_UNSUPPORTED_FORMAT_SOFT         0x0005
+#define ALC_NUM_HRTF_SPECIFIERS_SOFT             0x1994
+#define ALC_HRTF_SPECIFIER_SOFT                  0x1995
+#define ALC_HRTF_ID_SOFT                         0x1996
+ALC_API const ALCchar *ALC_APIENTRY alcGetStringiSOFT(ALCdevice *device, ALCenum paramName, ALCsizei index);
+ALC_API ALCboolean ALC_APIENTRY alcResetDeviceSOFT(ALCdevice *device, const ALCint *attribs);
+typedef const ALCchar *(ALC_APIENTRY *LPALCGETSTRINGISOFT)(ALCdevice *device, ALCenum paramName, ALCsizei index);
+typedef ALCboolean (ALC_APIENTRY *LPALCRESETDEVICESOFT)(ALCdevice *device, const ALCint *attribs);
+
+/*
  * ============================================================================
  * AL_XBOX_source_control (engine control of hardware voices)
  * ============================================================================

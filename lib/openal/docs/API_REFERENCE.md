@@ -52,6 +52,10 @@ As in OpenAL 1.1: `alGetError()` returns the first error since the last call and
 | `alcMakeContextCurrent`, `alcGetCurrentContext`, `alcGetContextsDevice`, `alcDestroyContext` | standard |
 | `alcProcessContext(ctx)` | the per-frame tick, the same as `alXboxUpdateVoices` (3.1 of this page) |
 | `alcSuspendContext` | does nothing |
+| `alcDevicePauseSOFT(dev)` / `alcDeviceResumeSOFT(dev)` | `ALC_SOFT_pause_device`: hold every playing voice; the sources stay `AL_PLAYING` and their positions stop. A source started or resumed meanwhile waits too. The output keeps running, so an effect's tail fades out |
+| `ALC_HRTF_SOFT` attribute | `ALC_SOFT_HRTF`, in `alcCreateContext` or `alcResetDeviceSOFT`: `ALC_TRUE` / `ALC_FALSE` switch the APU's HRTF (the `AL_XBOX_HRTF` switch, applied at each source's next play), `ALC_DONT_CARE_SOFT` leaves it. `alcGetIntegerv`: `ALC_HRTF_SOFT`, `ALC_HRTF_STATUS_SOFT` (enabled / disabled), `ALC_NUM_HRTF_SPECIFIERS_SOFT` (1) |
+| `alcGetStringiSOFT(dev, ALC_HRTF_SPECIFIER_SOFT, 0)` | `"MCPX APU HRTF"`, the computed model (there are no data sets to choose from) |
+| `alcResetDeviceSOFT(dev, attrs)` | applies `ALC_HRTF_SOFT`; the other attributes are ignored (the output is always 48 kHz stereo) |
 | `alcGetString`, `alcGetIntegerv`, `alcGetError`, `alcIsExtensionPresent`, `alcGetProcAddress`, `alcGetEnumValue` | `alcGetIntegerv` answers the 1.1 queries plus `ALC_EFX_MAJOR_VERSION` (1), `ALC_EFX_MINOR_VERSION` (0) and `ALC_MAX_AUXILIARY_SENDS` |
 | capture (`alcCaptureOpenDevice` ...) | stubs: the device cannot be opened |
 
@@ -146,6 +150,17 @@ on a console (64 on xemu). The others wait in virtual standby, or stop if `AL_XB
 | `AL_DISTANCE_MODEL` | `alSourcei` / get | the 1.1 models, default `AL_INVERSE_DISTANCE_CLAMPED` | the source's own model, used while `alEnable(AL_SOURCE_DISTANCE_MODEL)` is on (`AL_EXT_source_distance_model`) |
 | `AL_DIRECT_CHANNELS_SOFT` | `alSourcei` / get | `AL_FALSE` (default) / `AL_TRUE` | stored: stereo always plays left to left, right to right |
 
+**`AL_SOFT_source_latency`:**
+- **Double forms** `alSource{d,3d,dv}SOFT` and `alGetSource{d,3d,dv}SOFT`, and **64-bit forms**
+  `alSource{i64,3i64,i64v}SOFT` and `alGetSource{i64,3i64,i64v}SOFT`, for every source attribute. The offsets
+  keep their precision in them (an `AL_SEC_OFFSET` of a long sound lands on its sample). A 64-bit value outside
+  32 bits for an integer attribute gives `AL_INVALID_VALUE`.
+- **`AL_SAMPLE_OFFSET_LATENCY_SOFT`** (`alGetSourcei64vSOFT`): the position in frames as 32.32 fixed point (the
+  fraction is 0: the voice position has none) and the output latency in nanoseconds.
+- **`AL_SEC_OFFSET_LATENCY_SOFT`** (`alGetSourcedvSOFT`): the position and the latency in seconds.
+- **The latency** is how far the codec plays behind the APU's mix: the zero-copy lead (about 22 ms), or the
+  queued buffers in copy mode (about 43 ms); 0 while no output runs (the null backend).
+- Both pairs are read only (`AL_INVALID_OPERATION` when set).
 ### 5.2 EFX source attributes (`AL/efx.h`)
 
 | Attribute | Call | Effect here |
@@ -330,6 +345,10 @@ alXboxOutputCallback(cb, user);                             /* NULL removes it *
   here, the Xbox source and effect tokens and the extensions above (0 for a name not known).
 - **`alGetFloat(AL_GAIN_LIMIT_SOFT)`** (`AL_SOFT_gain_clamp_ex`): 1, since a voice's volume only attenuates.
 - **`alcGetIntegerv(dev, ALC_CONNECTED)`** (`ALC_EXT_disconnect`): `ALC_TRUE` while the device is open.
+- **`alDeferUpdatesSOFT()` / `alProcessUpdatesSOFT()`** (`AL_SOFT_deferred_updates`): between the two, source
+  and listener changes are stored but not written to the voices; the process call writes each changed source
+  once. `alGetBoolean(AL_DEFERRED_UPDATES_SOFT)` reports the state. Play, stop, pause, rewind and EFX slot
+  changes act at once.
 - **Listener:** `AL_POSITION`, `AL_VELOCITY`, `AL_ORIENTATION`, `AL_GAIN`, and `AL_METERS_PER_UNIT` (6.5).
 
 ## 10. Not supported

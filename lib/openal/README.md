@@ -83,6 +83,10 @@ Every call, token, range and error is in [`docs/API_REFERENCE.md`](docs/API_REFE
 | `AL_SOFT_direct_channels` | `AL_DIRECT_CHANNELS_SOFT`, accepted (stereo always plays straight to left and right) |
 | `AL_SOFT_gain_clamp_ex` | `alGetFloat(AL_GAIN_LIMIT_SOFT)`: 1 |
 | `ALC_EXT_disconnect` | `alcGetIntegerv(ALC_CONNECTED)`: true while the device is open |
+| `AL_SOFT_deferred_updates` | `alDeferUpdatesSOFT` / `alProcessUpdatesSOFT`: a frame's source and listener changes reach the voices together |
+| `AL_SOFT_source_latency` | double and 64-bit source calls; position plus output latency (`AL_SAMPLE_OFFSET_LATENCY_SOFT`, `AL_SEC_OFFSET_LATENCY_SOFT`) |
+| `ALC_SOFT_pause_device` | `alcDevicePauseSOFT` / `alcDeviceResumeSOFT`: hold every voice, sources stay playing |
+| `ALC_SOFT_HRTF` | `ALC_HRTF_SOFT` in the context or `alcResetDeviceSOFT` attributes switches the APU's HRTF; its status and specifier |
 | `ALC_EXT_EFX` | the OpenAL Effects Extension 1.0: slots, sends, reverb / EAX reverb on the GP (`ENGINE_INTEGRATION.md` 3.12) |
 | `AL_XBOX_gp_program` | `AL_EFFECT_XBOX_GP_PROGRAM`, `alXboxEffectProgram`, `AL_XBOX_GP_PARAM0 + n`: an EFX effect that runs your own GP DSP kernel (3.13, `docs/GP_KERNELS.md`) |
 | `AL_XBOX_hardware_status` | `alXboxGetHardwareStatus`: voices, free voices, sample memory, backend, AV pack, HRTF / reverb running, GP load |
