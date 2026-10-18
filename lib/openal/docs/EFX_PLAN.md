@@ -91,7 +91,8 @@ Toolchain note: nxdk's pdclib `lrint*()` is an `assert(0)` stub; round by hand.
   rolloff, as the spec adds them) x send-filter gain. `AL_AUXILIARY_SEND_FILTER_GAIN_AUTO` follows the spec;
   the HF parts (`AL_AIR_ABSORPTION_FACTOR`, `AL_CONE_OUTER_GAINHF`, `*_GAINHF_AUTO`) are stored and wait for
   filters. `AL_METERS_PER_UNIT` on the listener is stored (used by air absorption later).
-- `AL_EFFECTSLOT_GAIN` is the kernel's wet gain on the GP (one word, live). `AL_EFFECTSLOT_AUXILIARY_SEND_AUTO`
+- `AL_EFFECTSLOT_GAIN` is the reverb's wet gain on the GP (one word, live); for a custom kernel it scales the
+  sends into it (the kernel has no word for it). `AL_EFFECTSLOT_AUXILIARY_SEND_AUTO`
   is stored and honoured with the source auto flags.
 - Volume changes are live (as `AL_XBOX_REVERB_SEND` is). `AL_XBOX_REVERB` on: send 0 is
   `AL_XBOX_REVERB_SEND` x the dry gain (the old level exactly) and EFX sends are silent; off: the EFX sends to

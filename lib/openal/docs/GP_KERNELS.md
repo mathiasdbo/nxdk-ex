@@ -47,8 +47,9 @@ alSource3i(src, AL_AUXILIARY_SEND_FILTER, (ALint)slot, 0, AL_FILTER_NULL);
 - **One effect per device:** the GP runs one program. While a slot holds a kernel, attaching an effect to
   another slot, or `alEnable(AL_XBOX_REVERB)`, gives `AL_INVALID_OPERATION`. Attaching a reverb to the same slot
   replaces the kernel and puts the reverb's code back.
-- **`AL_EFFECTSLOT_GAIN` does not reach a custom kernel.** The kernel has no word for it; give it a wet
-  parameter (as the echo does).
+- **`AL_EFFECTSLOT_GAIN`** scales the sends into the kernel (the kernel has no word for it), live. For a
+  linear kernel such as the echo that is the same as scaling its output; a kernel that is not linear (a
+  compressor, a distortion) sees a quieter input, so give it its own output-gain parameter if it needs one.
 - **Load:** `alXboxGetHardwareStatus(AL_XBOX_GP_LOAD, &v)` is the share of the last frame the effect took, in
   percent; `AL_XBOX_GP_LOAD_PEAK` the highest since the previous peak query. 100 means frames are late and the
   dry mix stutters. Console only: 0 elsewhere (section 7).
