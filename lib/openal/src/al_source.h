@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "al_buffer.h"
+#include "al_efx.h"
 #include "al_stream.h"
 #include "apu_voice.h"
 #include "apu_hardware.h"
@@ -67,6 +68,7 @@ typedef struct ALsource {
     ALfloat reverb_send;             /* AL_XBOX_REVERB_SEND: 0..1 */
     ALfloat xbox_priority;           /* AL_XBOX_PRIORITY: >= 0 engine priority, < 0 the library's */
     ALboolean virtualize;            /* AL_XBOX_VIRTUALIZE */
+    al_efx_source_t efx;             /* ALC_EXT_EFX: filters, sends and their factors */
 } ALsource;
 
 
@@ -238,6 +240,17 @@ AL_API void AL_APIENTRY alSourceUnqueueBuffers(ALuint source, ALsizei nb, ALuint
 
 /* AL_XBOX_reverb: the reverb is enabled and running on the GP */
 bool al_reverb_active(void);
+
+/** The GP effect or its slot changed (AL_XBOX_REVERB on/off, an EFX slot's effect, gain or send-auto flag):
+ * re-apply it and update every voice's sends. */
+void al_source_effects_changed(void);
+
+/** Tests: the custom kernel the GP should run (an active AL_EFFECT_XBOX_GP_PROGRAM slot with an image). */
+bool al_source_debug_gp_kernel(apu_gp_kernel_t *k, const uint32_t **params);
+
+/** Host tests: the GP effect's parameters (false: none runs), and a source's send gains as they would reach its voice. */
+bool al_source_debug_gp_effect(apu_reverb_params_t *p);
+bool al_source_debug_sends(ALuint source, float out[APU_VOICE_SENDS]);
 
 #ifdef __cplusplus
 }

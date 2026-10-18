@@ -123,6 +123,8 @@ typedef void (AL_APIENTRY *LPALBUFFERDATASTATIC)(ALuint buffer, ALenum format, c
  *   AL_XBOX_REVERB_OUTPUT_LOWPASS 0 .. 0.98       muffles the whole mix, dry sound included
  *                                                 (underwater; 0 leaves the mix untouched)
  * Gains change at once; a new pre-delay restarts the reverb (its tail is cut).
+ * The GP runs one effect: AL_XBOX_REVERB and an ALC_EXT_EFX slot holding an
+ * effect exclude each other (AL_INVALID_OPERATION; AL/efx.h).
  * alXboxGetReverbf reads a value back. Out-of-range values: AL_INVALID_VALUE.
  * Runs on a real console (AL_XBOX_REVERB_ACTIVE says when); the settings are
  * kept when no device is open and applied when one is.
@@ -155,6 +157,52 @@ AL_API void AL_APIENTRY alXboxGetReverbf(ALenum param, ALfloat *value);
 typedef void (AL_APIENTRY *LPALXBOXREVERBPRESET)(ALint preset);
 typedef void (AL_APIENTRY *LPALXBOXREVERBF)(ALenum param, ALfloat value);
 typedef void (AL_APIENTRY *LPALXBOXGETREVERBF)(ALenum param, ALfloat *value);
+
+/*
+ * ============================================================================
+ * AL_XBOX_gp_program (an ALC_EXT_EFX effect that runs the application's own
+ * GP DSP kernel)
+ * ============================================================================
+ *
+ *   alEffecti(effect, AL_EFFECT_TYPE, AL_EFFECT_XBOX_GP_PROGRAM);
+ *   alXboxEffectProgram(effect, image, count, 0);
+ *   alEffecti(effect, AL_XBOX_GP_PARAM0 + n, v);    n < AL_XBOX_GP_PARAMS
+ *   alAuxiliaryEffectSloti(slot, AL_EFFECTSLOT_EFFECT, effect);
+ *
+ * The image is a DSP56300 kernel for the library's GP frame loop (the ABI in
+ * lib/openal/dsp/gp_loop.asm; an example in dsp/gp_kecho.asm), as
+ * tools/dsp56asm.py --image writes it: AL_XBOX_GP_IMAGE_MAGIC, the ABI
+ * version (AL_XBOX_GP_IMAGE_ABI), the scratch bytes it uses, the DMA
+ * descriptors it runs a frame (at most 60), then up to 0x700 code words for
+ * P:$100. The library checks the header, the size, 24-bit words and the
+ * scratch (about 180 KiB, what the reverb's delay lines take) and keeps a
+ * copy; anything else gives AL_INVALID_VALUE, and flags must be 0. The
+ * kernel's input is the slot's mixbin pair (every send; EFX_PLAN.md 3.2), its
+ * output is added to the dry mix.
+ *
+ * Parameters are 24-bit words the kernel reads at X:KPARAM + n: alEffecti
+ * stores an integer (-0x800000 .. 0xFFFFFF, read back sign-extended),
+ * alEffectf a fraction -1 .. 1 as Q23. As with every EFX effect, the slot
+ * takes a copy when the effect is attached: attach it again after changing
+ * parameters. The new values then reach the kernel together at the start of
+ * one 0.67 ms frame (a new image restarts the kernel instead).
+ *
+ * alXboxGetHardwareStatus(AL_XBOX_GP_LOAD / AL_XBOX_GP_LOAD_PEAK): how much
+ * of the GP's frame the effect takes, in percent, for the last frame and the
+ * most since the last AL_XBOX_GP_LOAD_PEAK query (100: frames are late; the
+ * dry mix stutters). Measured against a frame without the effect, on a
+ * console only (0 elsewhere).
+ */
+#define AL_EFFECT_XBOX_GP_PROGRAM                0x7100
+#define AL_XBOX_GP_PARAM0                        0x7120
+#define AL_XBOX_GP_PARAMS                        32
+#define AL_XBOX_GP_IMAGE_MAGIC                   0x47504B   /* 'GPK' */
+#define AL_XBOX_GP_IMAGE_ABI                     1
+#define AL_XBOX_GP_LOAD                          0x700E
+#define AL_XBOX_GP_LOAD_PEAK                     0x700F
+
+AL_API void AL_APIENTRY alXboxEffectProgram(ALuint effect, const ALuint *words, ALsizei count, ALuint flags);
+typedef void (AL_APIENTRY *LPALXBOXEFFECTPROGRAM)(ALuint effect, const ALuint *words, ALsizei count, ALuint flags);
 
 /*
  * ============================================================================

@@ -5,7 +5,8 @@
 #include <math.h>
 
 #include "apu_reverb.h"
-#include "apu_gp_reverb.h"   /* dsp/gp_reverb.asm through tools/dsp56asm.py */
+#include "apu_gp_kfreeverb.h"   /* dsp/gp_kfreeverb.asm through tools/dsp56asm.py */
+#include "apu_gp_loop.h"        /* dsp/gp_loop.asm */
 
 /*
  * Reverb on the GP (apu_reverb.c): the X-memory layout dsp/gp_reverb.asm
@@ -35,7 +36,7 @@ static double run_energy(const apu_reverb_params_t *p, uint32_t frames, uint32_t
     uint32_t f, k, first = 0xFFFFFFFFu;
     assert(apu_reverb_ref_init(&r, p) == 0);
     for (f = 0; f < frames; f++) {
-        int32_t bins[3][32], out[2][32];
+        int32_t bins[4][32], out[2][32];
         memset(bins, 0, sizeof(bins));
         if (f == 0) bins[2][0] = 0x400000;
         apu_reverb_ref_frame(&r, bins, out);
@@ -66,7 +67,7 @@ int main(void) {
     apu_reverb_line_lengths(&p, len);
     assert(len[0] == 960u);                                   /* 20 ms pre-delay */
     for (k = 0; k < APU_REVERB_LINES; k++) {
-        uint32_t r = 0x130u + 16u * k, wd = r + 8u, off, size, off2, size2;
+        uint32_t r = 0x1B0u + 16u * k, wd = r + 8u, off, size, off2, size2;
         apu_reverb_line_buffer(k, &off, &size);
         assert(len[k] >= APU_REVERB_MIN_PRE);                 /* never reads the frame it writes */
         assert(size % 4096u == 0 && size >= 4u * (len[k] + 64u));
@@ -81,34 +82,43 @@ int main(void) {
         assert(find(w, n, r + 1u) == (0x9D0u | (1u << 14)));  /* dsp_step 1 (console: rounds 1-2) */
         assert(find(w, n, wd + 1u) == (0x9D2u | (1u << 14)));
         assert(find(w, n, r + 2u) == 32u && find(w, n, wd + 2u) == 32u);
-        assert(find(w, n, r + 3u) == 0x300u + 64u * k && find(w, n, wd + 3u) == 0x320u + 64u * k);
+        assert(find(w, n, r + 3u) == 0x340u + 64u * k && find(w, n, wd + 3u) == 0x360u + 64u * k);
         assert(find(w, n, wd + 4u) - find(w, n, r + 4u) == 4u * len[k]);   /* the delay, in bytes */
         assert(find(w, n, r + 5u) == off && find(w, n, wd + 6u) == size - 1u);
     }
-    assert(find(w, n, 0x08u) == 0x4000u && find(w, n, 0x0Bu) == 0xA8u);
+    assert(find(w, n, 0x08u) == 0x4000u && find(w, n, 0x0Bu) == GP_LOOP_OUTL);
     assert(find(w, n, 0x0Au) == ((32u << 4) | 1u));
+    assert(find(w, n, GP_KFREEVERB_KIN) == 0x1440u);               /* input pair: bins 2/3 */
+    assert(find(w, n, GP_LOOP_K_RHEAD) == GP_KFREEVERB_RCHAIN && find(w, n, GP_LOOP_K_WHEAD) == GP_KFREEVERB_WCHAIN);
     assert(apu_reverb_scratch_bytes() + APU_REVERB_SCRATCH_BASE <= 2u * 1024u * 1024u);
-    assert(GP_REVERB_WORDS <= 0x800u);
-    assert(GP_REVERB_CTAB == 0x30u && GP_REVERB_ATAB == 0x90u && GP_REVERB_RCHAIN == 0x130u);
-    assert(GP_REVERB_OUTLP == 0x25u && GP_REVERB_OUTST == 0x2Cu && GP_REVERB_OUTST + 4u <= GP_REVERB_CTAB);
-    assert(GP_REVERB_OUTL == 0xA8u && GP_REVERB_ACCL == 0xE8u && GP_REVERB_PRE_IN == 0x300u);
-    assert(0x320u + 64u * (APU_REVERB_LINES - 1u) + 32u <= 0xC00u);   /* line blocks below the mixbin mirror */
-    assert(0x138u + 16u * (APU_REVERB_LINES - 1u) + 7u <= 0x300u);    /* descriptors below the blocks */
-    assert(GP_REVERB_FLAGS == 0x11u && GP_REVERB_CNT == 0x10u);
+    /* The loop and the kernel fit their parts of the bootstrap image and of X memory */
+    assert(GP_LOOP_WORDS <= GP_LOOP_KERNEL && GP_KFREEVERB_ORIGIN == GP_LOOP_KERNEL);
+    assert(GP_KFREEVERB_ORIGIN + GP_KFREEVERB_WORDS <= 0x800u);
+    assert(GP_LOOP_FIFO2 == 0x08u && GP_LOOP_OUTL == 0x20u && GP_LOOP_OUTR == 0x40u);
+    assert(GP_LOOP_MBOX + 2u * GP_LOOP_MB_MAX <= GP_LOOP_KX_BASE && GP_KFREEVERB_KIN >= GP_LOOP_KX_BASE);
+    assert(GP_LOOP_OUTLP == 0x1Bu && GP_LOOP_OUTST == 0x1Cu && GP_LOOP_OUTST + 4u <= GP_LOOP_OUTL);
+    assert(GP_KFREEVERB_INGAIN == 0xE1u && GP_KFREEVERB_WET == 0xE4u && GP_KFREEVERB_APG == 0xE5u);
+    assert(GP_KFREEVERB_CTAB == 0xF0u && GP_KFREEVERB_ATAB == 0x150u && GP_KFREEVERB_RCHAIN == 0x1B0u);
+    assert(GP_KFREEVERB_ACCL == 0x170u && GP_KFREEVERB_ACCR == 0x190u && GP_KFREEVERB_PRE_IN == 0x340u);
+    assert(GP_KFREEVERB_OUTL == GP_LOOP_OUTL);
+    assert(0x360u + 64u * (APU_REVERB_LINES - 1u) + 32u <= 0xC00u);   /* line blocks below the mixbin mirror */
+    assert(0x1B8u + 16u * (APU_REVERB_LINES - 1u) + 7u <= 0x340u);    /* descriptors below the blocks */
+    assert(2u * APU_REVERB_LINES <= 60u);                              /* the kernel's descriptor quota */
+    assert(GP_LOOP_FLAGS == 0x11u && GP_LOOP_CNT == 0x10u);
     printf("    -> 25 lines, chains end at EOL and at the FIFO descriptor, buffers apart [PASS]\n");
 
     printf("[2] Coefficients...\n");
     assert(apu_reverb_q23(0.5f) == 0x400000u && apu_reverb_q23(-1.0f) == 0x800000u);
     assert(apu_reverb_q23(1.0f) == 0x7FFFFFu && apu_reverb_q23(-2.0f) == 0x800000u);
     {
-        uint32_t g_short = find(w, n, 0x30u + 3u), g_long = find(w, n, 0x30u + 6u * 15u + 3u);
+        uint32_t g_short = find(w, n, GP_KFREEVERB_CTAB + 3u), g_long = find(w, n, GP_KFREEVERB_CTAB + 6u * 15u + 3u);
         assert(g_short > g_long && g_short < 0x7FFFFFu);      /* a longer comb decays more per pass */
         p.decay_time = 3.0f;
         n = apu_reverb_coefficients(&p, w);
-        assert(find(w, n, 0x30u + 3u) > g_short);              /* longer decay, more feedback */
+        assert(find(w, n, GP_KFREEVERB_CTAB + 3u) > g_short);              /* longer decay, more feedback */
         p.hf_ratio = 1.0f;
         n = apu_reverb_coefficients(&p, w);
-        assert(find(w, n, 0x30u + 4u) == 0);                  /* no damping */
+        assert(find(w, n, GP_KFREEVERB_CTAB + 4u) == 0);                  /* no damping */
     }
     printf("    -> feedback follows the decay time, damping the HF ratio [PASS]\n");
 
@@ -145,11 +155,11 @@ int main(void) {
         apu_reverb_default_params(&p);
         assert(apu_reverb_ref_init(&r, &p) == 0);
         for (f = 0; f < 200u; f++) {
-            int32_t bins[3][32], out[2][32];
+            int32_t bins[4][32], out[2][32];
             for (i = 0; i < 32u; i++) {
                 bins[0][i] = (int32_t)((f * 32u + i) * 977u % 0x7FFFFu) - 0x40000;
                 bins[1][i] = -bins[0][i];
-                bins[2][i] = 0;
+                bins[2][i] = bins[3][i] = 0;
             }
             apu_reverb_ref_frame(&r, bins, out);
             for (i = 0; i < 32u; i++) {
@@ -169,14 +179,14 @@ int main(void) {
         p.gain = 0.0f;                                      /* the dry path alone */
         assert(apu_reverb_ref_init(&r, &p) == 0);
         for (f = 0; f < 300u; f++) {
-            int32_t bins[3][32], out[2][32];
+            int32_t bins[4][32], out[2][32];
             for (i = 0; i < 32u; i++) {
                 uint32_t t = f * 32u + i;
                 int32_t lo = (int32_t)(0x200000 * sin(2.0 * 3.14159265 * 100.0 * t / 48000.0));
                 int32_t hi = (t & 1u) ? 0x100000 : -0x100000;   /* 24 kHz */
                 bins[0][i] = lo;                            /* left: 100 Hz */
                 bins[1][i] = hi;                            /* right: Nyquist */
-                bins[2][i] = 0;
+                bins[2][i] = bins[3][i] = 0;
                 if (f >= 100u) {
                     e_lo_in += (double)lo * lo;
                     e_hi_in += (double)hi * hi;
