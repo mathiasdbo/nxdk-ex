@@ -20,6 +20,7 @@ OPENAL_SRCS := \
 	$(OPENAL_DIR)/src/al_source.c \
 	$(OPENAL_DIR)/src/al_stream.c \
 	$(OPENAL_DIR)/src/al_listener.c \
+	$(OPENAL_DIR)/src/al_efx.c \
 	$(OPENAL_DIR)/src/alc_context.c
 
 OPENAL_OBJS = $(addsuffix .obj, $(basename $(OPENAL_SRCS)))

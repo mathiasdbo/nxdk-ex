@@ -37,6 +37,7 @@ the AC97 codec. Console verification of each feature is recorded in `XEMU_VERIFI
 | Output | stereo, 16-bit, 48 kHz | no 5.1 or Dolby Digital |
 | HRTF voices | 64 at once | mono 3D sources beyond that are panned by volume (`AL_XBOX_HRTF`) |
 | Reverb | one room for the whole mix | on the GP DSP, no CPU time; each source chooses how much it sends (`AL_XBOX_reverb`, 3.7) |
+| Effects (EFX) | 4 slots, one effect running; 2 sends per source; lowpass filters only | reverb / EAX reverb on the GP (3.12), or the game's own GP kernel: 0x700 code words, 60 DMA descriptors a frame, ~180 KiB scratch (3.13) |
 
 Buffer memory itself comes from contiguous RAM (`apu_mem.c`), so the console's 64 MiB is the real ceiling.
 `alBufferData` keeps a buffer's data in ordinary cached RAM; the APU copy (contiguous, write-combined) is made
@@ -173,6 +174,8 @@ alSourcef(src, AL_XBOX_REVERB_SEND, 0.5f);             /* per source, 0..1, defa
   `BATHROOM`. 14-16 (water, used while the player is under water): `UNDERWATER`. 20-22 (outside): reverb off
   or `GENERIC` with a low gain. 23-25 (cavern): `CAVE`. 26-28 (weirdo): `CAVE` with a long pre-delay. Send
   about 0.3-0.6 for world sounds, 0 for HUD sounds and music.
+- **The same reverb through EFX:** `AL_EFFECT_REVERB` on an auxiliary slot (3.12). Use one or the other: both
+  at once give `AL_INVALID_OPERATION`.
 
 ### 3.8 Measuring the library's CPU time (AL_XBOX_stats)
 
@@ -228,7 +231,8 @@ alXboxOutputCallback(my_fx, my_state);   /* NULL removes it */
 - **Constraints:** it runs in the output thread at high priority. Keep it well under a millisecond per block
   (it shows in `output_hook_cycles`), and do not call OpenAL from it.
 - **Uses:** a CPU effect on the whole mix, a recorder, a level meter.
-- **Effects that don't need it:** the GP reverb (3.7) adds room effects at no CPU cost.
+- **Effects that don't need it:** the GP reverb (3.7, 3.12) and custom GP kernels (3.13) add effects at no CPU
+  cost.
 
 ### 3.10 Sounds from the engine's own memory (AL_EXT_STATIC_BUFFER)
 
@@ -294,6 +298,100 @@ alBufferDataStatic(buf, AL_FORMAT_STEREO_XBOX_ADPCM, xwav_data, xwav_bytes, 4410
   and a one-shot reported `AL_STOPPED` 2 ms after its last sample. Streamed in 256 ms chunks, four queued and
   refilled for 3 s, the tone came out at 480 Hz without a gap.
 
+### 3.12 Effects through EFX (ALC_EXT_EFX)
+
+Engines and ports that already use the OpenAL Effects Extension (`AL/efx.h`) run unchanged. The effect runs on
+the GP (no CPU time) and the sends are voice outputs mixed by the APU:
+
+```c
+ALuint fx, slot;
+alGenEffects(1, &fx);
+alEffecti(fx, AL_EFFECT_TYPE, AL_EFFECT_REVERB);       /* or AL_EFFECT_EAXREVERB */
+alEffectf(fx, AL_REVERB_DECAY_TIME, 2.5f);
+alGenAuxiliaryEffectSlots(1, &slot);
+alAuxiliaryEffectSloti(slot, AL_EFFECTSLOT_EFFECT, (ALint)fx);
+alSource3i(src, AL_AUXILIARY_SEND_FILTER, (ALint)slot, 0, AL_FILTER_NULL);   /* send 0 to the slot */
+```
+
+- **What there is:**
+  - `ALC_EXT_EFX` 1.0 in the device's extension string. Every EFX function is available through
+    `alGetProcAddress`.
+  - Effect types: `AL_EFFECT_NULL`, `AL_EFFECT_REVERB`, `AL_EFFECT_EAXREVERB` and `AL_EFFECT_XBOX_GP_PROGRAM`
+    (3.13). Other types give `AL_INVALID_VALUE`, as the extension allows.
+  - Filters: `AL_FILTER_NULL` and `AL_FILTER_LOWPASS` (below). Highpass and bandpass give `AL_INVALID_VALUE`.
+  - Up to 4 slots and 256 effects and filters. `ALC_MAX_AUXILIARY_SENDS` is 2 (the default; larger requests are
+    clamped).
+- **One effect per device.** The GP runs one program. While one slot holds an effect, attaching an effect to
+  another slot gives `AL_INVALID_OPERATION`. `AL_XBOX_REVERB` (3.7) counts as that effect too. Empty slots are
+  legal and silent.
+- **Sends:**
+  - A send's level is the source's gain with distance attenuation by `AL_ROOM_ROLLOFF_FACTOR`, plus the
+    reverb's own room rolloff; the cone too when `AL_AUXILIARY_SEND_FILTER_GAIN_AUTO` is on.
+  - Volume changes apply live, while the sound plays.
+  - Sends to a slot that does not hold the active effect are silent.
+- **Copy semantics, as in the spec:** a slot takes a copy of the effect when it is attached. After changing
+  the effect, attach it again. A source keeps its slot; deleting a slot a source sends to gives
+  `AL_INVALID_OPERATION`.
+- **The reverb is an approximation.** It is the Freeverb of 3.7 driven by the EFX parameters below. Every
+  parameter is stored and read back; only these change the sound:
+
+  | EFX parameter | What it drives |
+  | --- | --- |
+  | `DECAY_TIME` | decay time |
+  | `DECAY_HFRATIO` | HF ratio, clamped to 1 (no boost) |
+  | `GAIN` x `LATE_REVERB_GAIN` x `AL_EFFECTSLOT_GAIN` | reverb level (clamped to 1) |
+  | `REFLECTIONS_DELAY` + `LATE_REVERB_DELAY` | pre-delay, clamped to 0.1 s |
+  | `DIFFUSION` | diffusion |
+  | `GAINHF` | input lowpass |
+
+  `REFLECTIONS_GAIN`, `DENSITY`, `AIR_ABSORPTION_GAINHF`, `DECAY_HFLIMIT` and the EAX-only parameters (LF
+  gain, echo, modulation, pans, references) are stored but not used. Presets such as Creative's
+  `EFX_REVERB_PRESET_*` are the application's own (the library ships none).
+- **Changing rooms** behaves as in 3.7: gains change live, a new pre-delay restarts the reverb.
+- **Lowpass filters** (`AL_FILTER_LOWPASS`, for occlusion and muffling):
+
+  ```c
+  alFilteri(f, AL_FILTER_TYPE, AL_FILTER_LOWPASS);
+  alFilterf(f, AL_LOWPASS_GAIN, 0.8f);      /* the whole sound */
+  alFilterf(f, AL_LOWPASS_GAINHF, 0.2f);    /* the gain at 5 kHz */
+  alSourcei(src, AL_DIRECT_FILTER, (ALint)f);
+  ```
+
+  - `GAINHF` runs on the voice's own hardware filter (a 2-pole lowpass), fitted so that the level at 5 kHz
+    is `GAINHF`, measured on a console. It costs no CPU time, works on plain, HRTF and stereo voices,
+    and can change while the sound plays without a click. The sound below the cutoff is unchanged, above it
+    falls by about 12 dB an octave: deeper than OpenAL Soft's shelf, so a low `GAINHF` muffles more.
+  - `GAIN` scales the dry sound (direct filter) or that send (send filter).
+  - The hardware filter is one per voice, so it also shapes the sends. A send filter's `GAINHF` is not
+    applied (its `GAIN` is).
+- **Where it runs:** console only, like 3.7. `alXboxGetHardwareStatus(AL_XBOX_REVERB_ACTIVE)` reports 1 while
+  an EFX reverb runs.
+
+### 3.13 Your own effect on the GP (AL_XBOX_gp_program)
+
+`AL_EFFECT_XBOX_GP_PROGRAM` is an EFX effect type that runs the game's own DSP56300 kernel instead of the
+reverb, for example Half-Life's room effect or an echo:
+
+```c
+alEffecti(fx, AL_EFFECT_TYPE, AL_EFFECT_XBOX_GP_PROGRAM);
+alXboxEffectProgram(fx, gp_kecho_image, GP_KECHO_IMAGE_WORDS, 0);   /* image from dsp56asm.py --image */
+alEffecti(fx, AL_XBOX_GP_PARAM0 + 0, 4800);                          /* parameters: 24-bit words */
+alEffectf(fx, AL_XBOX_GP_PARAM0 + 2, 0.5f);                          /* or fractions, as Q23 */
+alAuxiliaryEffectSloti(slot, AL_EFFECTSLOT_EFFECT, (ALint)fx);       /* loads and starts it */
+```
+
+- **Parameters:** a change reaches the kernel when the effect is attached again, all the changed words in the
+  same 0.67 ms frame.
+- **A new image** reloads the kernel, starting from silence. A brief gap in the effect, not in the dry sound.
+- **`AL_EFFECTSLOT_GAIN`** scales the sends into the kernel, live (for a linear kernel, the same as its output).
+- **Cost:** `alXboxGetHardwareStatus(AL_XBOX_GP_LOAD / AL_XBOX_GP_LOAD_PEAK)` is how much of the GP's frame
+  the effect takes, in percent.
+- **Example:** `dsp/gp_kecho.asm` is a stereo echo with delay (32-16384 samples), feedback and wet parameters.
+- **Writing a kernel:** the ABI, the memory map, DMA, building the image and testing it in the host simulator
+  are in `docs/GP_KERNELS.md`.
+- **Status:** checked on a console by `samples/openal_efx`: the echo lands exactly on its delay, parameters
+  change in one frame, the code loads without a GP restart. The reverb takes 34 % of the GP's frame, the echo 4 %.
+
 ## 4. Things to know
 
 - **A one-shot ends a little late.** On a console a voice must never reach the end of its data: that stops the
@@ -314,4 +412,7 @@ alBufferDataStatic(buf, AL_FORMAT_STEREO_XBOX_ADPCM, xwav_data, xwav_bytes, 4410
 `samples/openal_engine` exercises loop points, direct gains, offsets, the pitch range, the voice budget and
 buffer churn, and logs to `E:\openal_engine_N.txt` (a new file each run). `samples/openal_stream` covers streaming and the output
 thread. Mode 6 of `samples/openal_showcase` plays dry recordings through every reverb preset;
-`samples/apu_gp_reverb` measures the reverb's decay on the console.
+`samples/apu_gp_reverb` measures the reverb's decay on the console. `samples/openal_efx` runs EFX the way a
+port does (entry points from `alGetProcAddress`): an EFX reverb, the echo kernel through `alXboxEffectProgram`
+with its delay measured from the final mix, live parameters, two sends into one slot, then 5 minutes of
+listening with the effects changing, and logs to `E:\openal_efx.txt`.

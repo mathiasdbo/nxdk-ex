@@ -227,6 +227,12 @@ AL_API void AL_APIENTRY alListenerf(ALenum param, ALfloat value) {
             al_source_update_all_gains();
             break;
 
+        case AL_METERS_PER_UNIT:
+            if (!al_efx_set_meters_per_unit(value)) {
+                alSetError(AL_INVALID_VALUE);
+            }
+            break;
+
         default:
             alSetError(AL_INVALID_ENUM);
             break;
@@ -271,6 +277,7 @@ AL_API void AL_APIENTRY alListenerfv(ALenum param, const ALfloat *values) {
 
     switch (param) {
         case AL_GAIN:
+        case AL_METERS_PER_UNIT:
             alListenerf(param, values[0]);
             break;
 
@@ -351,6 +358,10 @@ AL_API void AL_APIENTRY alGetListenerf(ALenum param, ALfloat *value) {
             *value = g_listener_gain;
             break;
 
+        case AL_METERS_PER_UNIT:
+            *value = al_efx_meters_per_unit();
+            break;
+
         default:
             alSetError(AL_INVALID_ENUM);
             break;
@@ -393,6 +404,10 @@ AL_API void AL_APIENTRY alGetListenerfv(ALenum param, ALfloat *values) {
     switch (param) {
         case AL_GAIN:
             values[0] = g_listener_gain;
+            break;
+
+        case AL_METERS_PER_UNIT:
+            values[0] = al_efx_meters_per_unit();
             break;
 
         case AL_POSITION:

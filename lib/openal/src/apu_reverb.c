@@ -3,23 +3,29 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Program addresses (dsp/gp_reverb.asm) */
-#define X_INGAIN   0x20u
-#define X_INLP     0x21u
-#define X_INST     0x22u
-#define X_WET      0x23u
-#define X_APG      0x24u
-#define X_OUTLP    0x25u
-#define X_OUTST    0x2Cu   /* 4 words */
-#define X_CTAB     0x30u
-#define X_ATAB     0x90u
-#define X_FIFO2    0x08u
-#define X_RCHAIN   0x130u
-#define X_OUTL     0xA8u
-#define X_ACCL     0xE8u
-#define X_ACCR     0x108u
-#define X_IN(k)    (0x300u + 64u * (k))
-#define X_OUT(k)   (0x320u + 64u * (k))
+/* Program addresses: the frame loop (dsp/gp_loop.asm) and kernel 0 (dsp/gp_kfreeverb.asm);
+ * tests/test_apu_reverb.c checks them against the assembled headers */
+#define X_OUTLP    0x1Bu   /* loop: output lowpass coefficient */
+#define X_OUTST    0x1Cu   /* loop: its 4 states */
+#define X_RHEAD    0x19u   /* loop: kernel read chain head */
+#define X_WHEAD    0x1Au   /* loop: kernel write chain head */
+#define X_FIFO2    0x08u   /* loop: the mix descriptor (OUT L/R) */
+#define X_OUTL     0x20u   /* loop: OUT L, OUT R at +32 */
+#define X_KIN      0xE0u   /* kernel: X address of the input pair's left bin */
+#define X_INGAIN   0xE1u
+#define X_INLP     0xE2u
+#define X_INST     0xE3u
+#define X_WET      0xE4u
+#define X_APG      0xE5u
+#define X_CTAB     0xF0u
+#define X_ATAB     0x150u
+#define X_RCHAIN   0x1B0u
+#define X_ACCL     0x170u
+#define X_ACCR     0x190u
+#define X_IN(k)    (0x340u + 64u * (k))
+#define X_OUT(k)   (0x360u + 64u * (k))
+#define X_BIN(n)   (0x1400u + 32u * (n))
+#define INPUT_BIN  2u      /* the reverb's input pair: bins 2/3 */
 
 #define EOL        0x004000u
 #define STEP1      (1u << 14)
@@ -151,6 +157,9 @@ uint32_t apu_reverb_layout(const apu_reverb_params_t *p, apu_reverb_word_t *out)
     n = apu_reverb_coefficients(p, out);
     put(out, &n, X_INST, 0);
     for (k = 0; k < 4u; k++) put(out, &n, X_OUTST + k, 0);
+    put(out, &n, X_KIN, X_BIN(INPUT_BIN));
+    put(out, &n, X_RHEAD, X_RCHAIN);
+    put(out, &n, X_WHEAD, X_RCHAIN + 8u);
     /* Line k: the read descriptor trails the write one by the delay */
     for (k = 0; k < APU_REVERB_LINES; k++) {
         uint32_t off, size, r = X_RCHAIN + 16u * k, w = r + 8u;
@@ -270,7 +279,7 @@ static void write_block(apu_reverb_ref_t *r, uint32_t k, const int32_t in[32]) {
     r->wpos[k] = (r->wpos[k] + 32u) % r->size[k];
 }
 
-void apu_reverb_ref_frame(apu_reverb_ref_t *r, int32_t bins[3][32], int32_t out[2][32]) {
+void apu_reverb_ref_frame(apu_reverb_ref_t *r, int32_t bins[4][32], int32_t out[2][32]) {
     int32_t in[APU_REVERB_LINES][32], wr[APU_REVERB_LINES][32], acc[2][32];
     uint32_t k, i, c, a;
     acc_t b;
@@ -280,7 +289,7 @@ void apu_reverb_ref_frame(apu_reverb_ref_t *r, int32_t bins[3][32], int32_t out[
     /* input: scale, lowpass */
     b = ld(r->inst);
     for (i = 0; i < 32u; i++) {
-        int32_t s = lim(prod(bins[2][i], r->ingain));
+        int32_t s = lim(prod(lim(ld(bins[2][i]) + ld(bins[3][i])), r->ingain));
         int32_t d = lim(b - ld(s));
         b = ld(s) + prod(d, r->inlp);
         wr[0][i] = lim(b);

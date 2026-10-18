@@ -1563,6 +1563,29 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
   switch hung (it is now done once), and the test tone's float phase sum clicked once per loop (now
   `fill_tone`). In xemu, whose codec is neither locked nor smooth, zero-copy ran without underruns but slipped
   (35 slips in 6 min), and the refill must not follow the S/PDIF DMA, which xemu does not run.
+* EFX probes (phase 8, `samples/apu_efx_probe`, 2026-10-17; details in EFX_PLAN.md 2.1). Outputs 4/5 reach
+  any bin pair 2/3..8/9 at full level on plain, HRTF and stereo voices (stereo left on the even bin, right on
+  the odd). HRTF spare slots land on bin 30 (bin 31 stays clean). Rewriting `CFG_VBIN` or the `CFG_FMT` bin
+  bits on a playing voice moves its outputs at once, with no click on the unchanged outputs. The voice filter
+  works live: `FMODE` 1 is a resonant 2-pole lowpass on `TAR_FCA` (cutoff s4.12 in octaves, 0 about 8 kHz;
+  Q field = damping, 0 resonates by +25..33 dB), `FMODE` 2 boosts around the cutoff when Q is set, `FMODE` 3
+  looks like both in series; FCA/FCB per mode is still open. The GP frame loop + Freeverb kernel
+  (`apu_gp_reverb`) matches the monolithic program: decay -29.8 / -9.9 dB for T60 1 / 3 s, 0 timeouts, 0
+  underruns over 64 s.
+  With phase8-04's loop (116 words, counting its START_FRAME polls for `AL_XBOX_GP_LOAD`) the same run
+  gives the same decay, 1499 frames/s, waits at most 806 polls, 0 timeouts, 0 underruns / padded; the
+  showcase's reverb mode ran 68 s with 0 underruns, padded and slips.
+* EFX sample (phase8-05, `samples/openal_efx`, 2026-10-18; numbers in EFX_PLAN.md 2.1): an EFX reverb, the echo
+  kernel loaded with `alXboxEffectProgram` (through the P window while the GP ran, no restart), echo
+  sample-exact on both ears, a parameter change acknowledged in 1 frame, feedback 6 dB a repeat, two sends into
+  one slot; GP load 34 % (reverb) / 4 % (echo); 5 min of effect switching with 0 underruns, padded and slips.
+* VP voice filter calibration (`samples/apu_filter_probe` rounds 1-2, 2026-10-18; table in EFX_PLAN.md 2.1):
+  `FMODE` 1 is a 2-pole lowpass on `TAR_FCA` only, damping 0xB505 flat, cutoff 8 kHz x 2^(c / 0x1000) for
+  c < 0 (0 and above: off), the same on plain, stereo and HRTF voices (HRTF with `TAR_FCB` = 0), clickless
+  live changes; `FMODE` 2 is a peaking boost on `TAR_FCB`. `AL_FILTER_LOWPASS` uses it.
+* `AL_FILTER_LOWPASS` (`samples/openal_efx` step 6b, 2026-10-18): the 5 kHz level is within 0.2 dB of
+  20 log10(`GAINHF`) from 0.9 to 0.03 on plain and HRTF voices, 500 Hz stays within 0.7 dB, `GAIN` 0.5 gives
+  -6.0 dB, live changes while playing; the 5 min run after it 0 underruns, padded and slips.
 * Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
   from a spherical-head model (Brown-Duda head-shadow shelf per ear as a 31-tap int8 FIR, Woodworth ITD in
   s6.9; 32 azimuths x elevations -30/0/30/60; no measured data, no pinna cues). `apu_vp_init()` uploads it with
