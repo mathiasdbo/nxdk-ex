@@ -317,6 +317,17 @@ void apu_voice_set_direct(uint32_t index, bool on, float left, float right);
 void apu_voice_set_sends(uint32_t index, const float sends[APU_VOICE_SENDS]);
 
 /**
+ * Each of a send's two outputs carries the whole send gain (true) instead of
+ * half (false, the default above). For a stereo voice into a stereo kernel: a
+ * send of 1 is then 0 dB on each channel, exactly (the attenuation word 0).
+ * Takes effect with the sends.
+ */
+void apu_voice_set_send_per_channel(uint32_t index, bool full);
+
+/** The attenuation word (1/64 dB, 0xFFF mute) of each output of send n. */
+uint16_t apu_voice_send_atten(uint32_t index, uint32_t n);
+
+/**
  * High cut of the voice (AL_FILTER_LOWPASS): the gain at 5 kHz, 0..1 (1: none),
  * on the VP's voice filter (apu_vp_lowpass). It acts on every output of the
  * voice, sends included. Takes effect at the next trigger or commit.
