@@ -1583,6 +1583,9 @@ Measured on silicon by reading registers back; not inferred from xemu. Each find
   `FMODE` 1 is a 2-pole lowpass on `TAR_FCA` only, damping 0xB505 flat, cutoff 8 kHz x 2^(c / 0x1000) for
   c < 0 (0 and above: off), the same on plain, stereo and HRTF voices (HRTF with `TAR_FCB` = 0), clickless
   live changes; `FMODE` 2 is a peaking boost on `TAR_FCB`. `AL_FILTER_LOWPASS` uses it.
+* `AL_FILTER_LOWPASS` (`samples/openal_efx` step 6b, 2026-10-18): the 5 kHz level is within 0.2 dB of
+  20 log10(`GAINHF`) from 0.9 to 0.03 on plain and HRTF voices, 500 Hz stays within 0.7 dB, `GAIN` 0.5 gives
+  -6.0 dB, live changes while playing; the 5 min run after it 0 underruns, padded and slips.
 * Stage 4 done in xemu (not audible there, see 4.8 and C4.A5): `src/apu_hrtf.c` computes the 128-entry table
   from a spherical-head model (Brown-Duda head-shadow shelf per ear as a 31-tap int8 FIR, Woodworth ITD in
   s6.9; 32 azimuths x elevations -30/0/30/60; no measured data, no pinna cues). `apu_vp_init()` uploads it with
