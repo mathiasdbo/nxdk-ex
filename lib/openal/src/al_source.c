@@ -10,6 +10,9 @@
 #include <math.h>
 #include <float.h>
 
+/* EFX air absorption: the high frequencies lose 0.05 dB a metre (10^(-0.05 / 20)) */
+#define AL_SOURCE_AIR_GAINHF_PER_METRE 0.99426f
+
 /*
  * ============================================================================
  * Internal State & Global Source Pool
@@ -338,15 +341,39 @@ void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc) {
     /* AL_DIRECT_FILTER: its AL_LOWPASS_GAIN scales the dry sound (its GAINHF is
      * the voice filter, source_lowpass) */
     calc->effective_gain *= al_efx_filter_gain(&src->efx.direct_filter);
+
+    /* The voice filter's level at 5 kHz: the direct filter's GAINHF, and with
+     * AL_DIRECT_FILTER_GAINHF_AUTO (default on) the cone's AL_CONE_OUTER_GAINHF
+     * (interpolated across the cone like AL_CONE_OUTER_GAIN) and air absorption:
+     * AL_AIR_ABSORPTION_FACTOR x -0.05 dB per metre beyond the reference distance
+     * (the distance clamped to AL_MAX_DISTANCE, AL_METERS_PER_UNIT metres a unit).
+     * Direct mode spatializes in the engine: only the filter applies. */
+    calc->gain_hf = al_efx_filter_gain_hf(&src->efx.direct_filter);
+    if (!src->direct && src->efx.direct_gain_hf_auto) {
+        if (src->efx.cone_outer_gain_hf < 1.0f) {
+            const float origin[3] = {0.0f, 0.0f, 0.0f};
+            calc->gain_hf *= apu_calc_cone_gain(src->position, src->direction,
+                                                src->source_relative ? origin : lis_pos,
+                                                src->cone_inner_angle, src->cone_outer_angle,
+                                                src->efx.cone_outer_gain_hf);
+        }
+        if (src->efx.air_absorption_factor > 0.0f) {
+            float d = (calc->distance < src->max_distance) ? calc->distance : src->max_distance;
+            float metres = (d - src->reference_distance) * al_efx_meters_per_unit();
+            if (metres > 0.0f) {
+                calc->gain_hf *= powf(AL_SOURCE_AIR_GAINHF_PER_METRE, src->efx.air_absorption_factor * metres);
+            }
+        }
+    }
 }
 
 /*
  * The voice filter for AL_FILTER_LOWPASS (EFX_PLAN.md 3.7): one per voice, so
- * it follows the direct filter's AL_LOWPASS_GAINHF and also shapes the sends.
+ * it follows the direct path's HF gain (calc->gain_hf) and also shapes the sends.
  * A send filter's GAINHF is not applied (its AL_LOWPASS_GAIN is, on the send).
  */
-static float source_lowpass(const ALsource *src) {
-    return al_efx_filter_gain_hf(&src->efx.direct_filter);
+static float source_lowpass(const AL_SPATIAL_CALC *calc) {
+    return calc->gain_hf;
 }
 
 
@@ -505,7 +532,7 @@ static void source_update_hw(const ALsource *src, unsigned fields) {
     }
     apu_voice_set_direction((uint32_t)src->hw_voice_idx, calc.local_pos);
     apu_voice_set_direct((uint32_t)src->hw_voice_idx, src->direct, src->direct_gain[0], src->direct_gain[1]);
-    apu_voice_set_lowpass((uint32_t)src->hw_voice_idx, source_lowpass(src));
+    apu_voice_set_lowpass((uint32_t)src->hw_voice_idx, source_lowpass(&calc));
     {
         float sends[APU_VOICE_SENDS];
         source_sends(src, &calc, sends);
@@ -615,7 +642,7 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
     }
     src->has_offset = false;
     apu_voice_set_direct(hw_voice_idx, src->direct, src->direct_gain[0], src->direct_gain[1]);
-    apu_voice_set_lowpass(hw_voice_idx, source_lowpass(src));
+    apu_voice_set_lowpass(hw_voice_idx, source_lowpass(&calc));
     {
         float sends[APU_VOICE_SENDS];
         source_sends(src, &calc, sends);

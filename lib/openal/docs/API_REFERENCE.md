@@ -145,7 +145,10 @@ on a console (64 on xemu). The others wait in virtual standby, or stop if `AL_XB
 | `AL_AUXILIARY_SEND_FILTER` | `alSource3i(src, ..., slot, send, filter)` | send `send` (0..`ALC_MAX_AUXILIARY_SENDS`−1) to `slot` (0: none) through a copy of `filter` |
 | `AL_ROOM_ROLLOFF_FACTOR` | `alSourcef`, 0..10, default 0 | distance attenuation of the sends |
 | `AL_AUXILIARY_SEND_FILTER_GAIN_AUTO` | `alSourcei`, default `AL_TRUE` | the sends follow distance and cone |
-| `AL_AIR_ABSORPTION_FACTOR`, `AL_CONE_OUTER_GAINHF`, `AL_DIRECT_FILTER_GAINHF_AUTO`, `AL_AUXILIARY_SEND_FILTER_GAINHF_AUTO` | standard ranges | stored and read back, not applied to the sound |
+| `AL_AIR_ABSORPTION_FACTOR` | `alSourcef`, 0..10, default 0 | with GAINHF auto: −0.05 dB at 5 kHz per metre beyond `AL_REFERENCE_DISTANCE` (the distance clamped to `AL_MAX_DISTANCE`, `AL_METERS_PER_UNIT` metres a unit), on the voice's lowpass |
+| `AL_CONE_OUTER_GAINHF` | `alSourcef`, 0..1, default 1 | with GAINHF auto: the HF gain outside the cone, interpolated across it like `AL_CONE_OUTER_GAIN`, on the voice's lowpass |
+| `AL_DIRECT_FILTER_GAINHF_AUTO` | `alSourcei`, default `AL_TRUE` | applies the two above (multiplied with the direct filter's `GAINHF`); off: the filter only. Direct-mode sources: the filter only |
+| `AL_AUXILIARY_SEND_FILTER_GAINHF_AUTO` | standard | stored and read back: the voice has one lowpass, shared by the dry path and the sends |
 
 ## 6. Effects (`ALC_EXT_EFX` 1.0)
 
@@ -226,7 +229,7 @@ How to write a kernel: [`GP_KERNELS.md`](GP_KERNELS.md).
 
 ### 6.5 Listener
 
-`AL_METERS_PER_UNIT` (`alListenerf`, > 0, default 1) is stored and read back.
+`AL_METERS_PER_UNIT` (`alListenerf`, > 0, default 1) scales the distances of air absorption (5.2).
 
 ## 7. Xbox effects outside EFX
 
