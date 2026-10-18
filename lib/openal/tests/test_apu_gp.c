@@ -276,6 +276,52 @@ int main(void) {
         assert(reg(MCPX_APU_GP_XMEM + 4u * (GP_LOOP_MBOX + 2u)) == GP_LOOP_KPARAM + 31u);
         assert(reg(MCPX_APU_GP_XMEM + 4u * (GP_LOOP_KPARAM + 31u)) == 0x7FFFFFu);
         assert(reg(MCPX_APU_GP_XMEM + 4u * GP_LOOP_K_RHEAD) == 0x110u);   /* the kernel kept running */
+        /* timed parameters: held until their frame, then all at once */
+        {
+            const uint32_t XC = MCPX_APU_GP_XMEM + 4u * GP_LOOP_CNT;
+            const uint32_t XP = MCPX_APU_GP_XMEM + 4u * GP_LOOP_KPARAM;
+            apu_reverb_word_t one = { (uint16_t)(GP_LOOP_KPARAM + 5u), 77u };
+            set_reg(XC, 100u);
+            params[0] = 300u;
+            params[1] = 9u;
+            assert(apu_gp_kernel_params_at(base, &k, params, 103u) == 0);
+            assert(apu_gp_mailbox_pending(base));
+            assert(reg(MCPX_APU_GP_XMEM + 4u * GP_LOOP_MB_AT) == 103u && reg(MCPX_APU_GP_XMEM + 4u * GP_LOOP_MB_N) == 2u);
+            assert(reg(XP) == 200u);                                    /* not yet */
+            params[0] = 400u;
+            assert(apu_gp_kernel_params_at(base, &k, params, 104u) == 1); /* one waits at a time */
+            params[0] = 300u;
+            apu_gp_debug_host_frames(base, 3u);                         /* frames 100..102 */
+            assert(reg(XP) == 200u && apu_gp_mailbox_pending(base));
+            apu_gp_debug_host_frames(base, 1u);                         /* frame 103 */
+            assert(reg(XP) == 300u && reg(XP + 4u) == 9u && !apu_gp_mailbox_pending(base));
+            /* nothing changed: nothing posted */
+            assert(apu_gp_kernel_params_at(base, &k, params, 200u) == 0 && !apu_gp_mailbox_pending(base));
+            /* an immediate post lets a waiting timed one land first, then lands after it */
+            params[0] = 500u;
+            assert(apu_gp_kernel_params_at(base, &k, params, 5000u) == 0 && apu_gp_mailbox_pending(base));
+            assert(apu_gp_mailbox(base, &one, 1u) == 0);
+            assert(reg(XP) == 500u && reg(XP + 4u * 5u) == 77u && !apu_gp_mailbox_pending(base));
+            /* across the counter's wrap */
+            set_reg(XC, 0xFFFFFEu);
+            params[0] = 600u;
+            assert(apu_gp_kernel_params_at(base, &k, params, 1u) == 0);
+            apu_gp_debug_host_frames(base, 2u);                         /* 0xFFFFFE, 0xFFFFFF */
+            assert(reg(XP) == 500u);
+            apu_gp_debug_host_frames(base, 2u);                         /* 0, 1 */
+            assert(reg(XP) == 600u && reg(XC) == 2u);
+            /* a frame already past: the next one */
+            params[0] = 700u;
+            assert(apu_gp_kernel_params_at(base, &k, params, 0u) == 0);
+            apu_gp_debug_host_frames(base, 1u);
+            assert(reg(XP) == 700u);
+            /* another kernel's code: not this way */
+            {
+                apu_gp_kernel_t other = k;
+                other.words = k.words - 1u;
+                assert(apu_gp_kernel_params_at(base, &other, params, 0u) == -1);
+            }
+        }
         /* the reverb again: its code goes back, the custom kernel stops */
         assert(apu_gp_reverb_set(base, &p, true) == 0 && apu_gp_reverb_on() && !apu_gp_kernel_on());
         for (i = 0; i < GP_KFREEVERB_WORDS; i++) {
@@ -290,7 +336,7 @@ int main(void) {
         assert(apu_gp_debug_code_restarts() == 0);
         apu_vp_deinit(base);
     }
-    printf("    -> image checks, load (P window, ABI words, scratch), live parameters, back to the reverb [PASS]\n");
+    printf("    -> image checks, load (P window, ABI words, scratch), live parameters, timed parameters, back to the reverb [PASS]\n");
     apu_mem_shutdown();
     free(s_bar0);
     printf("=== All GP Stage Tests Passed Successfully! ===\n");

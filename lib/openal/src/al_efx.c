@@ -709,6 +709,8 @@ AL_API void AL_APIENTRY alGenAuxiliaryEffectSlots(ALsizei n, ALuint *slots) {
     }
 }
 
+static void timed_drop_slot(ALuint slot);
+
 AL_API void AL_APIENTRY alDeleteAuxiliaryEffectSlots(ALsizei n, const ALuint *slots) {
     ALsizei k;
     if (!check_names(n, slots, &s_slots[0].in_use, sizeof(al_efx_slot_t), AL_EFX_MAX_SLOTS)) return;
@@ -720,6 +722,7 @@ AL_API void AL_APIENTRY alDeleteAuxiliaryEffectSlots(ALsizei n, const ALuint *sl
     }
     for (k = 0; k < n; k++) {
         if (slots[k] != 0u) {
+            timed_drop_slot(slots[k]);
             s_slots[slots[k] - 1u].in_use = false;
             props_release(&s_slots[slots[k] - 1u].props);
         }
@@ -757,6 +760,7 @@ AL_API void AL_APIENTRY alAuxiliaryEffectSloti(ALuint slot, ALenum param, ALint 
                 alSetError(AL_INVALID_OPERATION);
                 return;
             }
+            timed_drop_slot(slot);   /* an attach now replaces the changes queued for later */
             if (e) {
                 props_assign(&s->props, &e->props);
             } else {
@@ -1073,8 +1077,123 @@ void al_efx_reverb_params(const al_efx_slot_t *slot, apu_reverb_params_t *out) {
     out->output_lowpass = 0.0f;
 }
 
+/* ------------------------------------------------------------------ timed slot changes */
+
+/*
+ * alXboxEffectSlotAtSample: the effect's state, copied when it is queued,
+ * reaches the slot's kernel at the GP frame that mixes `sample` of the
+ * streaming source. The GP holds one post at a time (apu_gp_kernel_params_at);
+ * the rest wait here, in order, and go out as the GP takes the one before.
+ */
+#define TIMED_MAX            16u
+#define TIMED_LATENCY_FRAMES 0u     /* GP frames from the VP reading a sample to the GP mixing it */
+
+typedef struct {
+    ALuint slot, effect, source;
+    uint32_t sample;
+    al_efx_effect_props_t props;
+} timed_t;
+
+static timed_t s_timed[TIMED_MAX];
+static uint32_t s_timed_n;
+
+static void timed_remove(uint32_t i) {
+    props_release(&s_timed[i].props);
+    memmove(&s_timed[i], &s_timed[i + 1u], (s_timed_n - i - 1u) * sizeof(timed_t));
+    s_timed_n--;
+    memset(&s_timed[s_timed_n], 0, sizeof(timed_t));
+}
+
+static void timed_drop_slot(ALuint slot) {
+    uint32_t i = 0;
+    while (i < s_timed_n) {
+        if (s_timed[i].slot == slot) {
+            timed_remove(i);
+        } else {
+            i++;
+        }
+    }
+}
+
+/* The same kernel code (a new image restarts the kernel, which no frame can time) */
+static bool same_kernel(const al_efx_effect_props_t *a, const al_efx_effect_props_t *b) {
+    if (a->type != AL_EFFECT_XBOX_GP_PROGRAM || b->type != AL_EFFECT_XBOX_GP_PROGRAM || !a->program || !b->program) {
+        return false;
+    }
+    return a->program == b->program ||
+           (a->program->kernel.words == b->program->kernel.words &&
+            a->program->kernel.scratch_bytes == b->program->kernel.scratch_bytes &&
+            memcmp(a->program->kernel.code, b->program->kernel.code, a->program->kernel.words * sizeof(uint32_t)) == 0);
+}
+
+void al_efx_timed_service(void) {
+    while (s_timed_n > 0u) {
+        timed_t *t = &s_timed[0];
+        al_efx_slot_t *slot = get_slot(t->slot);
+        uint32_t pos = 0, now = 0, frame;
+        float per = 0.0f;
+        al_source_clock_t c;
+
+        if (!slot) {
+            timed_remove(0);
+            continue;
+        }
+        c = al_source_stream_clock(t->source, &pos, &now, &per);
+        if (c == AL_SOURCE_CLOCK_WAIT || (c == AL_SOURCE_CLOCK_RUN && al_source_gp_timed_busy())) {
+            return;   /* try again at the next update */
+        }
+        frame = now;
+        if (c == AL_SOURCE_CLOCK_RUN && per > 0.0f) {
+            int32_t ahead = (int32_t)(t->sample - pos);   /* the stream position wraps at 2^32 */
+            if (ahead > 0) {
+                frame = now + (uint32_t)ceilf((float)ahead / per) + TIMED_LATENCY_FRAMES;
+            }
+        }
+        props_assign(&slot->props, &t->props);
+        slot->effect = t->effect;
+        timed_remove(0);
+        if (al_efx_active_slot() == (ALuint)(slot - s_slots) + 1u) {
+            al_source_gp_params_at(frame);
+        }
+    }
+}
+
+AL_API void AL_APIENTRY alXboxEffectSlotAtSample(ALuint slot, ALuint effect, ALuint source, ALuint sample) {
+    al_efx_slot_t *s = get_slot(slot);
+    const effect_t *e = get_effect(effect);
+    uint32_t pos, now;
+    float per;
+    timed_t *t;
+
+    if (!s || slot == 0u || !e || effect == 0u) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+    if (al_source_stream_clock(source, &pos, &now, &per) == AL_SOURCE_CLOCK_NONE) {
+        alSetError(alIsSource(source) ? AL_INVALID_OPERATION : AL_INVALID_NAME);
+        return;
+    }
+    /* Parameters for the kernel the active slot runs, and room in the queue */
+    if (al_efx_active_slot() != slot || !same_kernel(&s->props, &e->props) || s_timed_n == TIMED_MAX) {
+        alSetError(AL_INVALID_OPERATION);
+        return;
+    }
+    t = &s_timed[s_timed_n++];
+    t->slot = slot;
+    t->effect = effect;
+    t->source = source;
+    t->sample = sample;
+    props_assign(&t->props, &e->props);
+    al_efx_timed_service();
+}
+
+uint32_t al_efx_debug_timed_queued(void) {
+    return s_timed_n;
+}
+
 void al_efx_reset(void) {
     uint32_t i;
+    while (s_timed_n > 0u) timed_remove(0);
     for (i = 0; i < AL_EFX_MAX_EFFECTS; i++) props_release(&s_effects[i].props);
     for (i = 0; i < AL_EFX_MAX_SLOTS; i++) props_release(&s_slots[i].props);
     memset(s_effects, 0, sizeof(s_effects));
