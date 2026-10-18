@@ -187,6 +187,7 @@ Recipes: ENGINE_INTEGRATION 3.12 (EFX) and 3.13 (your own GP kernel). Every EFX 
 |---|---|
 | `AL_EFFECT_NULL` | nothing (the default) |
 | `AL_EFFECT_REVERB`, `AL_EFFECT_EAXREVERB` | the GP reverb. Every parameter is stored with the extension's ranges and defaults; which ones change the sound is in the table in 3.12 |
+| `AL_EFFECT_ECHO` | a library kernel on the GP; all five parameters (`AL_ECHO_DELAY` 0..0.207 s, `LRDELAY` 0..0.404 s, `DAMPING` 0..0.99, `FEEDBACK` 0..1, `SPREAD` −1..1) change the sound. Taps under 32 samples become 32 (ENGINE_INTEGRATION 3.12) |
 | `AL_EFFECT_XBOX_GP_PROGRAM` | your DSP56300 kernel (6.4) |
 | any other | `AL_INVALID_VALUE` |
 
@@ -356,6 +357,6 @@ alXboxOutputCallback(cb, user);                             /* NULL removes it *
 - Output other than stereo 16-bit 48 kHz: no 5.1 or Dolby Digital.
 - Multichannel buffers.
 - Capture.
-- EFX effect types other than reverb, EAX reverb and the GP program.
+- EFX effect types other than reverb, EAX reverb, echo and the GP program.
 - Highpass and bandpass filters.
 - More than one running effect, or more than 2 sends per source.
