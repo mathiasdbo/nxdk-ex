@@ -431,6 +431,19 @@ static float efx_send_gain(const ALsource *src, const AL_SPATIAL_CALC *calc, con
     return (g < 0.0f) ? 0.0f : ((g > 1.0f) ? 1.0f : g);
 }
 
+/* A stereo source into a custom GP kernel sends each channel at the whole send
+ * gain (the kernel reads the pair); everything else at half on each output
+ * (the reverb reads their sum) */
+static bool source_sends_per_channel(const ALsource *src) {
+    const ALbuffer *pb = al_source_play_buffer(src);
+    const al_efx_slot_t *slot;
+    if (s_reverb_enabled || pb == NULL || pb->channels != 2) {
+        return false;
+    }
+    slot = al_efx_slot(al_efx_active_slot());
+    return slot != NULL && slot->props.type == AL_EFFECT_XBOX_GP_PROGRAM;
+}
+
 static void source_sends(const ALsource *src, const AL_SPATIAL_CALC *calc, float out[APU_VOICE_SENDS]) {
     ALuint active = al_efx_active_slot();
     uint32_t n;
@@ -496,6 +509,7 @@ static void source_update_hw(const ALsource *src, unsigned fields) {
     {
         float sends[APU_VOICE_SENDS];
         source_sends(src, &calc, sends);
+        apu_voice_set_send_per_channel((uint32_t)src->hw_voice_idx, source_sends_per_channel(src));
         apu_voice_set_sends((uint32_t)src->hw_voice_idx, sends);
     }
     /* Hardware backend: apply the new pitch and volumes to the running voice */
@@ -605,6 +619,7 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
     {
         float sends[APU_VOICE_SENDS];
         source_sends(src, &calc, sends);
+        apu_voice_set_send_per_channel(hw_voice_idx, source_sends_per_channel(src));
         apu_voice_set_sends(hw_voice_idx, sends);
     }
     apu_voice_setup(hw_voice_idx, &ctx);

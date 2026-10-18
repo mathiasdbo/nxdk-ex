@@ -17,6 +17,8 @@
 
 #include "al_efx.h"
 #include "al_source.h"
+#include "apu_voice.h"
+#include "apu_vp.h"
 #include "../dsp/gp_kecho.h"
 
 static void test_effect(ALuint e) {
@@ -118,6 +120,42 @@ static void test_slot(ALuint e) {
         alAuxiliaryEffectSlotf(slot, AL_EFFECTSLOT_GAIN, 1.0f);
         assert(al_source_debug_sends(src, s) && s[0] == 1.0f);
         alDeleteSources(1, &src);
+    }
+
+    /* A stereo source into a custom kernel sends each channel at the whole send
+     * (exactly 0 dB at send 1); a mono one half on each output (their sum is the send) */
+    {
+        ALuint st = 0, mo = 0, bst = 0, bmo = 0;
+        int16_t pcm[512] = { 0 };
+        ALsource *as;
+        alGenBuffers(1, &bst);
+        alBufferData(bst, AL_FORMAT_STEREO16, pcm, (ALsizei)sizeof(pcm), 48000);
+        alGenBuffers(1, &bmo);
+        alBufferData(bmo, AL_FORMAT_MONO16, pcm, (ALsizei)sizeof(pcm), 48000);
+        alGenSources(1, &st);
+        alGenSources(1, &mo);
+        alSourcei(st, AL_BUFFER, (ALint)bst);
+        alSourcei(mo, AL_BUFFER, (ALint)bmo);
+        alSourcei(st, AL_LOOPING, AL_TRUE);
+        alSourcei(mo, AL_LOOPING, AL_TRUE);
+        alSource3i(st, AL_AUXILIARY_SEND_FILTER, (ALint)slot, 0, AL_FILTER_NULL);
+        alSource3i(mo, AL_AUXILIARY_SEND_FILTER, (ALint)slot, 0, AL_FILTER_NULL);
+        alSourcePlay(st);
+        alSourcePlay(mo);
+        as = al_source_get(st);
+        assert(as && as->hw_voice_idx >= 0);
+        assert(apu_voice_send_atten((uint32_t)as->hw_voice_idx, 0) == 0u);
+        assert(apu_voice_send_atten((uint32_t)as->hw_voice_idx, 1) == 0xFFFu);   /* send 1 unused */
+        as = al_source_get(mo);
+        assert(as && as->hw_voice_idx >= 0);
+        assert(apu_voice_send_atten((uint32_t)as->hw_voice_idx, 0) == apu_vp_atten_from_gain(0.5f));
+        alSourceStop(st);
+        alSourceStop(mo);
+        alDeleteSources(1, &st);
+        alDeleteSources(1, &mo);
+        alDeleteBuffers(1, &bst);
+        alDeleteBuffers(1, &bmo);
+        assert(alGetError() == AL_NO_ERROR);
     }
 
     /* changing the effect does nothing until it is attached again */

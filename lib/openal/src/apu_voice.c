@@ -47,6 +47,9 @@ static voice_direct_t s_voice_direct[APU_VOICE_MAX_SLOTS];
 
 /* Effect sends of each slot (apu_voice_set_sends): absolute linear gains */
 static float s_voice_send[APU_VOICE_MAX_SLOTS][APU_VOICE_SENDS];
+/* apu_voice_set_send_per_channel: each output carries the whole send (a stereo
+ * voice into a stereo kernel) instead of half of it */
+static bool s_voice_send_full[APU_VOICE_MAX_SLOTS];
 static float s_voice_lowpass[APU_VOICE_MAX_SLOTS];   /* gain at 5 kHz; 1 = no filter */
 
 /* Console: send n leaves on outputs 4 + 2n (left or mono) and 5 + 2n (right
@@ -155,18 +158,31 @@ static void vp_params_core(uint32_t index, const NVAPU_VOICE_CONTEXT_3D *ctx, bo
     }
 }
 
+/* The volume of each of send n's two outputs (apu_voice_send_atten) */
+uint16_t apu_voice_send_atten(uint32_t index, uint32_t n) {
+    float g;
+    if (index >= APU_VOICE_MAX_SLOTS || n >= APU_VOICE_SENDS) {
+        return 0xFFFu;
+    }
+    g = s_voice_send[index][n];
+    if (!(g > 0.0f)) {
+        return 0xFFFu;
+    }
+    return apu_vp_atten_from_gain(s_voice_send_full[index] ? g : 0.5f * g);
+}
+
 /* The voice's pitch, bins and volumes; on a console also its effect sends:
  * send n on outputs 4 + 2n / 5 + 2n to bins 2 / 3, each at half the send's
  * gain (a stereo voice's left and right, or the mono sound twice: their sum,
- * which a mono-input kernel reads, is the send) */
+ * which a mono-input kernel reads, is the send), or at the whole gain when the
+ * source asked for it per channel */
 static void vp_params_from_context(uint32_t index, const NVAPU_VOICE_CONTEXT_3D *ctx, bool hrtf, int16_t *pitch,
                                    uint8_t bins[APU_VP_OUTPUTS], uint16_t vols[APU_VP_OUTPUTS]) {
     uint32_t n;
     vp_params_core(index, ctx, hrtf, pitch, bins, vols);
     if (!apu_vp_front_end_ok()) {
         for (n = 0; n < APU_VOICE_SENDS; n++) {
-            float g = s_voice_send[index][n];
-            uint16_t v = (g > 0.0f) ? apu_vp_atten_from_gain(0.5f * g) : 0xFFFu;
+            uint16_t v = apu_voice_send_atten(index, n);
             bins[SEND_OUT + 2u * n] = (uint8_t)SEND_BIN_L;
             bins[SEND_OUT + 2u * n + 1u] = (uint8_t)SEND_BIN_R;
             vols[SEND_OUT + 2u * n] = vols[SEND_OUT + 2u * n + 1u] = v;
@@ -554,6 +570,13 @@ void apu_voice_set_sends(uint32_t index, const float sends[APU_VOICE_SENDS])
     for (n = 0; n < APU_VOICE_SENDS; n++) {
         float g = sends[n];
         s_voice_send[index][n] = (g > 0.0f) ? ((g < 1.0f) ? g : 1.0f) : 0.0f;
+    }
+}
+
+void apu_voice_set_send_per_channel(uint32_t index, bool full)
+{
+    if (index < APU_VOICE_MAX_SLOTS) {
+        s_voice_send_full[index] = full;
     }
 }
 
