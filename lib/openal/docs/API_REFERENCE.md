@@ -243,6 +243,24 @@ void alXboxEffectSlotAtSample(ALuint slot, ALuint effect, ALuint source, ALuint 
   change without a GP (the host).
 - The GP holds one change at a time; the next goes out at the first `alXboxUpdateVoices()` after it. Changes
   closer together than that are late by up to one update.
+
+**Sources started and stopped on a stream's clock (`AL_XBOX_timed_source`):**
+
+```c
+void alXboxSourcePlayAtSample(ALuint source, ALuint stream, ALuint sample);
+void alXboxSourceStopAtSample(ALuint source, ALuint stream, ALuint sample);
+```
+
+- `source` starts (stops) when the streaming source `stream` plays frame `sample` (its stream position, as
+  above): a sound an engine plays on a source of its own lines up with what it mixed ahead into the stream.
+- Acted on by `alXboxUpdateVoices()`, at the first update where the stream is at most half an update from
+  `sample` (half the frames it played between the last two updates): up to half an update early or late. A
+  start found late begins that far into the sound, at the sound's rate; a non-looping sound already over then
+  just stops, a looping one wraps in its loop.
+- One per source: a new one replaces it; `alSourcePlay`, `alSourceStop`, `alSourceRewind` or deleting the
+  source drops it. Until it acts the source keeps its state.
+- While `stream` is paused or not started they wait; with it stopped they act at once. `stream` not a streaming
+  source, or `source` itself: `AL_INVALID_OPERATION`; a name that is no source: `AL_INVALID_NAME`.
 - `AL_EFFECTSLOT_EFFECT`, or deleting the slot, drops the changes still queued for it.
 
 How to write a kernel: [`GP_KERNELS.md`](GP_KERNELS.md).

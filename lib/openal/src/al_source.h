@@ -66,6 +66,9 @@ typedef struct ALsource {
     bool direct;                     /* AL_XBOX_DIRECT_MODE: engine gains, no 3D model */
     ALfloat direct_gain[2];          /* AL_XBOX_DIRECT_GAINS: left, right */
     bool send_panned;                /* AL_XBOX_SEND_PANNED: sends into a kernel panned by direct_gain */
+    uint8_t timed_op;                /* alXboxSource*AtSample waiting: 0 none, 1 play, 2 stop */
+    ALuint timed_stream;             /* the stream it waits for */
+    uint32_t timed_sample;           /* the stream position it acts at */
     ALfloat reverb_send;             /* AL_XBOX_REVERB_SEND: 0..1 */
     ALfloat xbox_priority;           /* AL_XBOX_PRIORITY: >= 0 engine priority, < 0 the library's */
     ALboolean virtualize;            /* AL_XBOX_VIRTUALIZE */
@@ -267,6 +270,8 @@ void al_source_gp_params_at(uint32_t frame);
  * is busy with a timed post (busy; a post sets it), and the frame last posted */
 void al_source_debug_clock(bool on, uint32_t pos, uint32_t gp_frame, bool busy);
 uint32_t al_source_debug_timed_frame(void);
+/* alXboxSource*AtSample: the operation a source waits with (0 none, 1 play, 2 stop) */
+uint32_t al_source_debug_timed_pending(ALuint source);
 
 /** Tests: the custom kernel the GP should run (an active AL_EFFECT_XBOX_GP_PROGRAM slot with an image). */
 bool al_source_debug_gp_kernel(apu_gp_kernel_t *k, const uint32_t **params);

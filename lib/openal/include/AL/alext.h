@@ -230,6 +230,34 @@ AL_API void AL_APIENTRY alXboxEffectSlotAtSample(ALuint slot, ALuint effect, ALu
 typedef void (AL_APIENTRY *LPALXBOXEFFECTSLOTATSAMPLE)(ALuint slot, ALuint effect, ALuint source, ALuint sample);
 
 /*
+ * Starts and stops timed to a stream (AL_XBOX_timed_source):
+ *
+ *   alXboxSourcePlayAtSample(source, stream, sample);
+ *   alXboxSourceStopAtSample(source, stream, sample);
+ *
+ * For an engine that mixes ahead into a streaming source and also plays some
+ * sounds on sources of their own: the sound starts (stops) when the stream
+ * plays frame `sample`, its stream position as alXboxEffectSlotAtSample
+ * counts it, so it lines up with what the engine mixed into the stream for
+ * that moment. `source` is any other source; `stream` must be a streaming
+ * source (AL_INVALID_OPERATION otherwise, AL_INVALID_NAME for a name that is
+ * no source). The voice tick (alXboxUpdateVoices) acts on it at the first
+ * update where the stream is at most half an update from `sample` (the
+ * frames the stream played between the last two updates, halved), so it
+ * lands up to half an update early or late; a start found late begins that
+ * far into the sound (a non-looping sound already over by then just stops; a
+ * looping one wraps in its loop). A source holds one of them at a time: a
+ * new one replaces it, and alSourcePlay, alSourceStop, alSourceRewind or
+ * deleting the source drops it. While the stream is paused or not started
+ * they wait; with the stream stopped they act at once. Until it acts the
+ * source is in the state it was in.
+ */
+AL_API void AL_APIENTRY alXboxSourcePlayAtSample(ALuint source, ALuint stream, ALuint sample);
+AL_API void AL_APIENTRY alXboxSourceStopAtSample(ALuint source, ALuint stream, ALuint sample);
+typedef void (AL_APIENTRY *LPALXBOXSOURCEPLAYATSAMPLE)(ALuint source, ALuint stream, ALuint sample);
+typedef void (AL_APIENTRY *LPALXBOXSOURCESTOPATSAMPLE)(ALuint source, ALuint stream, ALuint sample);
+
+/*
  * ============================================================================
  * AL_SOFT_loop_points (same token and semantics as OpenAL Soft)
  * ============================================================================
