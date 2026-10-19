@@ -235,6 +235,15 @@ int apu_vp_voice_set_loop(uintptr_t bar0, uint32_t h, bool loop, uint32_t loop_s
 /** Pause (true: off its list, position kept) or resume (false: back on top of the 2D list). */
 void apu_vp_voice_pause(uintptr_t bar0, uint32_t handle, bool pause);
 
+/**
+ * Hold the voice lists' heads back until apu_vp_batch_end(): the voices
+ * started or resumed in between join the lists with one register write per
+ * list, so they start on the same VP frame (alSourcePlayv). Voices taken off
+ * the head of a list leave with it too; others leave at once.
+ */
+void apu_vp_batch_begin(uintptr_t bar0);
+void apu_vp_batch_end(uintptr_t bar0);
+
 /** Stop a voice: off its list (record inactive on xemu; left alone on hardware). */
 void apu_vp_voice_off(uintptr_t bar0, uint32_t handle);
 

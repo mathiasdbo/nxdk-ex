@@ -257,6 +257,12 @@ int apu_voice_stop(uintptr_t apu_base, uint32_t index);
 int apu_voice_pause(uintptr_t apu_base, uint32_t index, int pause);
 
 /**
+ * Begin (`begin`) or end a batch: the voices triggered or resumed in between
+ * start on the same APU frame (apu_vp_batch_begin; hardware backend only).
+ */
+void apu_voice_batch(uintptr_t apu_base, bool begin);
+
+/**
  * Check if a voice is currently marked active in hardware.
  *
  * @param apu_base Base MMIO address of APU (or 0 for default NV_PAPU_BASE).

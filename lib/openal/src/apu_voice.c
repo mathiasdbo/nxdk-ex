@@ -469,6 +469,19 @@ int apu_voice_stop(uintptr_t apu_base, uint32_t index)
     return 0;
 }
 
+void apu_voice_batch(uintptr_t apu_base, bool begin)
+{
+    uintptr_t base = (apu_base != 0) ? apu_base : s_apu_base;
+    if (!s_vp_hw) {
+        return;
+    }
+    if (begin) {
+        apu_vp_batch_begin(base);
+    } else {
+        apu_vp_batch_end(base);
+    }
+}
+
 int apu_voice_pause(uintptr_t apu_base, uint32_t index, int pause)
 {
     uintptr_t base;

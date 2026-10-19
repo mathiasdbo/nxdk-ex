@@ -400,12 +400,61 @@ uint32_t apu_vp_debug_trace(apu_vp_trace_t *out, uint32_t max) {
     return n;
 }
 
+/*
+ * Batches (apu_vp_batch_begin / _end): the list heads are held back and
+ * written once at the end, so every voice linked in between becomes visible
+ * to the VP with one register write per list, in the same frame. Until then a
+ * new voice's record points into the list but nothing points to it.
+ */
+static bool s_batch;
+static uint32_t s_batch_head[3];
+static uint8_t s_batch_dirty[3];
+
+static uint32_t list_head(uintptr_t bar0, uint8_t l) {
+    return s_batch ? s_batch_head[l] : (reg_rd(bar0, s_list_heads[l]) & 0xFFFFu);
+}
+
+static void set_list_head(uintptr_t bar0, uint8_t l, uint32_t h) {
+    if (s_batch) {
+        s_batch_head[l] = h;
+        s_batch_dirty[l] = 1;
+    } else {
+        reg_wr(bar0, s_list_heads[l], h);
+    }
+}
+
+void apu_vp_batch_begin(uintptr_t bar0) {
+    uint8_t l;
+    if (!s_ready || s_batch) {
+        return;
+    }
+    for (l = 0; l < 3u; l++) {
+        s_batch_head[l] = reg_rd(bar0, s_list_heads[l]) & 0xFFFFu;
+        s_batch_dirty[l] = 0;
+    }
+    s_batch = true;
+}
+
+void apu_vp_batch_end(uintptr_t bar0) {
+    uint8_t l;
+    if (!s_batch) {
+        return;
+    }
+    s_batch = false;
+    wc_flush();   /* every record before the heads that reach them */
+    for (l = 0; l < 3u; l++) {
+        if (s_batch_dirty[l]) {
+            reg_wr(bar0, s_list_heads[l], s_batch_head[l]);
+        }
+    }
+}
+
 static void link_voice(uintptr_t bar0, uint32_t h, uint8_t list) {
     volatile uint32_t *pl = voice_dw(h, MCPX_VOICE_TAR_PITCH_LINK);
-    uint32_t head = reg_rd(bar0, s_list_heads[list]) & 0xFFFFu;
+    uint32_t head = list_head(bar0, list);
     *pl = (*pl & 0xFFFF0000u) | head;
     wc_flush();
-    reg_wr(bar0, s_list_heads[list], h);
+    set_list_head(bar0, list, h);
     s_list[h] = list;
     s_listed[h >> 5] |= 1u << (h & 31u);
     trace(bar0, 'L', h, head);   /* a = the old head, now our next */
@@ -426,9 +475,9 @@ static void unlink_voice(uintptr_t bar0, uint32_t h) {
      * the handle out of apu_vp_alloc_handle() for a while */
     s_retired_at[h] = reg_rd(bar0, MCPX_APU_XGSCNT);
     s_retired[h] = 1;
-    cur = reg_rd(bar0, s_list_heads[l]) & 0xFFFFu;
+    cur = list_head(bar0, l);
     if (cur == h) {
-        reg_wr(bar0, s_list_heads[l], next);
+        set_list_head(bar0, l, next);
         trace(bar0, 'H', h, next);   /* unlinked at the head; a = new head */
         return;
     }

@@ -146,6 +146,12 @@ ALfloat al_efx_room_rolloff(const al_efx_source_t *s, const al_efx_slot_t *slot)
 bool al_efx_slot_is_kernel(const al_efx_slot_t *slot);
 bool al_efx_slot_kernel(const al_efx_slot_t *slot, apu_gp_kernel_t *k, const uint32_t **params);
 
+/** Send the queued alXboxEffectSlotAtSample changes the GP can take now (every update). */
+void al_efx_timed_service(void);
+
+/** Changes queued by alXboxEffectSlotAtSample and not yet sent to the GP (tests). */
+uint32_t al_efx_debug_timed_queued(void);
+
 #ifdef __cplusplus
 }
 #endif
