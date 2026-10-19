@@ -613,8 +613,7 @@ static void phase_sync(void) {
           (unsigned)SYNC_MARK);
     logf_("   (a marker click at that frame on L, peak 1 later; a click every %u frames on R's stream, only through\n"
           "    the echo, whose echoes fall 8 after a multiple of 16; the wet gain scales the echo's output, so the\n"
-          "    first echo shows where the change lands: expected +7 after the marker, + 32 per frame of GP latency;\n"
-          "    an R peak on the marker itself is the marker's -64 dB trace: no echo)\n",
+          "    first echo shows where the change lands: +7 after the marker; -25 is a frame early, +39 a frame late)\n",
           (unsigned)SYNC_STEP);
     memset(wet, 0, sizeof(wet));
     for (i = 0; i + 2u < SYNC_FRAMES; i += SYNC_STEP) {
@@ -650,9 +649,18 @@ static void phase_sync(void) {
               (unsigned long)s_t_cnt, (unsigned long)s_t_at, (unsigned long)s_t_seq, (unsigned long)s_t_ack,
               (unsigned long)s_t_lib, (unsigned long)gpx(GP_LOOP_CNT), (unsigned long)gpx(GP_LOOP_MB_ACK));
         log_lr("timed", n);
-        if (find_peaks(n, 0, pl, 1) && find_peaks(n, 1, pr, 1)) {
-            logf_("   marker at %lu, first echo at %lu: %+ld\n", (unsigned long)pl[0].pos,
-                  (unsigned long)pr[0].pos, (long)pr[0].pos - (long)pl[0].pos);
+        if (find_peaks(n, 1, pr, 1)) {
+            uint32_t k, mark = 0;
+            int top = 0;
+            for (k = 0; k < n; k++) {                   /* the marker: the left ear's loudest sample */
+                int a = abs(s_cap[2u * k]);
+                if (a > top) {
+                    top = a;
+                    mark = k;
+                }
+            }
+            logf_("   marker at %lu, first echo at %lu: %+ld (expected +7)\n", (unsigned long)mark,
+                  (unsigned long)pr[0].pos, (long)pr[0].pos - (long)mark);
         } else {
             logf_("   no marker or no echo\n");
         }

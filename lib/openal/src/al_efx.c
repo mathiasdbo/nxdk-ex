@@ -1086,7 +1086,7 @@ void al_efx_reverb_params(const al_efx_slot_t *slot, apu_reverb_params_t *out) {
  * the rest wait here, in order, and go out as the GP takes the one before.
  */
 #define TIMED_MAX            16u
-#define TIMED_LATENCY_FRAMES 0u     /* GP frames from the VP reading a sample to the GP mixing it */
+#define TIMED_LATENCY_FRAMES 1u     /* the GP mixes a frame the VP played one frame later (console: openal_efx 6c) */
 
 typedef struct {
     ALuint slot, effect, source;

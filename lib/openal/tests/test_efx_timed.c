@@ -100,11 +100,12 @@ static void test_timing(void) {
     for (i = 0; i < 6; i++) {
         e[i] = program(10 + i);
     }
-    /* 48 kHz, pitch 1: 32 frames of the stream a GP frame; 1000 ahead -> 32 frames on */
+    /* 48 kHz, pitch 1: 32 frames of the stream a GP frame; 1000 ahead -> 32 frames on, + 1 for the GP
+     * mixing a frame the VP played one frame later */
     al_source_debug_clock(true, 0u, 100u, false);
     alXboxEffectSlotAtSample(s_slot, e[0], s_src, 1000);
     assert(alGetError() == AL_NO_ERROR);
-    assert(al_source_debug_timed_frame() == 132u && param0() == 10u && al_efx_debug_timed_queued() == 0u);
+    assert(al_source_debug_timed_frame() == 133u && param0() == 10u && al_efx_debug_timed_queued() == 0u);
     /* the GP holds it: the next two wait here */
     alXboxEffectSlotAtSample(s_slot, e[1], s_src, 2000);
     alXboxEffectSlotAtSample(s_slot, e[2], s_src, 3000);
@@ -114,23 +115,23 @@ static void test_timing(void) {
     /* the GP took it: the next goes out at the next update, against the clock then */
     al_source_debug_clock(true, 1500u, 150u, false);
     alXboxUpdateVoices();
-    assert(al_source_debug_timed_frame() == 150u + 16u && param0() == 11u && al_efx_debug_timed_queued() == 1u);
+    assert(al_source_debug_timed_frame() == 150u + 16u + 1u && param0() == 11u && al_efx_debug_timed_queued() == 1u);
     al_source_debug_clock(true, 1500u, 151u, false);
     alXboxUpdateVoices();
-    assert(al_source_debug_timed_frame() == 151u + 47u && param0() == 12u && al_efx_debug_timed_queued() == 0u);
-    /* a sample already played: the next frame */
+    assert(al_source_debug_timed_frame() == 151u + 47u + 1u && param0() == 12u && al_efx_debug_timed_queued() == 0u);
+    /* a sample already played: the next frame (no latency to add) */
     al_source_debug_clock(true, 5000u, 300u, false);
     alXboxEffectSlotAtSample(s_slot, e[3], s_src, 4000);
     assert(al_source_debug_timed_frame() == 300u && param0() == 13u);
     /* across the stream position's wrap: 320 frames ahead */
     al_source_debug_clock(true, 0xFFFFFF00u, 400u, false);
     alXboxEffectSlotAtSample(s_slot, e[4], s_src, 0x40u);
-    assert(al_source_debug_timed_frame() == 410u && param0() == 14u);
+    assert(al_source_debug_timed_frame() == 411u && param0() == 14u);
     /* pitch 2: 64 frames of the stream a GP frame */
     alSourcef(s_src, AL_PITCH, 2.0f);
     al_source_debug_clock(true, 0u, 500u, false);
     alXboxEffectSlotAtSample(s_slot, e[5], s_src, 640u);
-    assert(al_source_debug_timed_frame() == 510u && param0() == 15u);
+    assert(al_source_debug_timed_frame() == 511u && param0() == 15u);
     alSourcef(s_src, AL_PITCH, 1.0f);
     al_source_debug_clock(true, 0u, 500u, false);
     for (i = 0; i < 6; i++) {
