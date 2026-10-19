@@ -17,6 +17,10 @@
  *   6  back to the reverb: its code reloaded, AL_XBOX_REVERB_ACTIVE
  *  6b  AL_FILTER_LOWPASS: 500 Hz + 5 kHz through direct filters, plain and HRTF
  *      voices; the 5 kHz level against GAINHF, GAIN on both, a live change
+ *  6c  same-frame starts and timed parameters: two streams, one per ear, started
+ *      by alSourcePlayv (and by two alSourcePlay for comparison); a timed echo
+ *      wet gain (alXboxEffectSlotAtSample) against a marker click: how many
+ *      samples after the marker the change lands
  *   7  listening: an HRTF source circling, a panned one and a stereo one, all
  *      sending to the slot; reverb and echo settings change every 15 s;
  *      output health logged every minute, 5 minutes (then plays on)
@@ -47,6 +51,8 @@
 #include "apu_vp.h"
 #include "gp_kecho.h"         /* lib/openal/dsp: the example kernel's image */
 #include "mcpx_apu_regs.h"
+#include "apu_gp_loop.h"
+#include "al_source.h"         /* al_source_debug_timed_frame */
 
 #define BAR0    ((uintptr_t)NV_PAPU_BASE)
 #define LOGFILE "E:\\openal_efx.txt"
@@ -502,6 +508,173 @@ static void phase_lowpass(void) {
     save_log();
 }
 
+/* ---------------------------------------------------------------- 6c: same frame, timed */
+
+#define SYNC_FRAMES 24000u
+#define SYNC_MARK   9600u     /* the marker click and the timed change, in the streams' frames */
+#define SYNC_STEP   16u       /* the wet stream's clicks */
+
+static ALuint s_sync_src[2];
+
+static ALuint make_stream(ALuint buf, float left, float right) {
+    ALuint s;
+    ALfloat g[2];
+    g[0] = left;
+    g[1] = right;
+    alGenSources(1, &s);
+    alSourcei(s, AL_SOURCE_RELATIVE, AL_TRUE);
+    alSourceQueueBuffers(s, 1, &buf);
+    alSourcei(s, AL_XBOX_DIRECT_MODE, AL_TRUE);
+    alSourcefv(s, AL_XBOX_DIRECT_GAINS, g);
+    return s;
+}
+
+static void play_v(void) {
+    alSourcePlayv(2, s_sync_src);
+}
+
+static void play_each(void) {
+    alSourcePlay(s_sync_src[0]);
+    alSourcePlay(s_sync_src[1]);
+}
+
+static void sync_restart(void) {
+    alSourceStopv(2, s_sync_src);
+    alSourceRewindv(2, s_sync_src);
+}
+
+static ALuint s_timed_fx;
+static LPALXBOXEFFECTSLOTATSAMPLE p_alXboxEffectSlotAtSample;
+
+static uint32_t gpx(uint32_t a) {
+    return *(volatile uint32_t *)(BAR0 + MCPX_APU_GP_XMEM + 4u * a) & 0xFFFFFFu;
+}
+
+static uint32_t s_t_cnt, s_t_at, s_t_seq, s_t_ack, s_t_lib;
+
+static void play_v_timed(void) {
+    alSourcePlayv(2, s_sync_src);
+    p_alXboxEffectSlotAtSample(s_slot, s_timed_fx, s_sync_src[1], SYNC_MARK);
+    s_t_cnt = gpx(GP_LOOP_CNT);
+    s_t_at = gpx(GP_LOOP_MB_AT);
+    s_t_seq = gpx(GP_LOOP_MB_SEQ);
+    s_t_ack = gpx(GP_LOOP_MB_ACK);
+    s_t_lib = al_source_debug_timed_frame();
+}
+
+static void play_v_only(void) {
+    alSourcePlayv(2, s_sync_src);
+}
+
+static void log_lr(const char *what, uint32_t n) {
+    peak_t pl[4], pr[4];
+    uint32_t kl = find_peaks(n, 0, pl, 4), kr = find_peaks(n, 1, pr, 4), i;
+    char line[200];
+    int len = snprintf(line, sizeof(line), "   %s: L", what);
+    for (i = 0; i < kl; i++) len += snprintf(line + len, sizeof(line) - (size_t)len, " %lu(%d)", (unsigned long)pl[i].pos, pl[i].amp);
+    len += snprintf(line + len, sizeof(line) - (size_t)len, "; R");
+    for (i = 0; i < kr; i++) len += snprintf(line + len, sizeof(line) - (size_t)len, " %lu(%d)", (unsigned long)pr[i].pos, pr[i].amp);
+    logf_("%s\n", line);
+}
+
+static void phase_sync(void) {
+    static int16_t pcm[SYNC_FRAMES], wet[SYNC_FRAMES];
+    ALuint b = 0, bw = 0, f = 0;
+    LPALGENFILTERS gen_f = (LPALGENFILTERS)alGetProcAddress("alGenFilters");
+    LPALFILTERI filt_i = (LPALFILTERI)alGetProcAddress("alFilteri");
+    LPALFILTERF filt_f = (LPALFILTERF)alGetProcAddress("alFilterf");
+    uint32_t i, n, trial;
+    peak_t pl[4], pr[4];
+
+    p_alXboxEffectSlotAtSample = (LPALXBOXEFFECTSLOTATSAMPLE)alGetProcAddress("alXboxEffectSlotAtSample");
+    logf_("-- 6c same-frame starts: two streams with one click each, left and right (expected: L = R)\n");
+    memset(pcm, 0, sizeof(pcm));
+    pcm[SYNC_MARK] = 16000;
+    pcm[SYNC_MARK + 1] = 22000;
+    pcm[SYNC_MARK + 2] = 16000;
+    alGenBuffers(1, &b);
+    alBufferData(b, AL_FORMAT_MONO16, pcm, (ALsizei)sizeof(pcm), 48000);
+    s_sync_src[0] = make_stream(b, 1.0f, 0.0f);
+    s_sync_src[1] = make_stream(b, 0.0f, 1.0f);
+    for (trial = 0; trial < 12; trial++) {
+        bool v = trial < 6;
+        n = capture(500, v ? play_v : play_each);
+        if (find_peaks(n, 0, pl, 1) && find_peaks(n, 1, pr, 1)) {
+            logf_("   %s: L at %lu, R at %lu: %ld\n", v ? "alSourcePlayv  " : "2 x alSourcePlay", (unsigned long)pl[0].pos,
+                  (unsigned long)pr[0].pos, (long)pr[0].pos - (long)pl[0].pos);
+        } else {
+            logf_("   %s: no click\n", v ? "alSourcePlayv" : "2 x alSourcePlay");
+        }
+        sync_restart();
+    }
+    save_log();
+
+    logf_("-- 6c timed parameters: echo delay 1000, wet 0 -> 1 at stream frame %u (alXboxEffectSlotAtSample)\n",
+          (unsigned)SYNC_MARK);
+    logf_("   (a marker click at that frame on L, peak 1 later; a click every %u frames on R's stream, only through\n"
+          "    the echo, whose echoes fall 8 after a multiple of 16; the wet gain scales the echo's output, so the\n"
+          "    first echo shows where the change lands: +7 after the marker; -25 is a frame early, +39 a frame late)\n",
+          (unsigned)SYNC_STEP);
+    memset(wet, 0, sizeof(wet));
+    for (i = 0; i + 2u < SYNC_FRAMES; i += SYNC_STEP) {
+        wet[i] = 12000;
+    }
+    alGenBuffers(1, &bw);
+    alBufferData(bw, AL_FORMAT_MONO16, wet, (ALsizei)sizeof(wet), 48000);
+    alDeleteSources(2, s_sync_src);
+    s_sync_src[0] = make_stream(b, 1.0f, 0.0f);     /* the marker, left */
+    s_sync_src[1] = make_stream(bw, 0.0f, 0.0f);    /* only into the echo */
+    gen_f(1, &f);
+    filt_i(f, AL_FILTER_TYPE, AL_FILTER_LOWPASS);
+    filt_f(f, AL_LOWPASS_GAIN, 0.0f);
+    alSourcei(s_sync_src[1], AL_DIRECT_FILTER, (ALint)f);
+    send_to(s_sync_src[1], 0, s_slot);
+    p_alGenEffects(1, &s_timed_fx);
+    p_alEffecti(s_timed_fx, AL_EFFECT_TYPE, AL_EFFECT_XBOX_GP_PROGRAM);
+    p_alXboxEffectProgram(s_timed_fx, gp_kecho_image, (ALsizei)GP_KECHO_IMAGE_WORDS, 0);
+    p_alEffecti(s_timed_fx, AL_XBOX_GP_PARAM0 + 0, 1000);
+    p_alEffectf(s_timed_fx, AL_XBOX_GP_PARAM0 + 2, 1.0f);
+    /* control: wet 1 attached at once (no timing): R should click from 1000 */
+    attach(s_timed_fx);
+    run_for(100);
+    n = capture(600, play_v_only);
+    log_lr("control, wet 1 at once", n);
+    sync_restart();
+    for (trial = 0; trial < 6; trial++) {
+        echo_params(1000, 0.0f, 0.0f);
+        attach(s_echo);
+        run_for(100);
+        n = capture(600, play_v_timed);
+        logf_("   at the call: CNT %lu, MB_AT %lu, SEQ %lu ACK %lu, library frame %lu; after: CNT %lu ACK %lu\n",
+              (unsigned long)s_t_cnt, (unsigned long)s_t_at, (unsigned long)s_t_seq, (unsigned long)s_t_ack,
+              (unsigned long)s_t_lib, (unsigned long)gpx(GP_LOOP_CNT), (unsigned long)gpx(GP_LOOP_MB_ACK));
+        log_lr("timed", n);
+        if (find_peaks(n, 1, pr, 1)) {
+            uint32_t k, mark = 0;
+            int top = 0;
+            for (k = 0; k < n; k++) {                   /* the marker: the left ear's loudest sample */
+                int a = abs(s_cap[2u * k]);
+                if (a > top) {
+                    top = a;
+                    mark = k;
+                }
+            }
+            logf_("   marker at %lu, first echo at %lu: %+ld (expected +7)\n", (unsigned long)mark,
+                  (unsigned long)pr[0].pos, (long)pr[0].pos - (long)mark);
+        } else {
+            logf_("   no marker or no echo\n");
+        }
+        sync_restart();
+    }
+    logf_("   AL error 0x%x\n", (unsigned)alGetError());
+    alDeleteSources(2, s_sync_src);
+    p_alDeleteEffects(1, &s_timed_fx);
+    echo_params(1000, 0.0f, 1.0f);
+    attach(s_reverb);
+    run_for(100);
+    save_log();
+}
+
 /* ---------------------------------------------------------------- 7: listening */
 
 #define LOOP_FRAMES 96000u   /* 2 s */
@@ -686,6 +859,7 @@ int main(void) {
     phase_echo();
     phase_back();
     phase_lowpass();
+    phase_sync();
     phase_listen();
     return 0;
 }

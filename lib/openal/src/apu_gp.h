@@ -129,11 +129,18 @@ uint32_t apu_gp_scratch_bytes(void);
 
 /**
  * Mailbox of the frame loop (EFX_PLAN.md 3.4): the `n` (address, value) X words
- * (at most 64) land together at the start of one frame. Waits for the previous
- * post to be applied first (at most ~20 ms). Returns 0, 1 if the GP took no
- * frames (the words were written directly), -1 without the default image.
+ * (at most 63) land together at the start of one frame. A timed post still
+ * waiting (apu_gp_kernel_params_at) is let through first; then this waits for
+ * the previous post to be applied (at most ~20 ms). Returns 0, 1 if the GP took
+ * no frames (the words were written directly), -1 without the default image.
  */
 int apu_gp_mailbox(uintptr_t bar0, const apu_reverb_word_t *w, uint32_t n);
+
+/** A mailbox post has not been applied yet (a timed one waiting for its frame, or the next frame). */
+bool apu_gp_mailbox_pending(uintptr_t bar0);
+
+/** Host builds (no GP): run `n` frames of the loop's frame counter and timed mailbox (tests). */
+void apu_gp_debug_host_frames(uintptr_t bar0, uint32_t n);
 
 /** Frames from an empty mailbox post to the loop's acknowledgement (diagnostics; 0xFFFFFFFF on failure). */
 uint32_t apu_gp_debug_mailbox_frames(uintptr_t bar0);
@@ -192,6 +199,16 @@ uint32_t apu_gp_kernel_scratch_max(void);
  * scratch zeroed, and it starts. Returns 0, -1 if the GP cannot run it.
  */
 int apu_gp_kernel_set(uintptr_t bar0, const apu_gp_kernel_t *k, const uint32_t params[APU_GP_KERNEL_PARAMS], bool on);
+
+/**
+ * The running kernel `k` (same code) gets new parameters at the start of GP
+ * frame `frame` (apu_gp_frames(); a frame already past means the next one):
+ * the changed words, all in that frame. One such post waits at a time.
+ * Returns 0, 1 while an earlier post is still waiting (try again later), -1 if
+ * `k` is not the kernel running.
+ */
+int apu_gp_kernel_params_at(uintptr_t bar0, const apu_gp_kernel_t *k, const uint32_t params[APU_GP_KERNEL_PARAMS],
+                            uint32_t frame);
 
 /** A custom kernel is running. */
 bool apu_gp_kernel_on(void);

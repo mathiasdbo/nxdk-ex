@@ -157,7 +157,27 @@ def test_mailbox():
     fifo = gp.frame({0: step, 1: step})
     # both stages start from the last frame's 0x200000: 0x240000, then 0x208000 (p = 0.875)
     assert gp.x[s['MB_ACK']] == 3 and fifo[0] == 0x208000 >> 8, 'output lowpass from the mailbox: %x' % fifo[0]
-    print('[3] mailbox: pairs land together at the next frame, MB_ACK follows MB_SEQ, empty posts too [PASS]')
+    gp.x[s['MBOX'] + 1] = 0
+    gp.x[s['MB_SEQ']] = 4                         # the lowpass off again
+    gp.frame({0: left, 1: right})
+    # a post held until frame MB_AT (the frame counter, mod 2^24), across the wrap too
+    for cnt, at in ((40, 43), (0xFFFFFE, 1)):
+        gp.x[s['CNT']] = cnt
+        gp.x[s['MBOX']] = 0x300
+        gp.x[s['MBOX'] + 1] = at + 7
+        gp.x[s['MB_N']] = 1
+        gp.x[s['MB_AT']] = at
+        gp.x[s['MB_SEQ']] += 1
+        frames = 0
+        while gp.x[0x300] != at + 7:
+            assert gp.x[s['MB_ACK']] != gp.x[s['MB_SEQ']]
+            gp.frame({0: left, 1: right})
+            frames += 1
+            assert frames < 8
+        # applied at the start of frame `at`: CNT has counted that frame once
+        assert (gp.x[s['CNT']] - 1) & 0xFFFFFF == at and gp.x[s['MB_ACK']] == gp.x[s['MB_SEQ']], (cnt, at, frames)
+    print('[3] mailbox: pairs land together at the next frame, MB_ACK follows MB_SEQ, empty posts too, '
+          'held until MB_AT (across the wrap) [PASS]')
     return gp
 
 

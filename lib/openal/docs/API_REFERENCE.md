@@ -121,6 +121,9 @@ on a console (64 on xemu). The others wait in virtual standby, or stop if `AL_XB
 
 **Calls:**
 - **Playback:** `alSourcePlay`, `alSourcePause`, `alSourceStop`, `alSourceRewind` and their `v` forms.
+  `alSourcePlayv` starts all its sources on the same 0.67 ms APU frame (their voices join the VP's list with
+  one register write). `alSourcePausev` / `alSourceStopv` act within microseconds of each other: on the same
+  frame unless one falls on a frame boundary.
 - **Streaming:** `alSourceQueueBuffers` / `alSourceUnqueueBuffers`. Up to 32 streaming sources with 64 queued
   buffers each.
 
@@ -221,6 +224,25 @@ void alXboxEffectProgram(ALuint effect, const ALuint *words, ALsizei count, ALui
   exactly 0 dB (the samples arrive unscaled). A mono source sends half the gain on each bin, so their sum is
   the send.
 - Code loads while the GP runs, without a restart.
+
+**Timed to a stream:**
+
+```c
+void alXboxEffectSlotAtSample(ALuint slot, ALuint effect, ALuint source, ALuint sample);
+```
+
+- Attaches `effect` to `slot` (a copy, taken now) at the GP frame that mixes frame `sample` of the streaming
+  source `source`. `sample` is the source's stream position: frames played since its queue started, 32 bits,
+  wrapping.
+- The effect must run the kernel the slot already runs (the same image), and the slot must be the active one.
+  Otherwise, a source that is not streaming, or 16 changes already queued: `AL_INVALID_OPERATION`. A name that
+  is no slot, effect or source: `AL_INVALID_NAME`.
+- Changes apply in order, to the frame (0.67 ms), never early. A sample already played: the next frame.
+- While the source is paused or not started, changes wait. A stopped source's apply at once, as does every
+  change without a GP (the host).
+- The GP holds one change at a time; the next goes out at the first `alXboxUpdateVoices()` after it. Changes
+  closer together than that are late by up to one update.
+- `AL_EFFECTSLOT_EFFECT`, or deleting the slot, drops the changes still queued for it.
 
 How to write a kernel: [`GP_KERNELS.md`](GP_KERNELS.md).
 

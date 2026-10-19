@@ -6,9 +6,10 @@
 ;   idle     polls of START_FRAME while waiting for it into X:IDLE, the
 ;            smallest since the CPU last reset it into X:IDLMIN (the CPU's
 ;            measure of the GP's load: no cycle counter is known on the GP)
-;   mailbox  if X:MB_SEQ differs from X:MB_ACK, apply the X:MB_N (address,
-;            value) pairs at X:MBOX, then MB_ACK = MB_SEQ: a change of several
-;            words lands in one frame
+;   mailbox  if X:MB_SEQ differs from X:MB_ACK and the frame counter has
+;            reached X:MB_AT (mod 2^24), apply the X:MB_N (address, value)
+;            pairs at X:MBOX, then MB_ACK = MB_SEQ: a change of several words
+;            lands in one frame, the frame the CPU asked for
 ;   kernel off (bit 0 of X:FLAGS clear): the copy program, the FIFO descriptor
 ;            at X:0 sends mixbins 0/1 to GP output FIFO 0
 ;   kernel on:
@@ -51,8 +52,9 @@ FIFO2   equ     $08             ; mix descriptor: OUT L/R to FIFO 0
 IDLMIN  equ     $0F             ; smallest IDLE since the CPU wrote $7FFFFF
 OUTL    equ     $20             ; OUT R at $40 (FIFO stride 32)
 OUTR    equ     $40
-MBOX    equ     $60             ; 64 pairs, to $DF
-MB_MAX  equ     64
+MBOX    equ     $60             ; 63 pairs, to $DD
+MB_MAX  equ     63
+MB_AT   equ     $DE             ; mailbox: the frame (X:CNT) to apply it at
 KX_BASE equ     $E0             ; the kernel's X memory starts here
 KIN     equ     $E0             ; custom kernels: input pair address
 KSCR    equ     $E1             ; custom kernels: scratch byte offset
@@ -83,6 +85,13 @@ idle_ok
         move    x:MB_ACK,x0
         cmp     x0,a
         jeq     nomail
+        move    x:CNT,b                 ; not before frame MB_AT: CNT - MB_AT, mod 2^24
+        move    x:MB_AT,x0
+        sub     x0,b
+        move    b1,x1
+        tfr     x1,b
+        tst     b
+        jlt     nomail
         move    x:MB_N,b
         tst     b
         jeq     mbdone
