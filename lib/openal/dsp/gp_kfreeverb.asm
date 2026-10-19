@@ -1,5 +1,6 @@
-; GP kernel 0: the reverb (lib/openal/docs/GP_REVERB_PLAN.md, EFX_PLAN.md 3.3).
-; Our own code; runs inside dsp/gp_loop.asm (kernel ABI there).
+; GP kernel: the reverb (lib/openal/docs/GP_REVERB_PLAN.md, EFX_PLAN.md 3.3).
+; Our own code; runs inside dsp/gp_loop.asm as a relocatable kernel (ABI 2,
+; docs/GP_KERNELS.md), in any effect slot.
 ;
 ; The loop has read one 32-word block of each of the 25 delay lines (system
 ; RAM, circular scratch buffers) into its IN block (chain at RCHAIN) and put
@@ -11,28 +12,33 @@
 ;   allpass: v = AIN; w = s + apg v; AOUT = w; s = v - apg w
 ;            (4 per ear in series on ACC L / ACC R, table ATAB: AIN, AOUT, ACC)
 ;   out:     OUT L/R += WET * ACC L/R
-; and the loop writes each line's OUT block (chain at WCHAIN, ending with its
-; mix descriptor). The CPU writes the descriptors, tables and coefficients
-; (apu_reverb.c). Each line is at least 32 samples long, so a frame never
-; reads what it writes.
+; and the loop writes each line's OUT block (chain at WCHAIN, ending at end of
+; list). The CPU writes the descriptors, tables and coefficients for the
+; slot's X block and scratch (apu_reverb.c). Each line is at least 32 samples
+; long, so a frame never reads what it writes.
 
-KIN     equ     $E0             ; X address of the input pair's left bin (the right one follows)
-INGAIN  equ     $E1             ; Q23 coefficients and states
-INLP    equ     $E2
-INST    equ     $E3
-WET     equ     $E4
-APG     equ     $E5
-CTAB    equ     $F0             ; 16 x 6 words
-ATAB    equ     $150            ; 8 x 3 words
-ACCL    equ     $170            ; ACC R at $190
-ACCR    equ     $190
-RCHAIN  equ     $1B0            ; line k: read descriptor at $1B0 + 16k, write at $1B8 + 16k
-WCHAIN  equ     $1B8
-PRE_IN  equ     $340            ; line k: IN block $340 + 64k, OUT block $360 + 64k
-PRE_OUT equ     $360
+K_SCRATCH_BYTES equ $2D000      ; image header: the 25 lines (apu_reverb_scratch_bytes())
+K_DESCRIPTORS   equ 50          ; image header: one read and one write per line
+K_XWORDS        equ $8C0        ; image header: the X block, ABI words included
+K_YWORDS        equ 0
+
+KIN     equ     KX              ; ABI: X address of the input pair's left bin (the right one follows)
+INGAIN  equ     KX+$28          ; Q23 coefficients and states
+INLP    equ     KX+$29
+INST    equ     KX+$2A
+WET     equ     KX+$2B
+APG     equ     KX+$2C
+CTAB    equ     KX+$30          ; 16 x 6 words
+ATAB    equ     KX+$90          ; 8 x 3 words
+ACCL    equ     KX+$B0          ; ACC R at ACC L + 32
+ACCR    equ     KX+$D0
+RCHAIN  equ     KX+$F0          ; line k: read descriptor at RCHAIN + 16k, write at WCHAIN + 16k
+WCHAIN  equ     KX+$F8
+PRE_IN  equ     KX+$280         ; line k: IN block PRE_IN + 64k, OUT block PRE_OUT + 64k
+PRE_OUT equ     KX+$2A0
 OUTL    equ     $20             ; the loop's OUT L/R (gp_loop.asm)
 
-        org     p:$100
+        org     p:0
 kernel
 ; input: (L + R) * gain, lowpass, into the pre-delay line
         move    x:KIN,r0

@@ -6,9 +6,9 @@
  * Supported: effect types AL_EFFECT_NULL, AL_EFFECT_REVERB and
  * AL_EFFECT_EAXREVERB (every other type is AL_INVALID_VALUE, as the extension
  * allows), filter types AL_FILTER_NULL and AL_FILTER_LOWPASS (the voice filter;
- * highpass and bandpass are AL_INVALID_VALUE), AL_EFX_MAX_SLOTS slots of which one may
- * hold an effect at a time (the GP runs one program), and up to
- * AL_EFX_MAX_SENDS sends per source.
+ * highpass and bandpass are AL_INVALID_VALUE), AL_EFX_MAX_SLOTS slots, each
+ * with its own GP kernel (phase9-04: an attach fails only when the GP's shared
+ * budgets are full), and up to AL_EFX_MAX_SENDS sends per source.
  */
 #define AL_ALEXT_PROTOTYPES
 #include "al_efx.h"
@@ -453,6 +453,37 @@ bool al_efx_slot_is_kernel(const al_efx_slot_t *slot) {
     return slot && (slot->props.type == AL_EFFECT_XBOX_GP_PROGRAM || is_builtin_kernel(slot->props.type));
 }
 
+/* The GP kernel an effect needs in a slot (the reverb's for the reverbs), false for none */
+static bool props_kernel(const al_efx_effect_props_t *e, apu_gp_kernel_t *k) {
+    if (e->type == AL_EFFECT_REVERB || e->type == AL_EFFECT_EAXREVERB) {
+        const apu_gp_kernel_t *r = apu_gp_reverb_kernel();
+        if (r) *k = *r;
+        return r != NULL;
+    }
+    if (is_builtin_kernel(e->type)) {
+        return builtin_kernel(e->type, k);
+    }
+    if (e->type == AL_EFFECT_XBOX_GP_PROGRAM && e->program) {
+        *k = e->program->kernel;
+        return true;
+    }
+    return false;
+}
+
+/* Do the slots' kernels fit the GP together with `e` in slot `id` (EFX_PLAN.md 3.1: the shared budgets)? */
+static bool effects_fit(ALuint id, const al_efx_effect_props_t *e) {
+    apu_gp_kernel_t k[AL_EFX_MAX_SLOTS];
+    const apu_gp_kernel_t *set[APU_GP_SLOTS] = { NULL, NULL, NULL, NULL };
+    uint32_t i;
+    for (i = 0; i < AL_EFX_MAX_SLOTS && i < APU_GP_SLOTS; i++) {
+        const al_efx_effect_props_t *p = (i + 1u == id) ? e : (s_slots[i].in_use ? &s_slots[i].props : NULL);
+        if (p && props_kernel(p, &k[i])) {
+            set[i] = &k[i];
+        }
+    }
+    return apu_gp_kernels_fit(set);
+}
+
 bool al_efx_slot_kernel(const al_efx_slot_t *slot, apu_gp_kernel_t *k, const uint32_t **params) {
     if (!slot) {
         return false;
@@ -895,7 +926,6 @@ AL_API void AL_APIENTRY alAuxiliaryEffectSloti(ALuint slot, ALenum param, ALint 
     switch (param) {
         case AL_EFFECTSLOT_EFFECT: {
             const effect_t *e = NULL;
-            ALuint active;
             if (value != 0) {
                 e = get_effect((ALuint)value);
                 if (!e) {
@@ -903,10 +933,9 @@ AL_API void AL_APIENTRY alAuxiliaryEffectSloti(ALuint slot, ALenum param, ALint 
                     return;
                 }
             }
-            /* One effect per device: the GP runs one program (EFX_PLAN 3.1) */
-            active = al_efx_active_slot();
-            if (e && e->props.type != AL_EFFECT_NULL &&
-                ((active != 0u && active != slot) || alIsEnabled(AL_XBOX_REVERB))) {
+            /* Every slot runs its own kernel; refused only when the GP's budgets are full (P, X, Y,
+             * scratch, descriptors), or while AL_XBOX_REVERB owns the GP (EFX_PLAN 3.1) */
+            if (e && e->props.type != AL_EFFECT_NULL && (alIsEnabled(AL_XBOX_REVERB) || !effects_fit(slot, &e->props))) {
                 alSetError(AL_INVALID_OPERATION);
                 return;
             }
@@ -956,7 +985,7 @@ AL_API void AL_APIENTRY alAuxiliaryEffectSlotf(ALuint slot, ALenum param, ALfloa
         return;
     }
     s->gain = value;
-    if (al_efx_active_slot() == slot) {
+    if (s->props.type != AL_EFFECT_NULL) {
         al_source_effects_changed();
     }
 }

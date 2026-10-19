@@ -1,6 +1,7 @@
 ; AL_EFFECT_ECHO on the GP (lib/openal/docs/SOFT_GAP_PLAN.md phase9-05).
 ; Our own code, from the EFX echo's parameter descriptions; runs inside
-; dsp/gp_loop.asm as a library kernel, loaded like a custom kernel.
+; dsp/gp_loop.asm as a library kernel (ABI 2, relocatable), loaded like a
+; custom kernel.
 ;
 ; The slot's two bins summed are the input m (each send arrives half on each).
 ; One delay line, two taps:
@@ -16,44 +17,44 @@
 
 K_SCRATCH_BYTES equ $20000      ; image header: scratch the kernel needs
 K_DESCRIPTORS   equ 3           ; image header: descriptors a frame (both chains)
+K_XWORDS        equ $C0         ; image header: the X block, ABI words included
+K_YWORDS        equ 0
 
-KIN     equ     $E0             ; ABI (gp_loop.asm)
-KSCR    equ     $E1
-KPARAM  equ     $E8
-K_RHEAD equ     $19
-K_WHEAD equ     $1A
-FIFO2   equ     $08
-OUTL    equ     $20
+KIN     equ     KX              ; ABI (docs/GP_KERNELS.md)
+KSCR    equ     KX+1
+K_RHEAD equ     KX+3
+K_WHEAD equ     KX+4
+KPARAM  equ     KX+8
+OUTL    equ     $20             ; the loop's OUT L/R
 OUTR    equ     $40
 
 LINE    equ     $20000          ; bytes in the line
 MAXDLY  equ     32704           ; samples (the line less two blocks)
 MINDLY  equ     32              ; a tap must lie in blocks already written
 
-INIT    equ     $108            ; 1 once the descriptors are set up
-LPST    equ     $109            ; the damping lowpass's state
-RD1     equ     $110            ; read descriptors, 7 words each
-RD2     equ     $118
-WR      equ     $120            ; write descriptor
-T1      equ     $140            ; the tap blocks
-T2      equ     $160
-WB      equ     $180            ; the block written to the line
+INIT    equ     KX+$28          ; 1 once the descriptors are set up
+LPST    equ     KX+$29          ; the damping lowpass's state
+RD1     equ     KX+$30          ; read descriptors, 7 words each
+RD2     equ     KX+$38
+WR      equ     KX+$40          ; write descriptor
+T1      equ     KX+$60          ; the tap blocks
+T2      equ     KX+$80
+WB      equ     KX+$A0          ; the block written to the line
 
 EOL     equ     $004000
 CTL_R   equ     $0049D0         ; memory -> DSP, write-back, circular scratch, 24-bit, step 1
 CTL_W   equ     $0049D2         ; DSP -> memory, the same
 
-        org     p:$100
+        org     p:0
 kernel  move    x:INIT,a
         tst     a
         jne     ready
 
-; first call: descriptors and chain heads (read RD1 -> RD2; write WR -> FIFO2)
+; first call: descriptors and chain heads (read RD1 -> RD2; write WR)
         move    #RD2,x0
         move    x0,x:RD1
         move    #EOL,x0
         move    x0,x:RD2
-        move    #FIFO2,x0
         move    x0,x:WR
         move    #CTL_R,x0
         move    x0,x:RD1+1

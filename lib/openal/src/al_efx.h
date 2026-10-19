@@ -5,9 +5,8 @@
  * ALC_EXT_EFX objects (lib/openal/docs/EFX_PLAN.md 3.1): effects, filters,
  * auxiliary effect slots and the per-source / listener EFX state. This file
  * stores and validates and maps the reverb onto the GP's; al_source.c routes
- * the sends and drives the GP (EFX_PLAN.md 3.2) through al_efx_slot() and
- * al_efx_active_slot(), and hears of slot changes through
- * al_source_effects_changed().
+ * the sends and drives the GP, one kernel per slot (EFX_PLAN.md 3.2), through
+ * al_efx_slot(), and hears of slot changes through al_source_effects_changed().
  */
 
 #include <AL/al.h>
@@ -119,7 +118,7 @@ ALint al_efx_max_sends(void);
 /** The slot `id` (1..AL_EFX_MAX_SLOTS) if it exists, else NULL. */
 const al_efx_slot_t *al_efx_slot(ALuint id);
 
-/** The slot holding an effect other than AL_EFFECT_NULL (one at a time), 0 if none. */
+/** The first slot holding an effect other than AL_EFFECT_NULL, 0 if none. */
 ALuint al_efx_active_slot(void);
 
 /** Free every effect, filter and slot (last device closed). */

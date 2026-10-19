@@ -1,7 +1,7 @@
 /*
  * AL_EFFECT_ECHO on the library's GP kernel (docs/SOFT_GAP_PLAN.md phase9-05):
  * the effect object (defaults, ranges), the kernel a slot runs and the
- * parameter words it gets, the slot gain on the sends, one effect per device.
+ * parameter words it gets, the slot gain on the sends, a reverb beside it.
  * The kernel's sound is checked in tests/test_gp_programs.py [6].
  */
 #define AL_ALEXT_PROTOTYPES
@@ -77,14 +77,17 @@ static void test_slot(ALuint e) {
     assert(al_source_debug_sends(src, s) && s[0] == 0.5f);
     alAuxiliaryEffectSlotf(slot, AL_EFFECTSLOT_GAIN, 1.0f);
 
-    /* still one effect per device */
+    /* a reverb beside it in another slot (phase9-04); AL_XBOX_REVERB stays exclusive */
     alGenEffects(1, &e2);
     alEffecti(e2, AL_EFFECT_TYPE, AL_EFFECT_REVERB);
     alGenAuxiliaryEffectSlots(1, &slot2);
     alAuxiliaryEffectSloti(slot2, AL_EFFECTSLOT_EFFECT, (ALint)e2);
-    assert(alGetError() == AL_INVALID_OPERATION);
+    assert(alGetError() == AL_NO_ERROR);
+    assert(al_source_debug_gp_slot(slot - 1u, NULL, NULL, NULL) == AL_GP_KERNEL);
+    assert(al_source_debug_gp_slot(slot2 - 1u, NULL, NULL, NULL) == AL_GP_REVERB);
     alEnable(AL_XBOX_REVERB);
     assert(alGetError() == AL_INVALID_OPERATION);
+    alAuxiliaryEffectSloti(slot2, AL_EFFECTSLOT_EFFECT, 0);
 
     alSource3i(src, AL_AUXILIARY_SEND_FILTER, 0, 0, AL_FILTER_NULL);
     alDeleteSources(1, &src);

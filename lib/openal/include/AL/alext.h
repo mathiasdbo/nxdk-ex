@@ -170,15 +170,18 @@ typedef void (AL_APIENTRY *LPALXBOXGETREVERBF)(ALenum param, ALfloat *value);
  *   alAuxiliaryEffectSloti(slot, AL_EFFECTSLOT_EFFECT, effect);
  *
  * The image is a DSP56300 kernel for the library's GP frame loop (the ABI in
- * lib/openal/dsp/gp_loop.asm; an example in dsp/gp_kecho.asm), as
+ * lib/openal/docs/GP_KERNELS.md; an example in dsp/gp_kecho.asm), as
  * tools/dsp56asm.py --image writes it: AL_XBOX_GP_IMAGE_MAGIC, the ABI
- * version (AL_XBOX_GP_IMAGE_ABI), the scratch bytes it uses, the DMA
- * descriptors it runs a frame (at most 60), then up to 0x700 code words for
- * P:$100. The library checks the header, the size, 24-bit words and the
- * scratch (about 180 KiB, what the reverb's delay lines take) and keeps a
- * copy; anything else gives AL_INVALID_VALUE, and flags must be 0. The
- * kernel's input is the slot's mixbin pair (every send; EFX_PLAN.md 3.2), its
- * output is added to the dry mix.
+ * version (AL_XBOX_GP_IMAGE_ABI, 2: relocatable), the scratch bytes it uses,
+ * the DMA descriptors it runs a frame, its X and Y words and relocations, then
+ * up to 0x700 code words (ABI 1 images, fixed at P:$100, still load but run
+ * only alone). The library checks the header, the size, 24-bit words and the
+ * scratch (about 500 KiB, shared by every slot's kernel) and keeps a copy;
+ * anything else gives AL_INVALID_VALUE, and flags must be 0. Each slot runs
+ * its own kernel; attaching one gives AL_INVALID_OPERATION when the GP's
+ * shared budgets (P, X, Y, scratch, 60 descriptors) are full. The kernel's
+ * input is its slot's mixbin pair (the sends to that slot; EFX_PLAN.md 3.2),
+ * its output is added to the dry mix.
  *
  * Parameters are 24-bit words the kernel reads at X:KPARAM + n: alEffecti
  * stores an integer (-0x800000 .. 0xFFFFFF, read back sign-extended),
@@ -188,16 +191,16 @@ typedef void (AL_APIENTRY *LPALXBOXGETREVERBF)(ALenum param, ALfloat *value);
  * one 0.67 ms frame (a new image restarts the kernel instead).
  *
  * alXboxGetHardwareStatus(AL_XBOX_GP_LOAD / AL_XBOX_GP_LOAD_PEAK): how much
- * of the GP's frame the effect takes, in percent, for the last frame and the
+ * of the GP's frame the effects take, in percent, for the last frame and the
  * most since the last AL_XBOX_GP_LOAD_PEAK query (100: frames are late; the
- * dry mix stutters). Measured against a frame without the effect, on a
+ * dry mix stutters). Measured against a frame without any effect, on a
  * console only (0 elsewhere).
  */
 #define AL_EFFECT_XBOX_GP_PROGRAM                0x7100
 #define AL_XBOX_GP_PARAM0                        0x7120
 #define AL_XBOX_GP_PARAMS                        32
 #define AL_XBOX_GP_IMAGE_MAGIC                   0x47504B   /* 'GPK' */
-#define AL_XBOX_GP_IMAGE_ABI                     1
+#define AL_XBOX_GP_IMAGE_ABI                     2          /* 1 is still accepted */
 #define AL_XBOX_GP_LOAD                          0x700E
 #define AL_XBOX_GP_LOAD_PEAK                     0x700F
 

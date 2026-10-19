@@ -474,10 +474,10 @@ static NVAPU_VOICE_CONTEXT_3D *source_live_context(const ALsource *src) {
 
 
 /*
- * Effect sends (EFX_PLAN.md 3.2). The GP runs one effect, so only sends to it
- * are heard: AL_XBOX_REVERB_SEND on send 0 while AL_XBOX_REVERB is on (the
- * dry gain times the send, as before), else each EFX send whose slot holds the
- * active effect. An EFX send's gain is the source's gain with distance
+ * Effect sends (EFX_PLAN.md 3.2). AL_XBOX_REVERB_SEND on send 0 into GP slot 0
+ * while AL_XBOX_REVERB is on (the dry gain times the send, as before), else
+ * each EFX send whose slot holds an effect, into that slot's GP slot (EFX slot
+ * s is GP slot s - 1: bins 2+2k / 3+2k). An EFX send's gain is the source's gain with distance
  * attenuation by the room rolloff (the source's plus the effect's), the cone
  * when AL_AUXILIARY_SEND_FILTER_GAIN_AUTO is on, within AL_MIN_GAIN /
  * AL_MAX_GAIN, times the listener gain. AL_EFFECTSLOT_GAIN: the reverb applies
@@ -507,35 +507,51 @@ static float efx_send_gain(const ALsource *src, const AL_SPATIAL_CALC *calc, con
 
 /* A stereo source into a custom GP kernel sends each channel at the whole send
  * gain (the kernel reads the pair); everything else at half on each output
- * (the reverb reads their sum) */
-static bool source_sends_per_channel(const ALsource *src) {
+ * (the reverb reads their sum). Per send: each has its own slot */
+static bool source_send_per_channel(const ALsource *src, uint32_t n) {
     const ALbuffer *pb = al_source_play_buffer(src);
     const al_efx_slot_t *slot;
-    if (s_reverb_enabled || pb == NULL || pb->channels != 2) {
+    if (s_reverb_enabled || pb == NULL || pb->channels != 2 || n >= (uint32_t)AL_EFX_MAX_SENDS) {
         return false;
     }
-    slot = al_efx_slot(al_efx_active_slot());
+    slot = al_efx_slot(src->efx.send[n].slot);
     return slot != NULL && slot->props.type == AL_EFFECT_XBOX_GP_PROGRAM;
 }
 
-static void source_sends(const ALsource *src, const AL_SPATIAL_CALC *calc, float out[APU_VOICE_SENDS]) {
-    ALuint active = al_efx_active_slot();
+/* Each send's gain and GP slot (0xFF: unused, it stays where it is) */
+static void source_sends(const ALsource *src, const AL_SPATIAL_CALC *calc, float out[APU_VOICE_SENDS],
+                         uint8_t gp_slot[APU_VOICE_SENDS]) {
     uint32_t n;
     for (n = 0; n < APU_VOICE_SENDS; n++) {
         out[n] = 0.0f;
+        gp_slot[n] = 0xFFu;
     }
     if (s_reverb_enabled) {
         out[0] = calc->effective_gain * src->reverb_send;
-        return;
-    }
-    if (active == 0u) {
+        gp_slot[0] = 0u;
         return;
     }
     for (n = 0; n < APU_VOICE_SENDS && n < (uint32_t)AL_EFX_MAX_SENDS; n++) {
-        if (src->efx.send[n].slot == active) {
-            out[n] = efx_send_gain(src, calc, al_efx_slot(active), n);
+        ALuint id = src->efx.send[n].slot;
+        const al_efx_slot_t *slot = al_efx_slot(id);
+        if (slot != NULL && slot->props.type != AL_EFFECT_NULL) {
+            out[n] = efx_send_gain(src, calc, slot, n);
+            gp_slot[n] = (uint8_t)(id - 1u);
         }
     }
+}
+
+/* The sends of a voice: gains, routing (a playing voice moves with a ramp), per-channel level */
+static void source_apply_sends(const ALsource *src, const AL_SPATIAL_CALC *calc, uint32_t voice) {
+    float sends[APU_VOICE_SENDS];
+    uint8_t gp_slot[APU_VOICE_SENDS];
+    uint32_t n;
+    source_sends(src, calc, sends, gp_slot);
+    for (n = 0; n < APU_VOICE_SENDS; n++) {
+        apu_voice_set_send_per_channel(voice, n, source_send_per_channel(src, n));
+    }
+    apu_voice_set_send_slots(voice, gp_slot);
+    apu_voice_set_sends(voice, sends);
 }
 
 /*
@@ -591,12 +607,7 @@ static void source_update_hw(const ALsource *src, unsigned fields) {
     apu_voice_set_direction((uint32_t)src->hw_voice_idx, calc.local_pos);
     source_set_voice_direct((uint32_t)src->hw_voice_idx, src);
     apu_voice_set_lowpass((uint32_t)src->hw_voice_idx, source_lowpass(&calc));
-    {
-        float sends[APU_VOICE_SENDS];
-        source_sends(src, &calc, sends);
-        apu_voice_set_send_per_channel((uint32_t)src->hw_voice_idx, source_sends_per_channel(src));
-        apu_voice_set_sends((uint32_t)src->hw_voice_idx, sends);
-    }
+    source_apply_sends(src, &calc, (uint32_t)src->hw_voice_idx);
     /* Hardware backend: apply the new pitch and volumes to the running voice */
     apu_voice_commit(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx);
 }
@@ -701,12 +712,7 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
     src->has_offset = false;
     source_set_voice_direct(hw_voice_idx, src);
     apu_voice_set_lowpass(hw_voice_idx, source_lowpass(&calc));
-    {
-        float sends[APU_VOICE_SENDS];
-        source_sends(src, &calc, sends);
-        apu_voice_set_send_per_channel(hw_voice_idx, source_sends_per_channel(src));
-        apu_voice_set_sends(hw_voice_idx, sends);
-    }
+    source_apply_sends(src, &calc, hw_voice_idx);
     apu_voice_setup(hw_voice_idx, &ctx);
     if (src->stream) {
         /* The voice starts at ring index 0 from the stream's read position */
@@ -2195,9 +2201,9 @@ AL_API void AL_APIENTRY alGetBooleanv(ALenum param, ALboolean *values) {
 }
 
 /*
- * The GP's one effect: AL_XBOX_reverb (one reverb for the mix; its settings
- * live here) or, with it off, the reverb of the EFX slot holding the active
- * effect (al_efx.c). reverb_apply() hands the parameters to the GP program
+ * The GP's effects, one per slot: AL_XBOX_reverb (one reverb for the mix in GP
+ * slot 0; its settings live here) or, with it off, the effect of each EFX slot
+ * s in GP slot s - 1 (al_efx.c). reverb_apply() hands them to the GP program
  * when a device is up and the console route is in use (on xemu's front-end
  * route bins 2/3 are surround bins). alXboxUpdateVoices() re-applies them
  * after a device (re)open.
@@ -2212,50 +2218,70 @@ static void reverb_params(void) {
     }
 }
 
-/* What the GP runs: the reverb (`p`), an AL_XBOX_gp_program kernel (`k`, `params`) or nothing */
-typedef enum { GP_NONE, GP_REVERB, GP_KERNEL } gp_kind_t;
-
-static gp_kind_t gp_effect(apu_reverb_params_t *p, apu_gp_kernel_t *k, const uint32_t **params) {
+/* What GP slot k runs: the reverb (`p`), a kernel (`k`, `params`) or nothing */
+static int gp_slot_effect(uint32_t slot_k, apu_reverb_params_t *p, apu_gp_kernel_t *k, const uint32_t **params) {
     const al_efx_slot_t *slot;
     reverb_params();
     *p = s_reverb;
     if (s_reverb_enabled) {
-        return GP_REVERB;
+        return (slot_k == 0u) ? AL_GP_REVERB : AL_GP_NONE;
     }
-    slot = al_efx_slot(al_efx_active_slot());
+    slot = al_efx_slot(slot_k + 1u);
     if (slot && (slot->props.type == AL_EFFECT_REVERB || slot->props.type == AL_EFFECT_EAXREVERB)) {
         al_efx_reverb_params(slot, p);
-        return GP_REVERB;
+        return AL_GP_REVERB;
     }
     if (al_efx_slot_kernel(slot, k, params)) {
-        return GP_KERNEL;
+        return AL_GP_KERNEL;
     }
-    return GP_NONE;
+    return AL_GP_NONE;
+}
+
+/* The kernel GP slot k should hold (NULL: none) */
+static const apu_gp_kernel_t *gp_slot_want(int kind, const apu_gp_kernel_t *k) {
+    return (kind == AL_GP_REVERB) ? apu_gp_reverb_kernel() : ((kind == AL_GP_KERNEL) ? k : NULL);
 }
 
 static void reverb_apply(void) {
-    apu_reverb_params_t p;
-    apu_gp_kernel_t k;
-    const uint32_t *params = NULL;
-    gp_kind_t kind = gp_effect(&p, &k, &params);
+    apu_reverb_params_t p[APU_GP_SLOTS];
+    apu_gp_kernel_t k[APU_GP_SLOTS];
+    const uint32_t *params[APU_GP_SLOTS];
+    int kind[APU_GP_SLOTS];
     uintptr_t base = al_source_get_apu_base();
+    uint32_t i;
     if (!apu_gp_ready() || apu_vp_front_end_ok()) {
         return;
     }
-    if (kind == GP_KERNEL) {
-        (void)apu_gp_kernel_set(base, &k, params, true);
-        return;
+    for (i = 0; i < APU_GP_SLOTS; i++) {
+        params[i] = NULL;
+        kind[i] = gp_slot_effect(i, &p[i], &k[i], &params[i]);
     }
-    (void)apu_gp_kernel_set(base, NULL, NULL, false);
-    (void)apu_gp_reverb_set(base, &p, kind == GP_REVERB);
+    /* First stop every slot whose kernel changes: another slot may need its ranges */
+    for (i = 0; i < APU_GP_SLOTS; i++) {
+        if (!apu_gp_slot_holds(i, gp_slot_want(kind[i], &k[i]))) {
+            apu_gp_slot_stop(base, i);
+        }
+    }
+    for (i = 0; i < APU_GP_SLOTS; i++) {
+        if (kind[i] == AL_GP_REVERB) {
+            (void)apu_gp_reverb_set(base, i, &p[i], true);
+        } else if (kind[i] == AL_GP_KERNEL) {
+            (void)apu_gp_kernel_set(base, i, &k[i], params[i], true);
+        }
+    }
 }
 
 static void reverb_sync(void) {
     apu_reverb_params_t p;
     apu_gp_kernel_t k;
     const uint32_t *params;
-    if (gp_effect(&p, &k, &params) != GP_NONE && !apu_gp_reverb_on() && !apu_gp_kernel_on()) {
-        reverb_apply();
+    uint32_t i;
+    for (i = 0; i < APU_GP_SLOTS; i++) {
+        int kind = gp_slot_effect(i, &p, &k, &params);
+        if (kind != AL_GP_NONE && !apu_gp_slot_holds(i, gp_slot_want(kind, &k))) {
+            reverb_apply();   /* a slot that should run does not (a GP restart stopped it) */
+            return;
+        }
     }
 }
 
@@ -2263,28 +2289,66 @@ bool al_reverb_active(void) {
     apu_reverb_params_t p;
     apu_gp_kernel_t k;
     const uint32_t *params;
-    return gp_effect(&p, &k, &params) == GP_REVERB && apu_gp_reverb_on();
+    uint32_t i;
+    for (i = 0; i < APU_GP_SLOTS; i++) {
+        if (gp_slot_effect(i, &p, &k, &params) == AL_GP_REVERB && apu_gp_slot_holds(i, apu_gp_reverb_kernel())) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int al_source_debug_gp_slot(uint32_t slot, apu_reverb_params_t *p, apu_gp_kernel_t *k, const uint32_t **params) {
+    apu_reverb_params_t pp;
+    apu_gp_kernel_t kk;
+    const uint32_t *par = NULL;
+    int kind;
+    if (slot >= APU_GP_SLOTS) {
+        return AL_GP_NONE;
+    }
+    kind = gp_slot_effect(slot, &pp, &kk, &par);
+    if (p) *p = pp;
+    if (k && kind == AL_GP_KERNEL) *k = kk;
+    if (params) *params = par;
+    return kind;
 }
 
 bool al_source_debug_gp_effect(apu_reverb_params_t *p) {
-    apu_gp_kernel_t k;
-    const uint32_t *params;
-    return gp_effect(p, &k, &params) == GP_REVERB;
+    uint32_t i;
+    for (i = 0; i < APU_GP_SLOTS; i++) {
+        if (al_source_debug_gp_slot(i, p, NULL, NULL) == AL_GP_REVERB) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool al_source_debug_gp_kernel(apu_gp_kernel_t *k, const uint32_t **params) {
-    apu_reverb_params_t p;
-    return gp_effect(&p, k, params) == GP_KERNEL;
+    uint32_t i;
+    for (i = 0; i < APU_GP_SLOTS; i++) {
+        if (al_source_debug_gp_slot(i, NULL, k, params) == AL_GP_KERNEL) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool al_source_debug_sends(ALuint source, float out[APU_VOICE_SENDS]) {
+    return al_source_debug_send_route(source, out, NULL);
+}
+
+bool al_source_debug_send_route(ALuint source, float out[APU_VOICE_SENDS], uint8_t gp_slot[APU_VOICE_SENDS]) {
     AL_SPATIAL_CALC calc;
+    float g[APU_VOICE_SENDS];
+    uint8_t s[APU_VOICE_SENDS];
     ALsource *src = al_source_get(source);
-    if (!src || !out) {
+    if (!src) {
         return false;
     }
     al_source_calc_spatial(src, &calc);
-    source_sends(src, &calc, out);
+    source_sends(src, &calc, g, s);
+    if (out) memcpy(out, g, sizeof(g));
+    if (gp_slot) memcpy(gp_slot, s, sizeof(s));
     return true;
 }
 
@@ -2361,7 +2425,7 @@ AL_API void AL_APIENTRY alEnable(ALenum capability) {
         return;
     }
     if (capability == AL_XBOX_REVERB) {
-        /* The GP runs one effect: not while an EFX slot holds one (EFX_PLAN 3.1) */
+        /* The mix's reverb or the EFX slots, not both: not while an EFX slot holds an effect (EFX_PLAN 3.1) */
         if (al_efx_active_slot() != 0u) {
             alSetError(AL_INVALID_OPERATION);
             return;

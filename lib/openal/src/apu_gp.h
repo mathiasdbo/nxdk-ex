@@ -108,20 +108,21 @@ void apu_gp_debug_set_dsp_step(uint32_t words);
 /**
  * Program image for the next apu_gp_init() (diagnostics and alternative
  * programs): `count` DSP words loaded at P:0, at most 0x800. NULL restores the
- * default: the frame loop dsp/gp_loop.asm at P:0 and kernel 0, the reverb
- * (dsp/gp_kfreeverb.asm), at P:$100 (the copy program while the kernel is off).
+ * default: the frame loop dsp/gp_loop.asm at P:0 (the copy program while no
+ * slot runs a kernel); the kernels are loaded into P:$100..$7FF later.
  * The program must end each frame like the copy program and keep the frame
- * counter at X:$10 (apu_vp_init checks it). The mailbox, the burn and the
- * reverb need the default image.
+ * counter at X:$10 (apu_vp_init checks it). The mailbox, the burn, the reverb
+ * and the kernels need the default image.
  */
 void apu_gp_debug_set_program(const uint32_t *words, uint32_t count);
 
 /**
  * Size of the GP scratch space from the next apu_gp_init(), in bytes (rounded up
- * to 4 KiB, at least 0x2000, at most 2 MiB; 0 = what the program needs: the
- * reverb's delay lines for the default program). Offsets 0..$1FFF hold the
- * bootstrap image; the rest is free for the program's DMA (zeroed at init).
+ * to 4 KiB, at least 0x2000, at most 2 MiB; 0 = APU_GP_SCRATCH_DEFAULT for the
+ * default program). Offsets 0..$1FFF hold the bootstrap image; the rest is
+ * the kernels' (zeroed at init).
  */
+#define APU_GP_SCRATCH_DEFAULT (512u * 1024u)   /* the reverb's lines (180 KiB) and two 128 KiB echoes */
 void apu_gp_debug_set_scratch_bytes(uint32_t bytes);
 
 /** Size of the scratch space in use (0 before apu_gp_init()). */
@@ -129,9 +130,10 @@ uint32_t apu_gp_scratch_bytes(void);
 
 /**
  * Mailbox of the frame loop (EFX_PLAN.md 3.4): the `n` (address, value) X words
- * (at most 64) land together at the start of one frame. Waits for the previous
- * post to be applied first (at most ~20 ms). Returns 0, 1 if the GP took no
- * frames (the words were written directly), -1 without the default image.
+ * (at most GP_LOOP_MB_MAX, 56) land together at the start of one frame. Waits
+ * for the previous post to be applied first (at most ~20 ms). Returns 0, 1 if
+ * the GP took no frames (the words were written directly), -1 without the
+ * default image.
  */
 int apu_gp_mailbox(uintptr_t bar0, const apu_reverb_word_t *w, uint32_t n);
 
@@ -141,60 +143,113 @@ uint32_t apu_gp_debug_mailbox_frames(uintptr_t bar0);
 /** Cycles of nop the loop adds to every frame while the kernel runs (diagnostics: headroom; 0 = none). */
 void apu_gp_debug_set_burn(uintptr_t bar0, uint32_t cycles);
 
-/**
- * The reverb, kernel 0 of the default image (apu_reverb.h). `on` with new
- * parameters: if only gains change they go through the mailbox (one frame); a
- * new pre-delay (or switching on) stops the kernel for a frame, lays the delay
- * lines out again and empties them. Switching on stops a custom kernel and puts
- * the reverb's code back in P memory. Returns -1 if the GP runs another program.
- */
-int apu_gp_reverb_set(uintptr_t bar0, const struct apu_reverb_params_s *p, bool on);
-
-/** The reverb is running. */
-bool apu_gp_reverb_on(void);
-
 /*
- * Custom kernels (AL_XBOX_gp_program, EFX_PLAN.md 3.6; the ABI in dsp/gp_loop.asm).
- * An image is APU_GP_IMAGE_HEADER words (magic, ABI version, scratch bytes,
- * DMA descriptors a frame) and the code loaded at P:$100, as
- * tools/dsp56asm.py --image writes it.
+ * Effect slots (EFX_PLAN.md 3.2-3.3, GP_KERNELS.md): the loop runs up to
+ * APU_GP_SLOTS kernels at once, one per slot, in slot order; slot k reads the
+ * bin pair 2+2k / 3+2k. Each kernel gets its own P range (P:$100..$7FF), X
+ * block (X:$E0..$BFF), Y range and scratch, placed first fit (no compaction:
+ * a freed range is reused when something fits in it). The budgets are shared:
+ * P, X, Y, scratch, and 60 DMA descriptors a frame in all.
+ *
+ * An image, as tools/dsp56asm.py --image writes it:
+ *   ABI 2 (relocatable): magic, 2, scratch bytes, descriptors, X words, Y
+ *     words, reloc count, the relocs, then the code assembled at P:0 with
+ *     KX = KY = 0. A reloc is one word: bits 11:0 the code offset, 13:12 the
+ *     kind (0 a P extension word, 1 the 12-bit address field of a short
+ *     jmp / jsr / jCC, 2 an X extension word, 3 a Y extension word); the
+ *     loader adds the slot's P, X or Y base.
+ *   ABI 1: magic, 1, scratch bytes, descriptors, then the code for P:$100, its
+ *     X from $E0 and all of Y: it runs only alone.
  */
+#define APU_GP_SLOTS                  4u
 #define APU_GP_IMAGE_MAGIC            0x47504Bu   /* 'GPK' */
-#define APU_GP_IMAGE_ABI              1u
-#define APU_GP_IMAGE_HEADER           4u
+#define APU_GP_IMAGE_ABI              2u          /* the current ABI; 1 is still accepted */
+#define APU_GP_IMAGE_HEADER           4u          /* ABI 1 */
+#define APU_GP_IMAGE_HEADER2          7u          /* ABI 2, before the relocs */
 #define APU_GP_KERNEL_MAX_WORDS       0x700u      /* P:$100..$7FF */
+#define APU_GP_KERNEL_MAX_XWORDS      0xB20u      /* X:$E0..$BFF */
+#define APU_GP_KERNEL_MAX_YWORDS      0x800u
+#define APU_GP_KERNEL_MIN_XWORDS      0x28u       /* the ABI words: KIN .. KPARAM + 31 */
 #define APU_GP_KERNEL_MAX_DESCRIPTORS 60u
 #define APU_GP_KERNEL_PARAMS          32u
+#define APU_GP_KERNEL_PARAM0          8u          /* ABI 2: X:KX + 8 + n is parameter n */
 
 typedef struct {
-    const uint32_t *code;       /* the words for P:$100 on */
+    const uint32_t *code;       /* ABI 2: assembled at P:0; ABI 1: the words for P:$100 on */
     uint32_t words;
-    uint32_t scratch_bytes;     /* from scratch byte $2000 */
+    uint32_t scratch_bytes;
     uint32_t descriptors;
+    uint32_t abi;               /* 1 or 2 */
+    uint32_t x_words;           /* ABI 2: the X block from KX, the ABI words included */
+    uint32_t y_words;           /* ABI 2: Y words from KY */
+    const uint32_t *relocs;     /* ABI 2 */
+    uint32_t reloc_count;
 } apu_gp_kernel_t;
 
 /**
- * Check an image: magic, ABI, code size, 24-bit words, descriptors, and scratch
- * within apu_gp_kernel_scratch_max(). Fills `out` (pointing into `image`).
+ * Check an image: magic, ABI, code size, 24-bit words, descriptors, scratch
+ * within apu_gp_kernel_scratch_max(), and for ABI 2 the X / Y sizes and the
+ * relocs (offsets inside the code). Fills `out` (pointing into `image`).
  * Returns 0, or -1 if the image is not usable.
  */
 int apu_gp_kernel_parse(const uint32_t *image, uint32_t count, apu_gp_kernel_t *out);
 
-/** Scratch bytes a kernel may use: the open device's space above $2000, else what the next apu_gp_init() allocates. */
+/** Scratch bytes the kernels may use: the open device's space above $2000, else what the next apu_gp_init() allocates. */
 uint32_t apu_gp_kernel_scratch_max(void);
 
-/**
- * Run kernel `k` in place of the reverb (`on`), or stop it. A kernel already
- * running with the same code only gets its changed parameters, through the
- * mailbox (one frame). Otherwise the kernel stops for two frames, the code is
- * written to P:$100 (read back; on a mismatch the GP restarts from the
- * bootstrap image, which holds it too), the kernel's X is set up (ABI) and its
- * scratch zeroed, and it starts. Returns 0, -1 if the GP cannot run it.
- */
-int apu_gp_kernel_set(uintptr_t bar0, const apu_gp_kernel_t *k, const uint32_t params[APU_GP_KERNEL_PARAMS], bool on);
+/** `code` relocated for P / X / Y bases (ABI 2; an ABI 1 kernel is copied as it is). `out`: k->words words. */
+void apu_gp_kernel_relocate(const apu_gp_kernel_t *k, uint32_t pbase, uint32_t xbase, uint32_t ybase, uint32_t *out);
 
-/** A custom kernel is running. */
-bool apu_gp_kernel_on(void);
+/** The reverb's kernel (dsp/gp_kfreeverb.asm, ABI 2), for budget checks. */
+const apu_gp_kernel_t *apu_gp_reverb_kernel(void);
+
+/**
+ * Do the kernels `set` (one per slot, NULL for an empty slot) fit the GP
+ * together? The sums of P, X, Y, scratch and descriptors, an ABI 1 kernel
+ * only alone, and while the GP runs, the loader's own first fit: a slot whose
+ * kernel stays keeps its ranges, the others are placed around them in slot
+ * order.
+ */
+bool apu_gp_kernels_fit(const apu_gp_kernel_t *const set[APU_GP_SLOTS]);
+
+/** Slot `slot` runs kernel `k` (its code, relocated where it is, and its sizes); NULL: the slot is empty. */
+bool apu_gp_slot_holds(uint32_t slot, const apu_gp_kernel_t *k);
+
+/** Stop whatever slot `slot` runs and free its ranges. */
+void apu_gp_slot_stop(uintptr_t bar0, uint32_t slot);
+
+/**
+ * The reverb (apu_reverb.h) in slot `slot`. `on` with new parameters: if only
+ * gains change they go through the mailbox (one frame); a new pre-delay (or
+ * switching on) stops the slot for two frames, loads the kernel if the slot
+ * ran something else, lays the delay lines out again and empties them. Its
+ * output lowpass acts on the whole mix. Off stops the slot if it runs the
+ * reverb. Returns -1 if the GP runs another program or the budgets are full.
+ */
+int apu_gp_reverb_set(uintptr_t bar0, uint32_t slot, const struct apu_reverb_params_s *p, bool on);
+
+/** A slot runs the reverb. */
+bool apu_gp_reverb_on(void);
+
+/**
+ * Run kernel `k` in slot `slot` (`on`), or stop the slot's kernel. A kernel
+ * already running there with the same code only gets its changed parameters,
+ * through the mailbox (one frame). Otherwise the slot stops for two frames
+ * (the other slots keep running), the kernel is placed (first fit), its code
+ * relocated and written through the P window for its range only (read back;
+ * on a mismatch the GP restarts from the bootstrap image, which holds it too,
+ * and the other slots stop), its trampoline pointed at it, its X block and
+ * scratch zeroed and its ABI words written, and it starts. An ABI 1 kernel
+ * needs every other slot empty. Returns 0, -1 if the GP cannot run it.
+ */
+int apu_gp_kernel_set(uintptr_t bar0, uint32_t slot, const apu_gp_kernel_t *k,
+                      const uint32_t params[APU_GP_KERNEL_PARAMS], bool on);
+
+/** Slot `slot` runs a custom kernel (APU_GP_SLOTS: any slot). */
+bool apu_gp_kernel_on(uint32_t slot);
+
+/** Where slot `slot`'s kernel is (diagnostics, tests): P, X and Y bases and scratch byte offset; false if empty. */
+bool apu_gp_debug_slot(uint32_t slot, uint32_t *p, uint32_t *x, uint32_t *y, uint32_t *scratch);
 
 /**
  * How much of the GP's frame the effect takes, in percent (100: frames late),
