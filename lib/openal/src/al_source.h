@@ -148,6 +148,9 @@ void al_source_update_all_spatial(void);
  */
 void al_source_calc_spatial(const ALsource *src, AL_SPATIAL_CALC *calc);
 
+/* The loudest of a source's effect send gains (0: none) */
+float al_source_send_level(const ALsource *src, const AL_SPATIAL_CALC *calc);
+
 /**
  * Perform complete 3D spatial calculation for a given source object (mutable alias).
  *
@@ -244,6 +247,25 @@ bool al_reverb_active(void);
 /** The GP effect or its slot changed (AL_XBOX_REVERB on/off, an EFX slot's effect, gain or send-auto flag):
  * re-apply it and update every voice's sends. */
 void al_source_effects_changed(void);
+
+/* alXboxEffectSlotAtSample (al_efx.c): a streaming source's clock */
+typedef enum {
+    AL_SOURCE_CLOCK_NONE,       /* not a streaming source */
+    AL_SOURCE_CLOCK_WAIT,       /* not playing yet, or paused: wait */
+    AL_SOURCE_CLOCK_STOPPED,    /* stopped: nothing to wait for */
+    AL_SOURCE_CLOCK_RUN         /* playing: pos, gp_frame and per_frame are set */
+} al_source_clock_t;
+/* Its stream position now (frames since the queue started), the GP frame now
+ * and the frames it plays per GP frame */
+al_source_clock_t al_source_stream_clock(ALuint source, uint32_t *pos, uint32_t *gp_frame, float *per_frame);
+/* A mailbox post has not reached the GP yet */
+bool al_source_gp_timed_busy(void);
+/* The active slot's kernel parameters (as its props now are) at GP frame `frame` */
+void al_source_gp_params_at(uint32_t frame);
+/* Host tests: every streaming source's clock reads pos / gp_frame (on), the GP
+ * is busy with a timed post (busy; a post sets it), and the frame last posted */
+void al_source_debug_clock(bool on, uint32_t pos, uint32_t gp_frame, bool busy);
+uint32_t al_source_debug_timed_frame(void);
 
 /** Tests: the custom kernel the GP should run (an active AL_EFFECT_XBOX_GP_PROGRAM slot with an image). */
 bool al_source_debug_gp_kernel(apu_gp_kernel_t *k, const uint32_t **params);

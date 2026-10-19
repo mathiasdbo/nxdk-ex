@@ -98,6 +98,7 @@ static const struct {
     { "alXboxReverbf",           (ALC_PROC)alXboxReverbf },
     { "alXboxGetReverbf",        (ALC_PROC)alXboxGetReverbf },
     { "alXboxEffectProgram",     (ALC_PROC)alXboxEffectProgram },
+    { "alXboxEffectSlotAtSample", (ALC_PROC)alXboxEffectSlotAtSample },
     { "alXboxGetStats",          (ALC_PROC)alXboxGetStats },
     { "alXboxOutputCallback",    (ALC_PROC)alXboxOutputCallback },
     { "alXboxSetPoolSize",       (ALC_PROC)alXboxSetPoolSize },

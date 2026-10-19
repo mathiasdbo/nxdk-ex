@@ -37,7 +37,9 @@ typedef struct apu_chunk {
 } apu_chunk_t;
 
 static void    *s_pool_virt = NULL;
-static uint32_t s_pool_phys = 0;
+#ifndef OPENAL_TARGET_XBOX
+static uint32_t s_pool_phys = 0;   /* host: the pool's stand-in physical address */
+#endif
 static size_t   s_pool_size = 0;
 
 #ifndef OPENAL_TARGET_XBOX
@@ -94,7 +96,6 @@ int apu_mem_init(size_t pool_size) {
     if (!s_pool_virt) {
         return -1;
     }
-    s_pool_phys = (uint32_t)MmGetPhysicalAddress(s_pool_virt);
 #else
     /* Host fallback: allocate with 4096 alignment for testing */
     s_host_raw_pool = malloc(pool_size + 4096);
@@ -138,7 +139,9 @@ void apu_mem_shutdown(void) {
 #endif
 
     s_pool_virt = NULL;
+#ifndef OPENAL_TARGET_XBOX
     s_pool_phys = 0;
+#endif
     s_pool_size = 0;
 }
 

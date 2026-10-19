@@ -383,6 +383,13 @@ alAuxiliaryEffectSloti(slot, AL_EFFECTSLOT_EFFECT, (ALint)fx);       /* loads an
 
 - **Parameters:** a change reaches the kernel when the effect is attached again, all the changed words in the
   same 0.67 ms frame.
+- **Changes timed to the mix:** an engine that mixes ahead into a stream (Half-Life's room sound, ~0.12 s
+  ahead) queues each change at the stream position it was mixed for:
+  `alXboxEffectSlotAtSample(slot, fx, room_stream, painted_frame)`. The change lands in the GP frame that
+  mixes that frame, not when it was sent. Start the dry and the room streams together with `alSourcePlayv`
+  so their positions match. Details in API_REFERENCE 6.4. On a console (`samples/openal_efx` 6c) a timed
+  change lands on the sample asked for in every trial, and `alSourcePlayv` starts two streams on the same sample
+  where two `alSourcePlay` calls are a frame (32 samples) apart.
 - **A new image** reloads the kernel, starting from silence. A brief gap in the effect, not in the dry sound.
 - **`AL_EFFECTSLOT_GAIN`** scales the sends into the kernel, live (for a linear kernel, the same as its output).
 - **Input levels:** a stereo source sends its left and right each at the whole send gain, so at send 1 the
