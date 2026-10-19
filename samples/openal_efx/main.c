@@ -51,6 +51,8 @@
 #include "apu_vp.h"
 #include "gp_kecho.h"         /* lib/openal/dsp: the example kernel's image */
 #include "mcpx_apu_regs.h"
+#include "apu_gp_loop.h"
+#include "al_source.h"         /* al_source_debug_timed_frame */
 
 #define BAR0    ((uintptr_t)NV_PAPU_BASE)
 #define LOGFILE "E:\\openal_efx.txt"
@@ -544,9 +546,35 @@ static void sync_restart(void) {
 static ALuint s_timed_fx;
 static LPALXBOXEFFECTSLOTATSAMPLE p_alXboxEffectSlotAtSample;
 
+static uint32_t gpx(uint32_t a) {
+    return *(volatile uint32_t *)(BAR0 + MCPX_APU_GP_XMEM + 4u * a) & 0xFFFFFFu;
+}
+
+static uint32_t s_t_cnt, s_t_at, s_t_seq, s_t_ack, s_t_lib;
+
 static void play_v_timed(void) {
     alSourcePlayv(2, s_sync_src);
     p_alXboxEffectSlotAtSample(s_slot, s_timed_fx, s_sync_src[1], SYNC_MARK);
+    s_t_cnt = gpx(GP_LOOP_CNT);
+    s_t_at = gpx(GP_LOOP_MB_AT);
+    s_t_seq = gpx(GP_LOOP_MB_SEQ);
+    s_t_ack = gpx(GP_LOOP_MB_ACK);
+    s_t_lib = al_source_debug_timed_frame();
+}
+
+static void play_v_only(void) {
+    alSourcePlayv(2, s_sync_src);
+}
+
+static void log_lr(const char *what, uint32_t n) {
+    peak_t pl[4], pr[4];
+    uint32_t kl = find_peaks(n, 0, pl, 4), kr = find_peaks(n, 1, pr, 4), i;
+    char line[200];
+    int len = snprintf(line, sizeof(line), "   %s: L", what);
+    for (i = 0; i < kl; i++) len += snprintf(line + len, sizeof(line) - (size_t)len, " %lu(%d)", (unsigned long)pl[i].pos, pl[i].amp);
+    len += snprintf(line + len, sizeof(line) - (size_t)len, "; R");
+    for (i = 0; i < kr; i++) len += snprintf(line + len, sizeof(line) - (size_t)len, " %lu(%d)", (unsigned long)pr[i].pos, pr[i].amp);
+    logf_("%s\n", line);
 }
 
 static void phase_sync(void) {
@@ -583,9 +611,11 @@ static void phase_sync(void) {
 
     logf_("-- 6c timed parameters: echo delay 1000, wet 0 -> 1 at stream frame %u (alXboxEffectSlotAtSample)\n",
           (unsigned)SYNC_MARK);
-    logf_("   (a marker click at that frame on L; a click every %u frames on R's stream, only through the echo;\n"
-          "    expected: the first echo 1000 + 0..%u after the marker, + the GP latency)\n",
-          (unsigned)SYNC_STEP, (unsigned)SYNC_STEP - 1u);
+    logf_("   (a marker click at that frame on L, peak 1 later; a click every %u frames on R's stream, only through\n"
+          "    the echo, whose echoes fall 8 after a multiple of 16; the wet gain scales the echo's output, so the\n"
+          "    first echo shows where the change lands: expected +7 after the marker, + 32 per frame of GP latency;\n"
+          "    an R peak on the marker itself is the marker's -64 dB trace: no echo)\n",
+          (unsigned)SYNC_STEP);
     memset(wet, 0, sizeof(wet));
     for (i = 0; i + 2u < SYNC_FRAMES; i += SYNC_STEP) {
         wet[i] = 12000;
@@ -605,15 +635,24 @@ static void phase_sync(void) {
     p_alXboxEffectProgram(s_timed_fx, gp_kecho_image, (ALsizei)GP_KECHO_IMAGE_WORDS, 0);
     p_alEffecti(s_timed_fx, AL_XBOX_GP_PARAM0 + 0, 1000);
     p_alEffectf(s_timed_fx, AL_XBOX_GP_PARAM0 + 2, 1.0f);
+    /* control: wet 1 attached at once (no timing): R should click from 1000 */
+    attach(s_timed_fx);
+    run_for(100);
+    n = capture(600, play_v_only);
+    log_lr("control, wet 1 at once", n);
+    sync_restart();
     for (trial = 0; trial < 6; trial++) {
         echo_params(1000, 0.0f, 0.0f);
         attach(s_echo);
         run_for(100);
         n = capture(600, play_v_timed);
+        logf_("   at the call: CNT %lu, MB_AT %lu, SEQ %lu ACK %lu, library frame %lu; after: CNT %lu ACK %lu\n",
+              (unsigned long)s_t_cnt, (unsigned long)s_t_at, (unsigned long)s_t_seq, (unsigned long)s_t_ack,
+              (unsigned long)s_t_lib, (unsigned long)gpx(GP_LOOP_CNT), (unsigned long)gpx(GP_LOOP_MB_ACK));
+        log_lr("timed", n);
         if (find_peaks(n, 0, pl, 1) && find_peaks(n, 1, pr, 1)) {
-            logf_("   marker at %lu, first echo at %lu: +%ld (1000 + %ld)\n", (unsigned long)pl[0].pos,
-                  (unsigned long)pr[0].pos, (long)pr[0].pos - (long)pl[0].pos,
-                  (long)pr[0].pos - (long)pl[0].pos - 1000L);
+            logf_("   marker at %lu, first echo at %lu: %+ld\n", (unsigned long)pl[0].pos,
+                  (unsigned long)pr[0].pos, (long)pr[0].pos - (long)pl[0].pos);
         } else {
             logf_("   no marker or no echo\n");
         }
