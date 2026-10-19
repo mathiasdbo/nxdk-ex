@@ -148,6 +148,9 @@ void al_source_update_all_spatial(void);
  */
 void al_source_calc_spatial(const ALsource *src, AL_SPATIAL_CALC *calc);
 
+/* The loudest of a source's effect send gains (0: none) */
+float al_source_send_level(const ALsource *src, const AL_SPATIAL_CALC *calc);
+
 /**
  * Perform complete 3D spatial calculation for a given source object (mutable alias).
  *

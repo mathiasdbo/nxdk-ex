@@ -431,6 +431,20 @@ static float efx_send_gain(const ALsource *src, const AL_SPATIAL_CALC *calc, con
     return (g < 0.0f) ? 0.0f : ((g > 1.0f) ? 1.0f : g);
 }
 
+static void source_sends(const ALsource *src, const AL_SPATIAL_CALC *calc, float out[APU_VOICE_SENDS]);
+
+/* The loudest of the source's effect sends (apu_voice_mgr.c: a source heard
+ * only through an effect is not silent) */
+float al_source_send_level(const ALsource *src, const AL_SPATIAL_CALC *calc) {
+    float s[APU_VOICE_SENDS], m = 0.0f;
+    uint32_t n;
+    source_sends(src, calc, s);
+    for (n = 0; n < APU_VOICE_SENDS; n++) {
+        if (s[n] > m) m = s[n];
+    }
+    return m;
+}
+
 /* A stereo source into a custom GP kernel sends each channel at the whole send
  * gain (the kernel reads the pair); everything else at half on each output
  * (the reverb reads their sum) */
