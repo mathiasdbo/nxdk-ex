@@ -101,6 +101,7 @@ static void source_reset_defaults(ALsource *src, ALuint id) {
     src->direct = false;
     src->direct_gain[0] = src->direct_gain[1] = 1.0f;
     src->reverb_send = 0.0f;
+    src->send_panned = false;
     src->xbox_priority = -1.0f;
     src->virtualize = AL_TRUE;
 }
@@ -524,6 +525,7 @@ static void source_update_hw(const ALsource *src, unsigned fields) {
         float sends[APU_VOICE_SENDS];
         source_sends(src, &calc, sends);
         apu_voice_set_send_per_channel((uint32_t)src->hw_voice_idx, source_sends_per_channel(src));
+        apu_voice_set_send_panned((uint32_t)src->hw_voice_idx, src->send_panned);
         apu_voice_set_sends((uint32_t)src->hw_voice_idx, sends);
     }
     /* Hardware backend: apply the new pitch and volumes to the running voice */
@@ -634,6 +636,7 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
         float sends[APU_VOICE_SENDS];
         source_sends(src, &calc, sends);
         apu_voice_set_send_per_channel(hw_voice_idx, source_sends_per_channel(src));
+        apu_voice_set_send_panned(hw_voice_idx, src->send_panned);
         apu_voice_set_sends(hw_voice_idx, sends);
     }
     apu_voice_setup(hw_voice_idx, &ctx);
@@ -1242,6 +1245,15 @@ AL_API void AL_APIENTRY alSourcei(ALuint source, ALenum param, ALint value) {
             source_update_hw(src, SRC_HW_SPATIAL);
             break;
 
+        case AL_XBOX_SEND_PANNED:
+            if (value != AL_TRUE && value != AL_FALSE) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->send_panned = (value == AL_TRUE);
+            source_update_hw(src, SRC_HW_SPATIAL);
+            break;
+
         case AL_XBOX_VIRTUALIZE:
             if (value != AL_TRUE && value != AL_FALSE) {
                 alSetError(AL_INVALID_VALUE);
@@ -1304,6 +1316,7 @@ AL_API void AL_APIENTRY alSourceiv(ALuint source, ALenum param, const ALint *val
         case AL_SAMPLE_OFFSET:
         case AL_BYTE_OFFSET:
         case AL_XBOX_DIRECT_MODE:
+        case AL_XBOX_SEND_PANNED:
         case AL_XBOX_VIRTUALIZE:
             alSourcei(source, param, values[0]);
             break;
@@ -1545,6 +1558,10 @@ AL_API void AL_APIENTRY alGetSourcei(ALuint source, ALenum param, ALint *value) 
 
         case AL_XBOX_DIRECT_MODE:
             *value = src->direct ? AL_TRUE : AL_FALSE;
+            break;
+
+        case AL_XBOX_SEND_PANNED:
+            *value = src->send_panned ? AL_TRUE : AL_FALSE;
             break;
 
         case AL_XBOX_VIRTUALIZE:

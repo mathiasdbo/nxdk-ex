@@ -265,12 +265,25 @@ typedef void (AL_APIENTRY *LPALXBOXEFFECTSLOTATSAMPLE)(ALuint slot, ALuint effec
  *                        standby; AL_FALSE stops it instead (AL_STOPPED), so
  *                        the engine knows and can mix it itself.
  * AL_XBOX_HAS_VOICE      alGetSourcei: AL_TRUE while the source holds a hardware voice.
+ * AL_XBOX_SEND_PANNED    alSourcei/alGetSourcei: AL_TRUE / AL_FALSE (default). In
+ *                        direct mode, the source's sends into a custom GP kernel
+ *                        (AL_XBOX_gp_program) are panned by AL_XBOX_DIRECT_GAINS:
+ *                        the kernel's left input gets the send times the left
+ *                        gain, its right input the send times the right gain (a
+ *                        mono source's sample on both, a stereo source's left
+ *                        and right channels on their own), instead of half the
+ *                        send on each (mono) or the whole send on each (stereo).
+ *                        The direct path's own gain and filter do not touch it,
+ *                        so a source muted by a lowpass at AL_LOWPASS_GAIN 0 is
+ *                        heard only through the kernel, panned as the engine
+ *                        panned it. Outside direct mode it changes nothing.
  */
 #define AL_XBOX_DIRECT_GAINS                     0x7010
 #define AL_XBOX_DIRECT_MODE                      0x7011
 #define AL_XBOX_PRIORITY                         0x7012
 #define AL_XBOX_VIRTUALIZE                       0x7013
 #define AL_XBOX_HAS_VOICE                        0x7014
+#define AL_XBOX_SEND_PANNED                      0x7018
 
 /*
  * Xbox AV Pack Encodings for AL_XBOX_AV_PACK_TYPE Query
