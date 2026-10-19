@@ -39,7 +39,7 @@ As in OpenAL 1.1: `alGetError()` returns the first error since the last call and
 | `AL_INVALID_NAME` | a buffer, source, effect, filter or slot that does not exist |
 | `AL_INVALID_ENUM` | a parameter the object does not have |
 | `AL_INVALID_VALUE` | a value out of range, a NULL pointer, an unsupported effect or filter type, a bad GP image |
-| `AL_INVALID_OPERATION` | no current context; deleting something in use; a second effect while one runs |
+| `AL_INVALID_OPERATION` | no current context; deleting something in use; an effect that does not fit the GP beside the other slots' |
 | `AL_OUT_OF_MEMORY` | no free objects, or memory for buffer data |
 
 ## 3. Devices and contexts (ALC)
@@ -52,6 +52,10 @@ As in OpenAL 1.1: `alGetError()` returns the first error since the last call and
 | `alcMakeContextCurrent`, `alcGetCurrentContext`, `alcGetContextsDevice`, `alcDestroyContext` | standard |
 | `alcProcessContext(ctx)` | the per-frame tick, the same as `alXboxUpdateVoices` (3.1 of this page) |
 | `alcSuspendContext` | does nothing |
+| `alcDevicePauseSOFT(dev)` / `alcDeviceResumeSOFT(dev)` | `ALC_SOFT_pause_device`: hold every playing voice; the sources stay `AL_PLAYING` and their positions stop. A source started or resumed meanwhile waits too. The output keeps running, so an effect's tail fades out |
+| `ALC_HRTF_SOFT` attribute | `ALC_SOFT_HRTF`, in `alcCreateContext` or `alcResetDeviceSOFT`: `ALC_TRUE` / `ALC_FALSE` switch the APU's HRTF (the `AL_XBOX_HRTF` switch, applied at each source's next play), `ALC_DONT_CARE_SOFT` leaves it. `alcGetIntegerv`: `ALC_HRTF_SOFT`, `ALC_HRTF_STATUS_SOFT` (enabled / disabled), `ALC_NUM_HRTF_SPECIFIERS_SOFT` (1) |
+| `alcGetStringiSOFT(dev, ALC_HRTF_SPECIFIER_SOFT, 0)` | `"MCPX APU HRTF"`, the computed model (there are no data sets to choose from) |
+| `alcResetDeviceSOFT(dev, attrs)` | applies `ALC_HRTF_SOFT`; the other attributes are ignored (the output is always 48 kHz stereo) |
 | `alcGetString`, `alcGetIntegerv`, `alcGetError`, `alcIsExtensionPresent`, `alcGetProcAddress`, `alcGetEnumValue` | `alcGetIntegerv` answers the 1.1 queries plus `ALC_EFX_MAJOR_VERSION` (1), `ALC_EFX_MINOR_VERSION` (0) and `ALC_MAX_AUXILIARY_SENDS` |
 | capture (`alcCaptureOpenDevice` ...) | stubs: the device cannot be opened |
 
@@ -97,6 +101,7 @@ costs speed.
 | `AL_FORMAT_MONO8`, `AL_FORMAT_STEREO8` | 8-bit unsigned PCM |
 | `AL_FORMAT_MONO16`, `AL_FORMAT_STEREO16` | 16-bit signed PCM |
 | `AL_FORMAT_MONO_XBOX_ADPCM`, `AL_FORMAT_STEREO_XBOX_ADPCM` | `AL_XBOX_adpcm`: Xbox IMA ADPCM, 36-byte blocks of 64 frames per channel, the size a whole number of blocks; decoded by the APU (3.11). `AL_BITS` reports 4 |
+| `AL_FORMAT_MONO_FLOAT32`, `AL_FORMAT_STEREO_FLOAT32` | `AL_EXT_FLOAT32`: 32-bit float, −1..1 (clipped), converted to 16-bit when loaded, so `AL_BITS` reports 16 and `AL_SIZE` the 16-bit size. `alBufferDataStatic` does not take them (`AL_INVALID_ENUM`) |
 | `AL_FORMAT_QUAD*`, `AL_FORMAT_51CHN*` | reserved, `AL_INVALID_ENUM` |
 
 **Static buffers:**
@@ -140,6 +145,25 @@ on a console (64 on xemu). The others wait in virtual standby, or stop if `AL_XB
 | `AL_XBOX_HAS_VOICE` | `alGetSourcei` | `AL_TRUE` / `AL_FALSE` | whether the source holds a hardware voice now |
 | `AL_XBOX_REVERB_SEND` | `alSourcef` | 0..1, default 0 | how much goes to the `AL_XBOX_reverb` room (7.1) |
 
+### 5.1b OpenAL Soft source attributes
+
+| Attribute | Call | Values | Meaning |
+|---|---|---|---|
+| `AL_SOURCE_SPATIALIZE_SOFT` | `alSourcei` | `AL_AUTO_SOFT` (default), `AL_TRUE`, `AL_FALSE` | auto: mono buffers are spatialized, stereo ones are not (no distance, cone or Doppler, as OpenAL 1.1 says). `AL_TRUE`: a stereo sound takes distance, cone and Doppler too (its channels keep their sides). `AL_FALSE`: a mono sound plays centred (−3 dB a side), with `AL_GAIN` and the listener gain only, and no HRTF |
+| `AL_DISTANCE_MODEL` | `alSourcei` / get | the 1.1 models, default `AL_INVERSE_DISTANCE_CLAMPED` | the source's own model, used while `alEnable(AL_SOURCE_DISTANCE_MODEL)` is on (`AL_EXT_source_distance_model`) |
+| `AL_DIRECT_CHANNELS_SOFT` | `alSourcei` / get | `AL_FALSE` (default) / `AL_TRUE` | stored: stereo always plays left to left, right to right |
+
+**`AL_SOFT_source_latency`:**
+- **Double forms** `alSource{d,3d,dv}SOFT` and `alGetSource{d,3d,dv}SOFT`, and **64-bit forms**
+  `alSource{i64,3i64,i64v}SOFT` and `alGetSource{i64,3i64,i64v}SOFT`, for every source attribute. The offsets
+  keep their precision in them (an `AL_SEC_OFFSET` of a long sound lands on its sample). A 64-bit value outside
+  32 bits for an integer attribute gives `AL_INVALID_VALUE`.
+- **`AL_SAMPLE_OFFSET_LATENCY_SOFT`** (`alGetSourcei64vSOFT`): the position in frames as 32.32 fixed point (the
+  fraction is 0: the voice position has none) and the output latency in nanoseconds.
+- **`AL_SEC_OFFSET_LATENCY_SOFT`** (`alGetSourcedvSOFT`): the position and the latency in seconds.
+- **The latency** is how far the codec plays behind the APU's mix: the zero-copy lead (about 22 ms), or the
+  queued buffers in copy mode (about 43 ms); 0 while no output runs (the null backend).
+- Both pairs are read only (`AL_INVALID_OPERATION` when set).
 ### 5.2 EFX source attributes (`AL/efx.h`)
 
 | Attribute | Call | Effect here |
@@ -148,7 +172,10 @@ on a console (64 on xemu). The others wait in virtual standby, or stop if `AL_XB
 | `AL_AUXILIARY_SEND_FILTER` | `alSource3i(src, ..., slot, send, filter)` | send `send` (0..`ALC_MAX_AUXILIARY_SENDS`−1) to `slot` (0: none) through a copy of `filter` |
 | `AL_ROOM_ROLLOFF_FACTOR` | `alSourcef`, 0..10, default 0 | distance attenuation of the sends |
 | `AL_AUXILIARY_SEND_FILTER_GAIN_AUTO` | `alSourcei`, default `AL_TRUE` | the sends follow distance and cone |
-| `AL_AIR_ABSORPTION_FACTOR`, `AL_CONE_OUTER_GAINHF`, `AL_DIRECT_FILTER_GAINHF_AUTO`, `AL_AUXILIARY_SEND_FILTER_GAINHF_AUTO` | standard ranges | stored and read back, not applied to the sound |
+| `AL_AIR_ABSORPTION_FACTOR` | `alSourcef`, 0..10, default 0 | with GAINHF auto: −0.05 dB at 5 kHz per metre beyond `AL_REFERENCE_DISTANCE` (the distance clamped to `AL_MAX_DISTANCE`, `AL_METERS_PER_UNIT` metres a unit), on the voice's lowpass |
+| `AL_CONE_OUTER_GAINHF` | `alSourcef`, 0..1, default 1 | with GAINHF auto: the HF gain outside the cone, interpolated across it like `AL_CONE_OUTER_GAIN`, on the voice's lowpass |
+| `AL_DIRECT_FILTER_GAINHF_AUTO` | `alSourcei`, default `AL_TRUE` | applies the two above (multiplied with the direct filter's `GAINHF`); off: the filter only. Direct-mode sources: the filter only |
+| `AL_AUXILIARY_SEND_FILTER_GAINHF_AUTO` | standard | stored and read back: the voice has one lowpass, shared by the dry path and the sends |
 
 ## 6. Effects (`ALC_EXT_EFX` 1.0)
 
@@ -163,6 +190,8 @@ Recipes: ENGINE_INTEGRATION 3.12 (EFX) and 3.13 (your own GP kernel). Every EFX 
 |---|---|
 | `AL_EFFECT_NULL` | nothing (the default) |
 | `AL_EFFECT_REVERB`, `AL_EFFECT_EAXREVERB` | the GP reverb. Every parameter is stored with the extension's ranges and defaults; which ones change the sound is in the table in 3.12 |
+| `AL_EFFECT_CHORUS`, `AL_EFFECT_FLANGER` | one library kernel on the GP; all six parameters (`WAVEFORM` 0..1 and `PHASE` −180..180 as integers; `RATE` 0..10 Hz, `DEPTH` 0..1, `FEEDBACK` −1..1, `DELAY` 0..0.016 s for the chorus, 0..0.004 s for the flanger) change the sound (ENGINE_INTEGRATION 3.12) |
+| `AL_EFFECT_ECHO` | a library kernel on the GP; all five parameters (`AL_ECHO_DELAY` 0..0.207 s, `LRDELAY` 0..0.404 s, `DAMPING` 0..0.99, `FEEDBACK` 0..1, `SPREAD` −1..1) change the sound. Taps under 32 samples become 32 (ENGINE_INTEGRATION 3.12) |
 | `AL_EFFECT_XBOX_GP_PROGRAM` | your DSP56300 kernel (6.4) |
 | any other | `AL_INVALID_VALUE` |
 
@@ -194,8 +223,9 @@ Up to 256 filters. Sources hold copies, so attach the filter again after changin
 | `AL_EFFECTSLOT_AUXILIARY_SEND_AUTO` | `AL_TRUE` (default) / `AL_FALSE` | the reverb's own room rolloff added to the sends |
 
 **Limits:**
-- There are 4 slots, and the GP runs one effect at a time. Attaching an effect to a second slot while one runs
-  gives `AL_INVALID_OPERATION`. `AL_XBOX_REVERB` counts as that effect too.
+- There are 4 slots, each running its own GP kernel (slot s reads bins 2+2(s-1) / 3+2(s-1)). Attaching an effect
+  gives `AL_INVALID_OPERATION` when it does not fit beside the other slots' (P, X, Y, scratch, 60 descriptors:
+  a reverb, an echo and a chorus fit; two reverbs or two choruses do not), or while `AL_XBOX_REVERB` is on.
 - Empty slots are legal and silent.
 - Deleting a slot a source sends to gives `AL_INVALID_OPERATION`.
 
@@ -248,7 +278,7 @@ How to write a kernel: [`GP_KERNELS.md`](GP_KERNELS.md).
 
 ### 6.5 Listener
 
-`AL_METERS_PER_UNIT` (`alListenerf`, > 0, default 1) is stored and read back.
+`AL_METERS_PER_UNIT` (`alListenerf`, > 0, default 1) scales the distances of air absorption (5.2).
 
 ## 7. Xbox effects outside EFX
 
@@ -334,8 +364,16 @@ alXboxOutputCallback(cb, user);                             /* NULL removes it *
 ## 9. Global state
 
 - **Supported:** `alDistanceModel` (every 1.1 model), `alDopplerFactor`, `alSpeedOfSound`, the `alGet{Boolean,
-  Integer,Float,Double}[v]` queries, `alEnable` / `alDisable` / `alIsEnabled` for `AL_XBOX_HRTF` and
-  `AL_XBOX_REVERB`, `alIsExtensionPresent`, `alGetProcAddress`, `alGetEnumValue`.
+  Integer,Float,Double}[v]` queries, `alEnable` / `alDisable` / `alIsEnabled` for `AL_XBOX_HRTF`,
+  `AL_XBOX_REVERB` and `AL_SOURCE_DISTANCE_MODEL`, `alIsExtensionPresent`, `alGetProcAddress`.
+- **`alGetEnumValue` / `alcGetEnumValue`:** the value of a token by name, for the 1.1 tokens, the EFX ones used
+  here, the Xbox source and effect tokens and the extensions above (0 for a name not known).
+- **`alGetFloat(AL_GAIN_LIMIT_SOFT)`** (`AL_SOFT_gain_clamp_ex`): 1, since a voice's volume only attenuates.
+- **`alcGetIntegerv(dev, ALC_CONNECTED)`** (`ALC_EXT_disconnect`): `ALC_TRUE` while the device is open.
+- **`alDeferUpdatesSOFT()` / `alProcessUpdatesSOFT()`** (`AL_SOFT_deferred_updates`): between the two, source
+  and listener changes are stored but not written to the voices; the process call writes each changed source
+  once. `alGetBoolean(AL_DEFERRED_UPDATES_SOFT)` reports the state. Play, stop, pause, rewind and EFX slot
+  changes act at once.
 - **Listener:** `AL_POSITION`, `AL_VELOCITY`, `AL_ORIENTATION`, `AL_GAIN`, and `AL_METERS_PER_UNIT` (6.5).
 
 ## 10. Not supported
@@ -343,6 +381,6 @@ alXboxOutputCallback(cb, user);                             /* NULL removes it *
 - Output other than stereo 16-bit 48 kHz: no 5.1 or Dolby Digital.
 - Multichannel buffers.
 - Capture.
-- EFX effect types other than reverb, EAX reverb and the GP program.
+- EFX effect types other than reverb, EAX reverb, echo, chorus, flanger and the GP program.
 - Highpass and bandpass filters.
 - More than one running effect, or more than 2 sends per source.

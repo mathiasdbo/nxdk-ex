@@ -85,8 +85,8 @@ static void test_effects(void) {
     expect_error(AL_INVALID_ENUM, "null effect parameter");
 
     /* Unsupported types */
-    alEffecti(e[0], AL_EFFECT_TYPE, AL_EFFECT_CHORUS);
-    expect_error(AL_INVALID_VALUE, "chorus");
+    alEffecti(e[0], AL_EFFECT_TYPE, AL_EFFECT_PITCH_SHIFTER);
+    expect_error(AL_INVALID_VALUE, "pitch shifter");
     alEffecti(e[0], AL_EFFECT_TYPE, 0x1234);
     expect_error(AL_INVALID_VALUE, "unknown type");
 

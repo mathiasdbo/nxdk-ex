@@ -170,15 +170,18 @@ typedef void (AL_APIENTRY *LPALXBOXGETREVERBF)(ALenum param, ALfloat *value);
  *   alAuxiliaryEffectSloti(slot, AL_EFFECTSLOT_EFFECT, effect);
  *
  * The image is a DSP56300 kernel for the library's GP frame loop (the ABI in
- * lib/openal/dsp/gp_loop.asm; an example in dsp/gp_kecho.asm), as
+ * lib/openal/docs/GP_KERNELS.md; an example in dsp/gp_kecho.asm), as
  * tools/dsp56asm.py --image writes it: AL_XBOX_GP_IMAGE_MAGIC, the ABI
- * version (AL_XBOX_GP_IMAGE_ABI), the scratch bytes it uses, the DMA
- * descriptors it runs a frame (at most 60), then up to 0x700 code words for
- * P:$100. The library checks the header, the size, 24-bit words and the
- * scratch (about 180 KiB, what the reverb's delay lines take) and keeps a
- * copy; anything else gives AL_INVALID_VALUE, and flags must be 0. The
- * kernel's input is the slot's mixbin pair (every send; EFX_PLAN.md 3.2), its
- * output is added to the dry mix.
+ * version (AL_XBOX_GP_IMAGE_ABI, 2: relocatable), the scratch bytes it uses,
+ * the DMA descriptors it runs a frame, its X and Y words and relocations, then
+ * up to 0x700 code words (ABI 1 images, fixed at P:$100, still load but run
+ * only alone). The library checks the header, the size, 24-bit words and the
+ * scratch (about 500 KiB, shared by every slot's kernel) and keeps a copy;
+ * anything else gives AL_INVALID_VALUE, and flags must be 0. Each slot runs
+ * its own kernel; attaching one gives AL_INVALID_OPERATION when the GP's
+ * shared budgets (P, X, Y, scratch, 60 descriptors) are full. The kernel's
+ * input is its slot's mixbin pair (the sends to that slot; EFX_PLAN.md 3.2),
+ * its output is added to the dry mix.
  *
  * Parameters are 24-bit words the kernel reads at X:KPARAM + n: alEffecti
  * stores an integer (-0x800000 .. 0xFFFFFF, read back sign-extended),
@@ -188,16 +191,16 @@ typedef void (AL_APIENTRY *LPALXBOXGETREVERBF)(ALenum param, ALfloat *value);
  * one 0.67 ms frame (a new image restarts the kernel instead).
  *
  * alXboxGetHardwareStatus(AL_XBOX_GP_LOAD / AL_XBOX_GP_LOAD_PEAK): how much
- * of the GP's frame the effect takes, in percent, for the last frame and the
+ * of the GP's frame the effects take, in percent, for the last frame and the
  * most since the last AL_XBOX_GP_LOAD_PEAK query (100: frames are late; the
- * dry mix stutters). Measured against a frame without the effect, on a
+ * dry mix stutters). Measured against a frame without any effect, on a
  * console only (0 elsewhere).
  */
 #define AL_EFFECT_XBOX_GP_PROGRAM                0x7100
 #define AL_XBOX_GP_PARAM0                        0x7120
 #define AL_XBOX_GP_PARAMS                        32
 #define AL_XBOX_GP_IMAGE_MAGIC                   0x47504B   /* 'GPK' */
-#define AL_XBOX_GP_IMAGE_ABI                     1
+#define AL_XBOX_GP_IMAGE_ABI                     2          /* 1 is still accepted */
 #define AL_XBOX_GP_LOAD                          0x700E
 #define AL_XBOX_GP_LOAD_PEAK                     0x700F
 
@@ -243,6 +246,155 @@ typedef void (AL_APIENTRY *LPALXBOXEFFECTSLOTATSAMPLE)(ALuint slot, ALuint effec
  * the voice's own (LBO/EBO), so it costs nothing per frame.
  */
 #define AL_LOOP_POINTS_SOFT                      0x2015
+
+/*
+ * ============================================================================
+ * OpenAL Soft compatible extensions (the same names, tokens and meaning)
+ * ============================================================================
+ *
+ * AL_EXT_FLOAT32: alBufferData takes 32-bit float samples (-1 .. 1, clipped),
+ *   converted to 16-bit when the buffer is loaded (AL_BITS then reports 16,
+ *   AL_SIZE the 16-bit size). alBufferDataStatic does not take them
+ *   (AL_INVALID_ENUM: a static buffer is played as it is).
+ */
+#define AL_FORMAT_MONO_FLOAT32                   0x10010
+#define AL_FORMAT_STEREO_FLOAT32                 0x10011
+
+/*
+ * AL_EXT_source_distance_model: alEnable(AL_SOURCE_DISTANCE_MODEL) makes each
+ *   source use its own alSourcei(src, AL_DISTANCE_MODEL, model) (default
+ *   AL_INVERSE_DISTANCE_CLAMPED) instead of alDistanceModel's.
+ */
+#define AL_SOURCE_DISTANCE_MODEL                 0x200
+
+/*
+ * AL_SOFT_gain_clamp_ex: alGetFloat(AL_GAIN_LIMIT_SOFT), the largest gain a
+ *   source reaches after AL_MAX_GAIN: 1 here (a voice's volume attenuates only).
+ */
+#define AL_GAIN_LIMIT_SOFT                       0x200E
+
+/*
+ * AL_SOFT_direct_channels: alSourcei(src, AL_DIRECT_CHANNELS_SOFT, AL_TRUE)
+ *   plays a multichannel buffer's channels straight to the matching outputs.
+ *   Stereo always plays left to left and right to right here, so the flag is
+ *   stored and read back.
+ */
+#define AL_DIRECT_CHANNELS_SOFT                  0x1033
+
+/*
+ * AL_SOFT_source_spatialize: alSourcei(src, AL_SOURCE_SPATIALIZE_SOFT, v)
+ *   AL_AUTO_SOFT (default): mono buffers are spatialized, stereo ones are not
+ *   (OpenAL 1.1: no distance, cone or Doppler on multichannel sounds);
+ *   AL_FALSE: not spatialized: a mono sound plays centred (-3 dB on each side,
+ *   as a centred panned source), with AL_GAIN and the listener gain only;
+ *   AL_TRUE: spatialized: a stereo sound also takes distance, cone and Doppler
+ *   (its two channels keep their sides; they are not positioned apart).
+ */
+#define AL_SOURCE_SPATIALIZE_SOFT                0x1214
+#define AL_AUTO_SOFT                             0x0002
+
+/*
+ * ALC_EXT_disconnect: alcGetIntegerv(dev, ALC_CONNECTED): ALC_TRUE while the
+ *   device is open (the APU and the AC97 cannot be unplugged).
+ */
+#define ALC_CONNECTED                            0x313
+
+/*
+ * AL_SOFT_deferred_updates: between alDeferUpdatesSOFT() and
+ *   alProcessUpdatesSOFT(), source and listener changes are stored but not
+ *   written to the voices; the process call writes them all at once (a frame's
+ *   changes land together). alGetBoolean(AL_DEFERRED_UPDATES_SOFT) reports the
+ *   state. Play, stop, pause and rewind act at once; EFX slot changes too.
+ */
+#define AL_DEFERRED_UPDATES_SOFT                 0xC002
+AL_API void AL_APIENTRY alDeferUpdatesSOFT(void);
+AL_API void AL_APIENTRY alProcessUpdatesSOFT(void);
+typedef void (AL_APIENTRY *LPALDEFERUPDATESSOFT)(void);
+typedef void (AL_APIENTRY *LPALPROCESSUPDATESSOFT)(void);
+
+/*
+ * AL_SOFT_source_latency: double and 64-bit integer forms of the source calls,
+ *   and two read-only pairs:
+ *   AL_SAMPLE_OFFSET_LATENCY_SOFT (alGetSourcei64vSOFT): the play position in
+ *     sample frames as 32.32 fixed point, and the output latency in ns;
+ *   AL_SEC_OFFSET_LATENCY_SOFT (alGetSourcedvSOFT): the position in seconds and
+ *     the latency in seconds.
+ *   The latency is how far the codec plays behind the APU's mix: the zero-copy
+ *   lead (about 22 ms), or the queued buffers in copy mode (about 43 ms); 0
+ *   while no output runs. The voice position has no fraction (it reads 0).
+ *   AL_SEC_OFFSET in the double forms and the offsets in the 64-bit forms keep
+ *   their full precision.
+ */
+#define AL_SAMPLE_OFFSET_LATENCY_SOFT            0x1200
+#define AL_SEC_OFFSET_LATENCY_SOFT               0x1201
+typedef signed long long ALint64SOFT;
+typedef unsigned long long ALuint64SOFT;
+AL_API void AL_APIENTRY alSourcedSOFT(ALuint source, ALenum param, ALdouble value);
+AL_API void AL_APIENTRY alSource3dSOFT(ALuint source, ALenum param, ALdouble v1, ALdouble v2, ALdouble v3);
+AL_API void AL_APIENTRY alSourcedvSOFT(ALuint source, ALenum param, const ALdouble *values);
+AL_API void AL_APIENTRY alGetSourcedSOFT(ALuint source, ALenum param, ALdouble *value);
+AL_API void AL_APIENTRY alGetSource3dSOFT(ALuint source, ALenum param, ALdouble *v1, ALdouble *v2, ALdouble *v3);
+AL_API void AL_APIENTRY alGetSourcedvSOFT(ALuint source, ALenum param, ALdouble *values);
+AL_API void AL_APIENTRY alSourcei64SOFT(ALuint source, ALenum param, ALint64SOFT value);
+AL_API void AL_APIENTRY alSource3i64SOFT(ALuint source, ALenum param, ALint64SOFT v1, ALint64SOFT v2,
+                                         ALint64SOFT v3);
+AL_API void AL_APIENTRY alSourcei64vSOFT(ALuint source, ALenum param, const ALint64SOFT *values);
+AL_API void AL_APIENTRY alGetSourcei64SOFT(ALuint source, ALenum param, ALint64SOFT *value);
+AL_API void AL_APIENTRY alGetSource3i64SOFT(ALuint source, ALenum param, ALint64SOFT *v1, ALint64SOFT *v2,
+                                            ALint64SOFT *v3);
+AL_API void AL_APIENTRY alGetSourcei64vSOFT(ALuint source, ALenum param, ALint64SOFT *values);
+typedef void (AL_APIENTRY *LPALSOURCEDSOFT)(ALuint, ALenum, ALdouble);
+typedef void (AL_APIENTRY *LPALSOURCE3DSOFT)(ALuint, ALenum, ALdouble, ALdouble, ALdouble);
+typedef void (AL_APIENTRY *LPALSOURCEDVSOFT)(ALuint, ALenum, const ALdouble *);
+typedef void (AL_APIENTRY *LPALGETSOURCEDSOFT)(ALuint, ALenum, ALdouble *);
+typedef void (AL_APIENTRY *LPALGETSOURCE3DSOFT)(ALuint, ALenum, ALdouble *, ALdouble *, ALdouble *);
+typedef void (AL_APIENTRY *LPALGETSOURCEDVSOFT)(ALuint, ALenum, ALdouble *);
+typedef void (AL_APIENTRY *LPALSOURCEI64SOFT)(ALuint, ALenum, ALint64SOFT);
+typedef void (AL_APIENTRY *LPALSOURCE3I64SOFT)(ALuint, ALenum, ALint64SOFT, ALint64SOFT, ALint64SOFT);
+typedef void (AL_APIENTRY *LPALSOURCEI64VSOFT)(ALuint, ALenum, const ALint64SOFT *);
+typedef void (AL_APIENTRY *LPALGETSOURCEI64SOFT)(ALuint, ALenum, ALint64SOFT *);
+typedef void (AL_APIENTRY *LPALGETSOURCE3I64SOFT)(ALuint, ALenum, ALint64SOFT *, ALint64SOFT *, ALint64SOFT *);
+typedef void (AL_APIENTRY *LPALGETSOURCEI64VSOFT)(ALuint, ALenum, ALint64SOFT *);
+
+/*
+ * ALC_SOFT_pause_device: alcDevicePauseSOFT(dev) pauses every playing voice;
+ *   the sources stay AL_PLAYING and their positions stop. A source started or
+ *   resumed meanwhile waits paused too. alcDeviceResumeSOFT(dev) continues
+ *   them all. The output keeps running (an effect's tail fades out).
+ */
+ALC_API void ALC_APIENTRY alcDevicePauseSOFT(ALCdevice *device);
+ALC_API void ALC_APIENTRY alcDeviceResumeSOFT(ALCdevice *device);
+typedef void (ALC_APIENTRY *LPALCDEVICEPAUSESOFT)(ALCdevice *device);
+typedef void (ALC_APIENTRY *LPALCDEVICERESUMESOFT)(ALCdevice *device);
+
+/*
+ * ALC_SOFT_HRTF: the attribute ALC_HRTF_SOFT (ALC_TRUE, ALC_FALSE,
+ *   ALC_DONT_CARE_SOFT) in alcCreateContext or alcResetDeviceSOFT switches the
+ *   APU's HRTF stage (the same switch as AL_XBOX_HRTF; a change applies at each
+ *   source's next play). alcGetIntegerv: ALC_HRTF_SOFT (on or off),
+ *   ALC_HRTF_STATUS_SOFT (ALC_HRTF_ENABLED_SOFT / ALC_HRTF_DISABLED_SOFT),
+ *   ALC_NUM_HRTF_SPECIFIERS_SOFT (1). alcGetStringiSOFT(dev,
+ *   ALC_HRTF_SPECIFIER_SOFT, 0): "MCPX APU HRTF", the computed spherical-head
+ *   model (no data sets to choose from; ALC_HRTF_ID_SOFT accepts 0).
+ *   alcResetDeviceSOFT applies ALC_HRTF_SOFT and ignores the other attributes
+ *   (the output is always 48 kHz stereo).
+ */
+#define ALC_HRTF_SOFT                            0x1992
+#define ALC_DONT_CARE_SOFT                       0x0002
+#define ALC_HRTF_STATUS_SOFT                     0x1993
+#define ALC_HRTF_DISABLED_SOFT                   0x0000
+#define ALC_HRTF_ENABLED_SOFT                    0x0001
+#define ALC_HRTF_DENIED_SOFT                     0x0002
+#define ALC_HRTF_REQUIRED_SOFT                   0x0003
+#define ALC_HRTF_HEADPHONES_DETECTED_SOFT        0x0004
+#define ALC_HRTF_UNSUPPORTED_FORMAT_SOFT         0x0005
+#define ALC_NUM_HRTF_SPECIFIERS_SOFT             0x1994
+#define ALC_HRTF_SPECIFIER_SOFT                  0x1995
+#define ALC_HRTF_ID_SOFT                         0x1996
+ALC_API const ALCchar *ALC_APIENTRY alcGetStringiSOFT(ALCdevice *device, ALCenum paramName, ALCsizei index);
+ALC_API ALCboolean ALC_APIENTRY alcResetDeviceSOFT(ALCdevice *device, const ALCint *attribs);
+typedef const ALCchar *(ALC_APIENTRY *LPALCGETSTRINGISOFT)(ALCdevice *device, ALCenum paramName, ALCsizei index);
+typedef ALCboolean (ALC_APIENTRY *LPALCRESETDEVICESOFT)(ALCdevice *device, const ALCint *attribs);
 
 /*
  * ============================================================================

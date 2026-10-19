@@ -10,6 +10,9 @@
 #include <math.h>
 #include <float.h>
 
+/* EFX air absorption: the high frequencies lose 0.05 dB a metre (10^(-0.05 / 20)) */
+#define AL_SOURCE_AIR_GAINHF_PER_METRE 0.99426f
+
 /*
  * ============================================================================
  * Internal State & Global Source Pool
@@ -91,6 +94,9 @@ static void source_reset_defaults(ALsource *src, ALuint id) {
     src->cone_outer_angle = 360.0f;
     src->cone_outer_gain = 0.0f;
     src->lfe_gain = 0.0f;
+    src->spatialize = AL_AUTO_SOFT;
+    src->direct_channels = AL_FALSE;
+    src->distance_model = AL_INVERSE_DISTANCE_CLAMPED;
     src->saved_prd_index = 0;
     src->saved_sample_pos_frac = 0;
     src->play_seq = 0;
@@ -205,6 +211,42 @@ static void source_drop_stream(ALsource *src) {
  * ============================================================================
  */
 
+/* AL_EXT_source_distance_model: alEnable(AL_SOURCE_DISTANCE_MODEL) */
+static bool s_source_distance_model;
+
+static ALenum source_distance_model(const ALsource *src) {
+    return s_source_distance_model ? src->distance_model : apu_spatial_get_distance_model();
+}
+
+/* AL_SOFT_source_spatialize: AL_AUTO_SOFT spatializes mono buffers only */
+static bool source_spatialized(const ALsource *src) {
+    const ALbuffer *pb;
+    if (src->spatialize == AL_TRUE) return true;
+    if (src->spatialize == AL_FALSE) return false;
+    pb = al_source_play_buffer(src);
+    return pb == NULL || pb->channels == 1;
+}
+
+/* A mono source played without spatialization: centred, as a centred panned
+ * voice (-3 dB a side), through the voice's direct mode */
+#define AL_SOURCE_CENTRE_GAIN 0.70710678f
+
+static bool source_flat_mono(const ALsource *src) {
+    const ALbuffer *pb = al_source_play_buffer(src);
+    return !src->direct && !source_spatialized(src) && (pb == NULL || pb->channels == 1);
+}
+
+/* The voice's direct mode: AL_XBOX_DIRECT_GAINS, or a centred unspatialized mono source */
+static void source_set_voice_direct(uint32_t idx, const ALsource *src) {
+    if (src->direct) {
+        apu_voice_set_direct(idx, true, src->direct_gain[0], src->direct_gain[1]);
+    } else if (source_flat_mono(src)) {
+        apu_voice_set_direct(idx, true, AL_SOURCE_CENTRE_GAIN, AL_SOURCE_CENTRE_GAIN);
+    } else {
+        apu_voice_set_direct(idx, false, src->direct_gain[0], src->direct_gain[1]);
+    }
+}
+
 void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc) {
     if (!src || !calc) {
         return;
@@ -231,7 +273,7 @@ void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc) {
             src->reference_distance,
             src->max_distance,
             src->rolloff_factor,
-            apu_spatial_get_distance_model()
+            source_distance_model(src)
         );
 
         float origin[3] = {0.0f, 0.0f, 0.0f};
@@ -259,7 +301,7 @@ void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc) {
             src->reference_distance,
             src->max_distance,
             src->rolloff_factor,
-            apu_spatial_get_distance_model()
+            source_distance_model(src)
         );
 
         calc->cone_gain = apu_calc_cone_gain(
@@ -279,6 +321,13 @@ void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc) {
             apu_spatial_get_doppler_factor(),
             apu_spatial_get_speed_of_sound()
         );
+    }
+
+    /* AL_SOFT_source_spatialize: an unspatialized source takes no distance, cone or Doppler */
+    if (!source_spatialized(src)) {
+        calc->distance_gain = 1.0f;
+        calc->cone_gain = 1.0f;
+        calc->doppler_pitch = 1.0f;
     }
 
     /* Combine into effective gain: clamp(source_gain * distance_gain * cone_gain, min_gain, max_gain) * listener_gain */
@@ -318,8 +367,9 @@ void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc) {
     apu_calc_panning_51(calc->local_pos[0], calc->local_pos[2], src->lfe_gain, &calc->pan_gains_51);
     apu_calc_mixbin_gains_51(&calc->pan_gains_51, calc->mixbin_gain);
 
-    if (src->direct) {
-        /* AL_XBOX_DIRECT_GAINS: the engine spatializes. Gain is AL_GAIN (within
+    if (src->direct || source_flat_mono(src)) {
+        /* AL_XBOX_DIRECT_GAINS: the engine spatializes (or an unspatialized
+         * mono source, centred). Gain is AL_GAIN (within
          * min/max) times the listener gain; the pan is the engine's left/right
          * pair (the hardware backend takes it at full precision from
          * apu_voice_set_direct()); no Doppler, ITD or elevation filter. */
@@ -332,21 +382,45 @@ void al_source_compute_spatial(ALsource *src, AL_SPATIAL_CALC *calc) {
         calc->itd_delay_left = calc->itd_delay_right = 0;
         apu_get_biquad_passthrough_q14(&calc->hrtf_coeffs);
         memset(calc->mixbin_gain, 0, sizeof(calc->mixbin_gain));
-        calc->mixbin_gain[0] = (uint8_t)(src->direct_gain[0] * 255.0f + 0.5f);
-        calc->mixbin_gain[1] = (uint8_t)(src->direct_gain[1] * 255.0f + 0.5f);
+        calc->mixbin_gain[0] = (uint8_t)((src->direct ? src->direct_gain[0] : AL_SOURCE_CENTRE_GAIN) * 255.0f + 0.5f);
+        calc->mixbin_gain[1] = (uint8_t)((src->direct ? src->direct_gain[1] : AL_SOURCE_CENTRE_GAIN) * 255.0f + 0.5f);
     }
     /* AL_DIRECT_FILTER: its AL_LOWPASS_GAIN scales the dry sound (its GAINHF is
      * the voice filter, source_lowpass) */
     calc->effective_gain *= al_efx_filter_gain(&src->efx.direct_filter);
+
+    /* The voice filter's level at 5 kHz: the direct filter's GAINHF, and with
+     * AL_DIRECT_FILTER_GAINHF_AUTO (default on) the cone's AL_CONE_OUTER_GAINHF
+     * (interpolated across the cone like AL_CONE_OUTER_GAIN) and air absorption:
+     * AL_AIR_ABSORPTION_FACTOR x -0.05 dB per metre beyond the reference distance
+     * (the distance clamped to AL_MAX_DISTANCE, AL_METERS_PER_UNIT metres a unit).
+     * Direct mode spatializes in the engine: only the filter applies. */
+    calc->gain_hf = al_efx_filter_gain_hf(&src->efx.direct_filter);
+    if (!src->direct && source_spatialized(src) && src->efx.direct_gain_hf_auto) {
+        if (src->efx.cone_outer_gain_hf < 1.0f) {
+            const float origin[3] = {0.0f, 0.0f, 0.0f};
+            calc->gain_hf *= apu_calc_cone_gain(src->position, src->direction,
+                                                src->source_relative ? origin : lis_pos,
+                                                src->cone_inner_angle, src->cone_outer_angle,
+                                                src->efx.cone_outer_gain_hf);
+        }
+        if (src->efx.air_absorption_factor > 0.0f) {
+            float d = (calc->distance < src->max_distance) ? calc->distance : src->max_distance;
+            float metres = (d - src->reference_distance) * al_efx_meters_per_unit();
+            if (metres > 0.0f) {
+                calc->gain_hf *= powf(AL_SOURCE_AIR_GAINHF_PER_METRE, src->efx.air_absorption_factor * metres);
+            }
+        }
+    }
 }
 
 /*
  * The voice filter for AL_FILTER_LOWPASS (EFX_PLAN.md 3.7): one per voice, so
- * it follows the direct filter's AL_LOWPASS_GAINHF and also shapes the sends.
+ * it follows the direct path's HF gain (calc->gain_hf) and also shapes the sends.
  * A send filter's GAINHF is not applied (its AL_LOWPASS_GAIN is, on the send).
  */
-static float source_lowpass(const ALsource *src) {
-    return al_efx_filter_gain_hf(&src->efx.direct_filter);
+static float source_lowpass(const AL_SPATIAL_CALC *calc) {
+    return calc->gain_hf;
 }
 
 
@@ -400,10 +474,10 @@ static NVAPU_VOICE_CONTEXT_3D *source_live_context(const ALsource *src) {
 
 
 /*
- * Effect sends (EFX_PLAN.md 3.2). The GP runs one effect, so only sends to it
- * are heard: AL_XBOX_REVERB_SEND on send 0 while AL_XBOX_REVERB is on (the
- * dry gain times the send, as before), else each EFX send whose slot holds the
- * active effect. An EFX send's gain is the source's gain with distance
+ * Effect sends (EFX_PLAN.md 3.2). AL_XBOX_REVERB_SEND on send 0 into GP slot 0
+ * while AL_XBOX_REVERB is on (the dry gain times the send, as before), else
+ * each EFX send whose slot holds an effect, into that slot's GP slot (EFX slot
+ * s is GP slot s - 1: bins 2+2k / 3+2k). An EFX send's gain is the source's gain with distance
  * attenuation by the room rolloff (the source's plus the effect's), the cone
  * when AL_AUXILIARY_SEND_FILTER_GAIN_AUTO is on, within AL_MIN_GAIN /
  * AL_MAX_GAIN, times the listener gain. AL_EFFECTSLOT_GAIN: the reverb applies
@@ -415,9 +489,9 @@ static bool s_reverb_enabled;
 
 static float efx_send_gain(const ALsource *src, const AL_SPATIAL_CALC *calc, const al_efx_slot_t *slot, uint32_t n) {
     float g = src->gain * al_efx_filter_gain(&src->efx.send[n].filter);
-    if (!src->direct) {
+    if (!src->direct && source_spatialized(src)) {
         g *= apu_calc_distance_gain(calc->distance, src->reference_distance, src->max_distance,
-                                    al_efx_room_rolloff(&src->efx, slot), apu_spatial_get_distance_model());
+                                    al_efx_room_rolloff(&src->efx, slot), source_distance_model(src));
         if (src->efx.send_gain_auto) {
             g *= calc->cone_gain;
         }
@@ -425,20 +499,22 @@ static float efx_send_gain(const ALsource *src, const AL_SPATIAL_CALC *calc, con
     if (g < src->min_gain) g = src->min_gain;
     if (g > src->max_gain) g = src->max_gain;
     g *= al_listener_get_gain();
-    if (slot && slot->props.type == AL_EFFECT_XBOX_GP_PROGRAM) {
-        g *= slot->gain;
+    if (al_efx_slot_is_kernel(slot)) {
+        g *= slot->gain;   /* a kernel has no word for it: scale its input */
     }
     return (g < 0.0f) ? 0.0f : ((g > 1.0f) ? 1.0f : g);
 }
 
-static void source_sends(const ALsource *src, const AL_SPATIAL_CALC *calc, float out[APU_VOICE_SENDS]);
+static void source_sends(const ALsource *src, const AL_SPATIAL_CALC *calc, float out[APU_VOICE_SENDS],
+                         uint8_t gp_slot[APU_VOICE_SENDS]);
 
 /* The loudest of the source's effect sends (apu_voice_mgr.c: a source heard
  * only through an effect is not silent) */
 float al_source_send_level(const ALsource *src, const AL_SPATIAL_CALC *calc) {
     float s[APU_VOICE_SENDS], m = 0.0f;
+    uint8_t k[APU_VOICE_SENDS];
     uint32_t n;
-    source_sends(src, calc, s);
+    source_sends(src, calc, s, k);
     for (n = 0; n < APU_VOICE_SENDS; n++) {
         if (s[n] > m) m = s[n];
     }
@@ -447,43 +523,70 @@ float al_source_send_level(const ALsource *src, const AL_SPATIAL_CALC *calc) {
 
 /* A stereo source into a custom GP kernel sends each channel at the whole send
  * gain (the kernel reads the pair); everything else at half on each output
- * (the reverb reads their sum) */
-static bool source_sends_per_channel(const ALsource *src) {
+ * (the reverb reads their sum). Per send: each has its own slot */
+static bool source_send_per_channel(const ALsource *src, uint32_t n) {
     const ALbuffer *pb = al_source_play_buffer(src);
     const al_efx_slot_t *slot;
-    if (s_reverb_enabled || pb == NULL || pb->channels != 2) {
+    if (s_reverb_enabled || pb == NULL || pb->channels != 2 || n >= (uint32_t)AL_EFX_MAX_SENDS) {
         return false;
     }
-    slot = al_efx_slot(al_efx_active_slot());
+    slot = al_efx_slot(src->efx.send[n].slot);
     return slot != NULL && slot->props.type == AL_EFFECT_XBOX_GP_PROGRAM;
 }
 
-static void source_sends(const ALsource *src, const AL_SPATIAL_CALC *calc, float out[APU_VOICE_SENDS]) {
-    ALuint active = al_efx_active_slot();
+/* Each send's gain and GP slot (0xFF: unused, it stays where it is) */
+static void source_sends(const ALsource *src, const AL_SPATIAL_CALC *calc, float out[APU_VOICE_SENDS],
+                         uint8_t gp_slot[APU_VOICE_SENDS]) {
     uint32_t n;
     for (n = 0; n < APU_VOICE_SENDS; n++) {
         out[n] = 0.0f;
+        gp_slot[n] = 0xFFu;
     }
     if (s_reverb_enabled) {
         out[0] = calc->effective_gain * src->reverb_send;
-        return;
-    }
-    if (active == 0u) {
+        gp_slot[0] = 0u;
         return;
     }
     for (n = 0; n < APU_VOICE_SENDS && n < (uint32_t)AL_EFX_MAX_SENDS; n++) {
-        if (src->efx.send[n].slot == active) {
-            out[n] = efx_send_gain(src, calc, al_efx_slot(active), n);
+        ALuint id = src->efx.send[n].slot;
+        const al_efx_slot_t *slot = al_efx_slot(id);
+        if (slot != NULL && slot->props.type != AL_EFFECT_NULL) {
+            out[n] = efx_send_gain(src, calc, slot, n);
+            gp_slot[n] = (uint8_t)(id - 1u);
         }
     }
+}
+
+/* The sends of a voice: gains, routing (a playing voice moves with a ramp), per-channel level */
+static void source_apply_sends(const ALsource *src, const AL_SPATIAL_CALC *calc, uint32_t voice) {
+    float sends[APU_VOICE_SENDS];
+    uint8_t gp_slot[APU_VOICE_SENDS];
+    uint32_t n;
+    source_sends(src, calc, sends, gp_slot);
+    for (n = 0; n < APU_VOICE_SENDS; n++) {
+        apu_voice_set_send_per_channel(voice, n, source_send_per_channel(src, n));
+    }
+    apu_voice_set_send_slots(voice, gp_slot);
+    apu_voice_set_sends(voice, sends);
 }
 
 /*
  * Refresh the requested voice context fields from a single spatial
  * computation. Paused sources are updated too so that a resume is current.
  */
+/* AL_SOFT_deferred_updates: changes wait for alProcessUpdatesSOFT */
+static bool s_defer_updates;
+
+/* ALC_SOFT_pause_device: playing voices are held paused */
+static bool s_device_paused;
+
 static void source_update_hw(const ALsource *src, unsigned fields) {
-    NVAPU_VOICE_CONTEXT_3D *ctx = source_live_context(src);
+    NVAPU_VOICE_CONTEXT_3D *ctx;
+    if (s_defer_updates) {
+        ((ALsource *)src)->hw_pending |= fields;
+        return;
+    }
+    ctx = source_live_context(src);
     if (!ctx) {
         return;
     }
@@ -518,14 +621,9 @@ static void source_update_hw(const ALsource *src, unsigned fields) {
         }
     }
     apu_voice_set_direction((uint32_t)src->hw_voice_idx, calc.local_pos);
-    apu_voice_set_direct((uint32_t)src->hw_voice_idx, src->direct, src->direct_gain[0], src->direct_gain[1]);
-    apu_voice_set_lowpass((uint32_t)src->hw_voice_idx, source_lowpass(src));
-    {
-        float sends[APU_VOICE_SENDS];
-        source_sends(src, &calc, sends);
-        apu_voice_set_send_per_channel((uint32_t)src->hw_voice_idx, source_sends_per_channel(src));
-        apu_voice_set_sends((uint32_t)src->hw_voice_idx, sends);
-    }
+    source_set_voice_direct((uint32_t)src->hw_voice_idx, src);
+    apu_voice_set_lowpass((uint32_t)src->hw_voice_idx, source_lowpass(&calc));
+    source_apply_sends(src, &calc, (uint32_t)src->hw_voice_idx);
     /* Hardware backend: apply the new pitch and volumes to the running voice */
     apu_voice_commit(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx);
 }
@@ -628,14 +726,9 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
                             src->has_offset ? src->offset_frames : 0u);
     }
     src->has_offset = false;
-    apu_voice_set_direct(hw_voice_idx, src->direct, src->direct_gain[0], src->direct_gain[1]);
-    apu_voice_set_lowpass(hw_voice_idx, source_lowpass(src));
-    {
-        float sends[APU_VOICE_SENDS];
-        source_sends(src, &calc, sends);
-        apu_voice_set_send_per_channel(hw_voice_idx, source_sends_per_channel(src));
-        apu_voice_set_sends(hw_voice_idx, sends);
-    }
+    source_set_voice_direct(hw_voice_idx, src);
+    apu_voice_set_lowpass(hw_voice_idx, source_lowpass(&calc));
+    source_apply_sends(src, &calc, hw_voice_idx);
     apu_voice_setup(hw_voice_idx, &ctx);
     if (src->stream) {
         /* The voice starts at ring index 0 from the stream's read position */
@@ -644,8 +737,24 @@ void al_source_program_hw_voice(ALsource *src, uint32_t hw_voice_idx) {
     }
     apu_voice_pause(al_source_get_apu_base(), hw_voice_idx, 0);
     apu_voice_trigger(al_source_get_apu_base(), hw_voice_idx);
+    if (s_device_paused) {
+        apu_voice_pause(al_source_get_apu_base(), hw_voice_idx, 1);   /* waits for alcDeviceResumeSOFT */
+    }
     if (src->stream) {
         al_stream_arm(src->stream, hw_voice_idx);
+    }
+}
+
+void al_source_set_device_paused(bool paused) {
+    if (paused == s_device_paused) {
+        return;
+    }
+    s_device_paused = paused;
+    for (size_t i = 0; i < s_source_end; i++) {
+        ALsource *src = &g_sources[i];
+        if (src->in_use && src->state == AL_PLAYING && src->hw_voice_idx >= 0) {
+            apu_voice_pause(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx, paused ? 1 : 0);
+        }
     }
 }
 
@@ -1221,6 +1330,41 @@ AL_API void AL_APIENTRY alSourcei(ALuint source, ALenum param, ALint value) {
             source_update_hw(src, SRC_HW_SPATIAL);
             break;
 
+        case AL_SOURCE_SPATIALIZE_SOFT:
+            if (value != AL_TRUE && value != AL_FALSE && value != AL_AUTO_SOFT) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->spatialize = (ALenum)value;
+            source_update_hw(src, SRC_HW_SPATIAL);
+            break;
+
+        case AL_DIRECT_CHANNELS_SOFT:
+            if (value != AL_TRUE && value != AL_FALSE) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->direct_channels = (ALboolean)value;
+            break;
+
+        case AL_DISTANCE_MODEL:
+            switch (value) {
+                case AL_NONE:
+                case AL_INVERSE_DISTANCE:
+                case AL_INVERSE_DISTANCE_CLAMPED:
+                case AL_LINEAR_DISTANCE:
+                case AL_LINEAR_DISTANCE_CLAMPED:
+                case AL_EXPONENT_DISTANCE:
+                case AL_EXPONENT_DISTANCE_CLAMPED:
+                    src->distance_model = (ALenum)value;
+                    source_update_hw(src, SRC_HW_SPATIAL);
+                    break;
+                default:
+                    alSetError(AL_INVALID_VALUE);
+                    return;
+            }
+            break;
+
         case AL_SEC_OFFSET:
         case AL_SAMPLE_OFFSET:
         case AL_BYTE_OFFSET: {
@@ -1300,6 +1444,9 @@ AL_API void AL_APIENTRY alSourceiv(ALuint source, ALenum param, const ALint *val
         case AL_BUFFER:
         case AL_LOOPING:
         case AL_SOURCE_RELATIVE:
+        case AL_SOURCE_SPATIALIZE_SOFT:
+        case AL_DIRECT_CHANNELS_SOFT:
+        case AL_DISTANCE_MODEL:
         case AL_SEC_OFFSET:
         case AL_SAMPLE_OFFSET:
         case AL_BYTE_OFFSET:
@@ -1510,6 +1657,18 @@ AL_API void AL_APIENTRY alGetSourcei(ALuint source, ALenum param, ALint *value) 
             *value = (ALint)src->looping;
             break;
 
+        case AL_SOURCE_SPATIALIZE_SOFT:
+            *value = (ALint)src->spatialize;
+            break;
+
+        case AL_DIRECT_CHANNELS_SOFT:
+            *value = (ALint)src->direct_channels;
+            break;
+
+        case AL_DISTANCE_MODEL:
+            *value = (ALint)src->distance_model;
+            break;
+
         case AL_SOURCE_RELATIVE:
             *value = (ALint)src->source_relative;
             break;
@@ -1652,7 +1811,9 @@ AL_API void AL_APIENTRY alSourcePlay(ALuint source) {
     /* If paused and HW voice is intact, unpause directly. Spatial, gain and
      * pitch updates were applied while paused, so the context is current. */
     if (src->state == AL_PAUSED && src->hw_voice_idx >= 0) {
-        apu_voice_pause(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx, 0);
+        if (!s_device_paused) {
+            apu_voice_pause(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx, 0);
+        }
         src->state = AL_PLAYING;
         return;
     }
@@ -1948,6 +2109,8 @@ AL_API void AL_APIENTRY alSpeedOfSound(ALfloat value) {
 AL_API ALint AL_APIENTRY alGetInteger(ALenum param) {
     ensure_subsystem_initialized();
     switch (param) {
+        case AL_DEFERRED_UPDATES_SOFT:
+            return s_defer_updates ? AL_TRUE : AL_FALSE;
         case AL_DISTANCE_MODEL:
             return (ALint)apu_spatial_get_distance_model();
         case AL_DOPPLER_FACTOR:
@@ -1967,6 +2130,9 @@ AL_API void AL_APIENTRY alGetIntegerv(ALenum param, ALint *values) {
     }
     ensure_subsystem_initialized();
     switch (param) {
+        case AL_DEFERRED_UPDATES_SOFT:
+            *values = s_defer_updates ? AL_TRUE : AL_FALSE;
+            break;
         case AL_DISTANCE_MODEL:
             *values = (ALint)apu_spatial_get_distance_model();
             break;
@@ -1993,6 +2159,8 @@ AL_API ALfloat AL_APIENTRY alGetFloat(ALenum param) {
             return 1.0f;
         case AL_SPEED_OF_SOUND:
             return apu_spatial_get_speed_of_sound();
+        case AL_GAIN_LIMIT_SOFT:
+            return 1.0f;   /* AL_SOFT_gain_clamp_ex: a voice's volume only attenuates */
         default:
             alSetError(AL_INVALID_ENUM);
             return 0.0f;
@@ -2017,6 +2185,9 @@ AL_API void AL_APIENTRY alGetFloatv(ALenum param, ALfloat *values) {
             break;
         case AL_SPEED_OF_SOUND:
             *values = apu_spatial_get_speed_of_sound();
+            break;
+        case AL_GAIN_LIMIT_SOFT:
+            *values = 1.0f;
             break;
         default:
             alSetError(AL_INVALID_ENUM);
@@ -2053,9 +2224,9 @@ AL_API void AL_APIENTRY alGetBooleanv(ALenum param, ALboolean *values) {
 }
 
 /*
- * The GP's one effect: AL_XBOX_reverb (one reverb for the mix; its settings
- * live here) or, with it off, the reverb of the EFX slot holding the active
- * effect (al_efx.c). reverb_apply() hands the parameters to the GP program
+ * The GP's effects, one per slot: AL_XBOX_reverb (one reverb for the mix in GP
+ * slot 0; its settings live here) or, with it off, the effect of each EFX slot
+ * s in GP slot s - 1 (al_efx.c). reverb_apply() hands them to the GP program
  * when a device is up and the console route is in use (on xemu's front-end
  * route bins 2/3 are surround bins). alXboxUpdateVoices() re-applies them
  * after a device (re)open.
@@ -2070,50 +2241,70 @@ static void reverb_params(void) {
     }
 }
 
-/* What the GP runs: the reverb (`p`), an AL_XBOX_gp_program kernel (`k`, `params`) or nothing */
-typedef enum { GP_NONE, GP_REVERB, GP_KERNEL } gp_kind_t;
-
-static gp_kind_t gp_effect(apu_reverb_params_t *p, apu_gp_kernel_t *k, const uint32_t **params) {
+/* What GP slot k runs: the reverb (`p`), a kernel (`k`, `params`) or nothing */
+static int gp_slot_effect(uint32_t slot_k, apu_reverb_params_t *p, apu_gp_kernel_t *k, const uint32_t **params) {
     const al_efx_slot_t *slot;
     reverb_params();
     *p = s_reverb;
     if (s_reverb_enabled) {
-        return GP_REVERB;
+        return (slot_k == 0u) ? AL_GP_REVERB : AL_GP_NONE;
     }
-    slot = al_efx_slot(al_efx_active_slot());
+    slot = al_efx_slot(slot_k + 1u);
     if (slot && (slot->props.type == AL_EFFECT_REVERB || slot->props.type == AL_EFFECT_EAXREVERB)) {
         al_efx_reverb_params(slot, p);
-        return GP_REVERB;
+        return AL_GP_REVERB;
     }
     if (al_efx_slot_kernel(slot, k, params)) {
-        return GP_KERNEL;
+        return AL_GP_KERNEL;
     }
-    return GP_NONE;
+    return AL_GP_NONE;
+}
+
+/* The kernel GP slot k should hold (NULL: none) */
+static const apu_gp_kernel_t *gp_slot_want(int kind, const apu_gp_kernel_t *k) {
+    return (kind == AL_GP_REVERB) ? apu_gp_reverb_kernel() : ((kind == AL_GP_KERNEL) ? k : NULL);
 }
 
 static void reverb_apply(void) {
-    apu_reverb_params_t p;
-    apu_gp_kernel_t k;
-    const uint32_t *params = NULL;
-    gp_kind_t kind = gp_effect(&p, &k, &params);
+    apu_reverb_params_t p[APU_GP_SLOTS];
+    apu_gp_kernel_t k[APU_GP_SLOTS];
+    const uint32_t *params[APU_GP_SLOTS];
+    int kind[APU_GP_SLOTS];
     uintptr_t base = al_source_get_apu_base();
+    uint32_t i;
     if (!apu_gp_ready() || apu_vp_front_end_ok()) {
         return;
     }
-    if (kind == GP_KERNEL) {
-        (void)apu_gp_kernel_set(base, &k, params, true);
-        return;
+    for (i = 0; i < APU_GP_SLOTS; i++) {
+        params[i] = NULL;
+        kind[i] = gp_slot_effect(i, &p[i], &k[i], &params[i]);
     }
-    (void)apu_gp_kernel_set(base, NULL, NULL, false);
-    (void)apu_gp_reverb_set(base, &p, kind == GP_REVERB);
+    /* First stop every slot whose kernel changes: another slot may need its ranges */
+    for (i = 0; i < APU_GP_SLOTS; i++) {
+        if (!apu_gp_slot_holds(i, gp_slot_want(kind[i], &k[i]))) {
+            apu_gp_slot_stop(base, i);
+        }
+    }
+    for (i = 0; i < APU_GP_SLOTS; i++) {
+        if (kind[i] == AL_GP_REVERB) {
+            (void)apu_gp_reverb_set(base, i, &p[i], true);
+        } else if (kind[i] == AL_GP_KERNEL) {
+            (void)apu_gp_kernel_set(base, i, &k[i], params[i], true);
+        }
+    }
 }
 
 static void reverb_sync(void) {
     apu_reverb_params_t p;
     apu_gp_kernel_t k;
     const uint32_t *params;
-    if (gp_effect(&p, &k, &params) != GP_NONE && !apu_gp_reverb_on() && !apu_gp_kernel_on()) {
-        reverb_apply();
+    uint32_t i;
+    for (i = 0; i < APU_GP_SLOTS; i++) {
+        int kind = gp_slot_effect(i, &p, &k, &params);
+        if (kind != AL_GP_NONE && !apu_gp_slot_holds(i, gp_slot_want(kind, &k))) {
+            reverb_apply();   /* a slot that should run does not (a GP restart stopped it) */
+            return;
+        }
     }
 }
 
@@ -2121,28 +2312,66 @@ bool al_reverb_active(void) {
     apu_reverb_params_t p;
     apu_gp_kernel_t k;
     const uint32_t *params;
-    return gp_effect(&p, &k, &params) == GP_REVERB && apu_gp_reverb_on();
+    uint32_t i;
+    for (i = 0; i < APU_GP_SLOTS; i++) {
+        if (gp_slot_effect(i, &p, &k, &params) == AL_GP_REVERB && apu_gp_slot_holds(i, apu_gp_reverb_kernel())) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int al_source_debug_gp_slot(uint32_t slot, apu_reverb_params_t *p, apu_gp_kernel_t *k, const uint32_t **params) {
+    apu_reverb_params_t pp;
+    apu_gp_kernel_t kk;
+    const uint32_t *par = NULL;
+    int kind;
+    if (slot >= APU_GP_SLOTS) {
+        return AL_GP_NONE;
+    }
+    kind = gp_slot_effect(slot, &pp, &kk, &par);
+    if (p) *p = pp;
+    if (k && kind == AL_GP_KERNEL) *k = kk;
+    if (params) *params = par;
+    return kind;
 }
 
 bool al_source_debug_gp_effect(apu_reverb_params_t *p) {
-    apu_gp_kernel_t k;
-    const uint32_t *params;
-    return gp_effect(p, &k, &params) == GP_REVERB;
+    uint32_t i;
+    for (i = 0; i < APU_GP_SLOTS; i++) {
+        if (al_source_debug_gp_slot(i, p, NULL, NULL) == AL_GP_REVERB) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool al_source_debug_gp_kernel(apu_gp_kernel_t *k, const uint32_t **params) {
-    apu_reverb_params_t p;
-    return gp_effect(&p, k, params) == GP_KERNEL;
+    uint32_t i;
+    for (i = 0; i < APU_GP_SLOTS; i++) {
+        if (al_source_debug_gp_slot(i, NULL, k, params) == AL_GP_KERNEL) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool al_source_debug_sends(ALuint source, float out[APU_VOICE_SENDS]) {
+    return al_source_debug_send_route(source, out, NULL);
+}
+
+bool al_source_debug_send_route(ALuint source, float out[APU_VOICE_SENDS], uint8_t gp_slot[APU_VOICE_SENDS]) {
     AL_SPATIAL_CALC calc;
+    float g[APU_VOICE_SENDS];
+    uint8_t s[APU_VOICE_SENDS];
     ALsource *src = al_source_get(source);
-    if (!src || !out) {
+    if (!src) {
         return false;
     }
     al_source_calc_spatial(src, &calc);
-    source_sends(src, &calc, out);
+    source_sends(src, &calc, g, s);
+    if (out) memcpy(out, g, sizeof(g));
+    if (gp_slot) memcpy(gp_slot, s, sizeof(s));
     return true;
 }
 
@@ -2200,7 +2429,7 @@ bool al_source_gp_timed_busy(void) {
     return apu_gp_ready() && apu_gp_mailbox_pending(al_source_get_apu_base());
 }
 
-void al_source_gp_params_at(uint32_t frame) {
+void al_source_gp_params_at(ALuint slot, uint32_t frame) {
     apu_reverb_params_t p;
     apu_gp_kernel_t k;
     const uint32_t *params = NULL;
@@ -2208,8 +2437,10 @@ void al_source_gp_params_at(uint32_t frame) {
     if (s_dbg_clock) {
         s_dbg_busy = true;                      /* the GP holds it until the test lets it go */
     }
-    if (apu_gp_ready() && !apu_vp_front_end_ok() && gp_effect(&p, &k, &params) == GP_KERNEL &&
-        apu_gp_kernel_params_at(al_source_get_apu_base(), &k, params, frame) == 0) {
+    /* EFX slot s runs in GP slot s - 1: the post goes to that slot's KPARAM only */
+    if (slot >= 1u && slot <= APU_GP_SLOTS && apu_gp_ready() && !apu_vp_front_end_ok() &&
+        gp_slot_effect(slot - 1u, &p, &k, &params) == AL_GP_KERNEL &&
+        apu_gp_kernel_params_at(al_source_get_apu_base(), slot - 1u, &k, params, frame) == 0) {
         return;
     }
     al_source_effects_changed();   /* not the running kernel's parameters: as an attach */
@@ -2283,13 +2514,18 @@ AL_API void AL_APIENTRY alEnable(ALenum capability) {
         return;
     }
     if (capability == AL_XBOX_REVERB) {
-        /* The GP runs one effect: not while an EFX slot holds one (EFX_PLAN 3.1) */
+        /* The mix's reverb or the EFX slots, not both: not while an EFX slot holds an effect (EFX_PLAN 3.1) */
         if (al_efx_active_slot() != 0u) {
             alSetError(AL_INVALID_OPERATION);
             return;
         }
         s_reverb_enabled = true;
         al_source_effects_changed();
+        return;
+    }
+    if (capability == AL_SOURCE_DISTANCE_MODEL) {
+        s_source_distance_model = true;
+        al_source_update_all_spatial();
         return;
     }
     alSetError(AL_INVALID_ENUM);
@@ -2305,6 +2541,11 @@ AL_API void AL_APIENTRY alDisable(ALenum capability) {
         al_source_effects_changed();
         return;
     }
+    if (capability == AL_SOURCE_DISTANCE_MODEL) {
+        s_source_distance_model = false;
+        al_source_update_all_spatial();
+        return;
+    }
     alSetError(AL_INVALID_ENUM);
 }
 
@@ -2315,6 +2556,304 @@ AL_API ALboolean AL_APIENTRY alIsEnabled(ALenum capability) {
     if (capability == AL_XBOX_REVERB) {
         return s_reverb_enabled ? AL_TRUE : AL_FALSE;
     }
+    if (capability == AL_SOURCE_DISTANCE_MODEL) {
+        return s_source_distance_model ? AL_TRUE : AL_FALSE;
+    }
     alSetError(AL_INVALID_ENUM);
     return AL_FALSE;
+}
+
+/*
+ * ============================================================================
+ * AL_SOFT_deferred_updates
+ * ============================================================================
+ */
+
+AL_API void AL_APIENTRY alDeferUpdatesSOFT(void) {
+    ensure_subsystem_initialized();
+    s_defer_updates = true;
+}
+
+AL_API void AL_APIENTRY alProcessUpdatesSOFT(void) {
+    ensure_subsystem_initialized();
+    if (!s_defer_updates) {
+        return;
+    }
+    s_defer_updates = false;
+    for (size_t i = 0; i < s_source_end; i++) {
+        ALsource *src = &g_sources[i];
+        if (src->in_use && src->hw_pending != 0u) {
+            unsigned f = src->hw_pending;
+            src->hw_pending = 0u;
+            source_update_hw(src, f);
+        }
+    }
+}
+
+/*
+ * ============================================================================
+ * AL_SOFT_source_latency
+ * ============================================================================
+ */
+
+/* How far the codec plays behind the APU's mix, in frames (0 without output) */
+static uint32_t output_latency_frames(void) {
+    apu_ac97_stats_t a;
+    apu_ac97_get_stats(&a);
+    if (a.zero_copy) {
+        return a.lead_last;
+    }
+    return (a.threaded || a.chunks > 0u) ? APU_AC97_PRIME * APU_AC97_CHUNK_FRAMES : 0u;
+}
+
+static bool is_offset_param(ALenum param) {
+    return param == AL_SEC_OFFSET || param == AL_SAMPLE_OFFSET || param == AL_BYTE_OFFSET;
+}
+
+/* The values of a vector source parameter */
+static int source_param_count(ALenum param) {
+    switch (param) {
+        case AL_POSITION:
+        case AL_VELOCITY:
+        case AL_DIRECTION:
+        case AL_AUXILIARY_SEND_FILTER:
+            return 3;
+        case AL_XBOX_DIRECT_GAINS:
+        case AL_LOOP_POINTS_SOFT:
+        case AL_SAMPLE_OFFSET_LATENCY_SOFT:
+        case AL_SEC_OFFSET_LATENCY_SOFT:
+            return 2;
+        default:
+            return 1;
+    }
+}
+
+static void source_seek_double(ALuint source, ALenum param, double v) {
+    ALsource *src = al_source_get(source);
+    uint32_t frames;
+    if (!src) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+    if (!offset_to_frames(src, param, v, &frames)) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    source_seek(src, frames);
+}
+
+AL_API void AL_APIENTRY alSourcedSOFT(ALuint source, ALenum param, ALdouble value) {
+    if (is_offset_param(param)) {
+        source_seek_double(source, param, value);
+        return;
+    }
+    if (param == AL_SAMPLE_OFFSET_LATENCY_SOFT || param == AL_SEC_OFFSET_LATENCY_SOFT) {
+        alSetError(AL_INVALID_OPERATION);   /* read only */
+        return;
+    }
+    alSourcef(source, param, (ALfloat)value);
+}
+
+AL_API void AL_APIENTRY alSource3dSOFT(ALuint source, ALenum param, ALdouble v1, ALdouble v2, ALdouble v3) {
+    alSource3f(source, param, (ALfloat)v1, (ALfloat)v2, (ALfloat)v3);
+}
+
+AL_API void AL_APIENTRY alSourcedvSOFT(ALuint source, ALenum param, const ALdouble *values) {
+    ALfloat f[3];
+    int i, n = source_param_count(param);
+    if (!values) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    if (n == 1) {
+        alSourcedSOFT(source, param, values[0]);
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        f[i] = (ALfloat)values[i];
+    }
+    alSourcefv(source, param, f);
+}
+
+AL_API void AL_APIENTRY alGetSourcedSOFT(ALuint source, ALenum param, ALdouble *value) {
+    ALfloat f = 0.0f;
+    if (!value) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    if (is_offset_param(param)) {
+        ALsource *src = al_source_get(source);
+        if (!src) {
+            alSetError(AL_INVALID_NAME);
+            return;
+        }
+        *value = frames_to_offset(src, param, source_position(src));
+        return;
+    }
+    if (source_param_count(param) != 1) {
+        alSetError(AL_INVALID_ENUM);   /* a pair: alGetSourcedvSOFT */
+        return;
+    }
+    alGetSourcef(source, param, &f);
+    *value = (ALdouble)f;
+}
+
+AL_API void AL_APIENTRY alGetSource3dSOFT(ALuint source, ALenum param, ALdouble *v1, ALdouble *v2, ALdouble *v3) {
+    ALfloat a = 0.0f, b = 0.0f, c = 0.0f;
+    if (!v1 || !v2 || !v3) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    alGetSource3f(source, param, &a, &b, &c);
+    *v1 = a;
+    *v2 = b;
+    *v3 = c;
+}
+
+AL_API void AL_APIENTRY alGetSourcedvSOFT(ALuint source, ALenum param, ALdouble *values) {
+    ALfloat f[3] = { 0.0f, 0.0f, 0.0f };
+    int i, n = source_param_count(param);
+    if (!values) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    if (param == AL_SEC_OFFSET_LATENCY_SOFT) {
+        ALsource *src = al_source_get(source);
+        if (!src) {
+            alSetError(AL_INVALID_NAME);
+            return;
+        }
+        values[0] = frames_to_offset(src, AL_SEC_OFFSET, source_position(src));
+        values[1] = (double)output_latency_frames() / 48000.0;
+        return;
+    }
+    if (param == AL_SAMPLE_OFFSET_LATENCY_SOFT) {
+        alSetError(AL_INVALID_ENUM);   /* the 64-bit form: alGetSourcei64vSOFT */
+        return;
+    }
+    if (n == 1) {
+        alGetSourcedSOFT(source, param, values);
+        return;
+    }
+    alGetSourcefv(source, param, f);
+    for (i = 0; i < n; i++) {
+        values[i] = (ALdouble)f[i];
+    }
+}
+
+static bool fits_int(ALint64SOFT v) {
+    return v >= -2147483647LL - 1LL && v <= 2147483647LL;
+}
+
+AL_API void AL_APIENTRY alSourcei64SOFT(ALuint source, ALenum param, ALint64SOFT value) {
+    if (is_offset_param(param)) {
+        source_seek_double(source, param, (double)value);
+        return;
+    }
+    if (param == AL_SAMPLE_OFFSET_LATENCY_SOFT || param == AL_SEC_OFFSET_LATENCY_SOFT) {
+        alSetError(AL_INVALID_OPERATION);
+        return;
+    }
+    if (!fits_int(value)) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    alSourcei(source, param, (ALint)value);
+}
+
+AL_API void AL_APIENTRY alSource3i64SOFT(ALuint source, ALenum param, ALint64SOFT v1, ALint64SOFT v2,
+                                         ALint64SOFT v3) {
+    if (!fits_int(v1) || !fits_int(v2) || !fits_int(v3)) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    alSource3i(source, param, (ALint)v1, (ALint)v2, (ALint)v3);
+}
+
+AL_API void AL_APIENTRY alSourcei64vSOFT(ALuint source, ALenum param, const ALint64SOFT *values) {
+    ALint v[3];
+    int i, n = source_param_count(param);
+    if (!values) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    if (n == 1) {
+        alSourcei64SOFT(source, param, values[0]);
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        if (!fits_int(values[i])) {
+            alSetError(AL_INVALID_VALUE);
+            return;
+        }
+        v[i] = (ALint)values[i];
+    }
+    alSourceiv(source, param, v);
+}
+
+AL_API void AL_APIENTRY alGetSourcei64SOFT(ALuint source, ALenum param, ALint64SOFT *value) {
+    ALint v = 0;
+    if (!value) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    if (is_offset_param(param)) {
+        ALsource *src = al_source_get(source);
+        if (!src) {
+            alSetError(AL_INVALID_NAME);
+            return;
+        }
+        *value = (ALint64SOFT)frames_to_offset(src, param, source_position(src));
+        return;
+    }
+    if (source_param_count(param) != 1) {
+        alSetError(AL_INVALID_ENUM);
+        return;
+    }
+    alGetSourcei(source, param, &v);
+    *value = v;
+}
+
+AL_API void AL_APIENTRY alGetSource3i64SOFT(ALuint source, ALenum param, ALint64SOFT *v1, ALint64SOFT *v2,
+                                            ALint64SOFT *v3) {
+    ALint a = 0, b = 0, c = 0;
+    if (!v1 || !v2 || !v3) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    alGetSource3i(source, param, &a, &b, &c);
+    *v1 = a;
+    *v2 = b;
+    *v3 = c;
+}
+
+AL_API void AL_APIENTRY alGetSourcei64vSOFT(ALuint source, ALenum param, ALint64SOFT *values) {
+    ALint v[3] = { 0, 0, 0 };
+    int i, n = source_param_count(param);
+    if (!values) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    if (param == AL_SAMPLE_OFFSET_LATENCY_SOFT) {
+        ALsource *src = al_source_get(source);
+        if (!src) {
+            alSetError(AL_INVALID_NAME);
+            return;
+        }
+        values[0] = (ALint64SOFT)((ALuint64SOFT)source_position(src) << 32);   /* 32.32, no fraction */
+        values[1] = (ALint64SOFT)output_latency_frames() * 1000000000LL / 48000LL;
+        return;
+    }
+    if (param == AL_SEC_OFFSET_LATENCY_SOFT) {
+        alSetError(AL_INVALID_ENUM);   /* the double form: alGetSourcedvSOFT */
+        return;
+    }
+    if (n == 1) {
+        alGetSourcei64SOFT(source, param, values);
+        return;
+    }
+    alGetSourceiv(source, param, v);
+    for (i = 0; i < n; i++) {
+        values[i] = v[i];
+    }
 }

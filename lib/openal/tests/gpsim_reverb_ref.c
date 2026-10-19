@@ -4,8 +4,9 @@
  * input, and the host reference's output for it, so the simulated GP program
  * can be compared with the reference word for word.
  *
- *   gpsim_reverb_ref <preset> <frames>
- * Output lines: "W addr value" (layout), then per frame "I bin s0..s31" for
+ *   gpsim_reverb_ref <preset> <frames> <xbase> <scratch>
+ * (the slot's X block and scratch byte offset). Output lines: "W addr value"
+ * (layout), then per frame "I bin s0..s31" for
  * bins 0-3 (dry pair, input pair) and "O ch s0..s31" for both output channels (24-bit words, hex).
  */
 #include <stdio.h>
@@ -27,12 +28,14 @@ int main(int argc, char **argv) {
     apu_reverb_ref_t r;
     int preset = argc > 1 ? atoi(argv[1]) : 3;
     int frames = argc > 2 ? atoi(argv[2]) : 200;
+    uint32_t xbase = argc > 3 ? (uint32_t)strtoul(argv[3], NULL, 0) : 0xE0u;
+    uint32_t scratch = argc > 4 ? (uint32_t)strtoul(argv[4], NULL, 0) : APU_REVERB_SCRATCH_BASE;
     uint32_t n, i;
     int f, b, k;
 
     if (apu_reverb_preset(preset, &p) != 0) return 1;
     p.input_gain = 0.25f;
-    n = apu_reverb_layout(&p, w);
+    n = apu_reverb_layout(&p, xbase, scratch, w);
     for (i = 0; i < n; i++) printf("W %x %x\n", (unsigned)w[i].addr, (unsigned)w[i].value);
     if (apu_reverb_ref_init(&r, &p) != 0) return 1;
     for (f = 0; f < frames; f++) {

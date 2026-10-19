@@ -209,6 +209,12 @@ int apu_vp_voice_start(uintptr_t bar0, uint32_t handle, const apu_vp_voice_param
  * Update pitch, the eight output volumes and (for handles below 64, if
  * hrtf_entry >= 0 and HRTF is available) the HRTF entry of a running voice.
  */
+/**
+ * Move a running voice's eight outputs to `bins` (CFG_VBIN and the CFG_FMT bin
+ * bits): it takes effect at once (EFX_PLAN.md 2.1), so mute what moves first.
+ */
+void apu_vp_voice_set_bins(uintptr_t bar0, uint32_t handle, const uint8_t bins[APU_VP_OUTPUTS]);
+
 /** Set a running voice's filter (FMODE and TAR_FCA/FCB; written only when it changed). */
 void apu_vp_voice_set_filter(uintptr_t bar0, uint32_t handle, uint32_t fmode, uint32_t fc);
 
