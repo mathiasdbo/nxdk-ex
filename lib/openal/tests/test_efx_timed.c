@@ -198,6 +198,43 @@ static void test_no_gp(void) {
     alDeleteEffects(1, &e2);
 }
 
+/* Parameter 0 of the kernel EFX slot `slot` runs */
+static uint32_t slot_param0(ALuint slot) {
+    apu_gp_kernel_t k;
+    const uint32_t *p = NULL;
+    assert(al_source_debug_gp_slot(slot - 1u, NULL, &k, &p) == AL_GP_KERNEL);
+    return p[0];
+}
+
+static void test_two_slots(void) {
+    ALuint a1 = program(50), a2 = program(51), b1 = program(60), b2 = program(61), slot2 = 0;
+    printf("[5] several slots (phase9-04): a timed change goes to the named slot only\n");
+    alGenAuxiliaryEffectSlots(1, &slot2);
+    alSourcePlay(s_src);
+    alAuxiliaryEffectSloti(s_slot, AL_EFFECTSLOT_EFFECT, (ALint)a1);
+    alAuxiliaryEffectSloti(slot2, AL_EFFECTSLOT_EFFECT, (ALint)b1);
+    assert(alGetError() == AL_NO_ERROR);
+    al_source_debug_clock(true, 0u, 100u, false);
+    alXboxEffectSlotAtSample(slot2, b2, s_src, 1000);           /* not the first slot with an effect */
+    assert(alGetError() == AL_NO_ERROR && al_source_debug_timed_frame() == 133u);
+    assert(slot_param0(slot2) == 61u && slot_param0(s_slot) == 50u);
+    al_source_debug_clock(true, 0u, 200u, false);
+    alXboxEffectSlotAtSample(s_slot, a2, s_src, 0);
+    assert(alGetError() == AL_NO_ERROR && slot_param0(s_slot) == 51u && slot_param0(slot2) == 61u);
+    al_source_debug_clock(true, 0u, 300u, false);              /* the GP took the last post */
+    alXboxEffectSlotAtSample(slot2, a2, s_src, 0);             /* same image: fine for either slot */
+    assert(alGetError() == AL_NO_ERROR && slot_param0(slot2) == 51u);
+    al_source_debug_clock(false, 0u, 0u, false);
+    alAuxiliaryEffectSloti(s_slot, AL_EFFECTSLOT_EFFECT, 0);
+    alAuxiliaryEffectSloti(slot2, AL_EFFECTSLOT_EFFECT, 0);
+    alDeleteAuxiliaryEffectSlots(1, &slot2);
+    alDeleteEffects(1, &a1);
+    alDeleteEffects(1, &a2);
+    alDeleteEffects(1, &b1);
+    alDeleteEffects(1, &b2);
+    assert(alGetError() == AL_NO_ERROR);
+}
+
 int main(void) {
     ALCdevice *dev = alcOpenDevice(NULL);
     ALCcontext *ctx;
@@ -212,6 +249,7 @@ int main(void) {
     test_timing();
     test_queue();
     test_no_gp();
+    test_two_slots();
     alDeleteEffects(1, &e1);
     alSourceStop(s_src);
     alDeleteSources(1, &s_src);

@@ -6,9 +6,9 @@
  * Supported: effect types AL_EFFECT_NULL, AL_EFFECT_REVERB and
  * AL_EFFECT_EAXREVERB (every other type is AL_INVALID_VALUE, as the extension
  * allows), filter types AL_FILTER_NULL and AL_FILTER_LOWPASS (the voice filter;
- * highpass and bandpass are AL_INVALID_VALUE), AL_EFX_MAX_SLOTS slots of which one may
- * hold an effect at a time (the GP runs one program), and up to
- * AL_EFX_MAX_SENDS sends per source.
+ * highpass and bandpass are AL_INVALID_VALUE), AL_EFX_MAX_SLOTS slots, each
+ * with its own GP kernel (phase9-04: an attach fails only when the GP's shared
+ * budgets are full), and up to AL_EFX_MAX_SENDS sends per source.
  */
 #define AL_ALEXT_PROTOTYPES
 #include "al_efx.h"
@@ -23,10 +23,12 @@
 
 #include "al_buffer.h"   /* alSetError */
 #include "al_source.h"   /* al_source_effects_changed */
+#include "gp_kefx_chorus.h"
+#include "gp_kefx_echo.h"
 
 /* ------------------------------------------------------------------ parameter tables */
 
-enum { P_FLOAT, P_VEC, P_BOOL };
+enum { P_FLOAT, P_VEC, P_BOOL, P_INT };   /* P_BOOL, P_INT: an ALint in [min, max] */
 
 typedef struct {
     ALenum param;
@@ -111,6 +113,45 @@ static const param_desc_t s_eaxreverb_params[] = {
 
 #define COUNT(a) (sizeof(a) / sizeof((a)[0]))
 
+static const param_desc_t s_echo_params[] = {
+    { AL_ECHO_DELAY, P_FLOAT, RV(echo_delay), AL_ECHO_MIN_DELAY, AL_ECHO_MAX_DELAY, AL_ECHO_DEFAULT_DELAY },
+    { AL_ECHO_LRDELAY, P_FLOAT, RV(echo_lr_delay), AL_ECHO_MIN_LRDELAY, AL_ECHO_MAX_LRDELAY, AL_ECHO_DEFAULT_LRDELAY },
+    { AL_ECHO_DAMPING, P_FLOAT, RV(echo_damping), AL_ECHO_MIN_DAMPING, AL_ECHO_MAX_DAMPING, AL_ECHO_DEFAULT_DAMPING },
+    { AL_ECHO_FEEDBACK, P_FLOAT, RV(echo_feedback), AL_ECHO_MIN_FEEDBACK, AL_ECHO_MAX_FEEDBACK,
+      AL_ECHO_DEFAULT_FEEDBACK },
+    { AL_ECHO_SPREAD, P_FLOAT, RV(echo_spread), AL_ECHO_MIN_SPREAD, AL_ECHO_MAX_SPREAD, AL_ECHO_DEFAULT_SPREAD },
+};
+
+static const param_desc_t s_chorus_params[] = {
+    { AL_CHORUS_WAVEFORM, P_INT, RV(chorus_waveform), AL_CHORUS_MIN_WAVEFORM, AL_CHORUS_MAX_WAVEFORM,
+      AL_CHORUS_DEFAULT_WAVEFORM },
+    { AL_CHORUS_PHASE, P_INT, RV(chorus_phase), AL_CHORUS_MIN_PHASE, AL_CHORUS_MAX_PHASE,
+      AL_CHORUS_DEFAULT_PHASE },
+    { AL_CHORUS_RATE, P_FLOAT, RV(chorus_rate), AL_CHORUS_MIN_RATE, AL_CHORUS_MAX_RATE,
+      AL_CHORUS_DEFAULT_RATE },
+    { AL_CHORUS_DEPTH, P_FLOAT, RV(chorus_depth), AL_CHORUS_MIN_DEPTH, AL_CHORUS_MAX_DEPTH,
+      AL_CHORUS_DEFAULT_DEPTH },
+    { AL_CHORUS_FEEDBACK, P_FLOAT, RV(chorus_feedback), AL_CHORUS_MIN_FEEDBACK, AL_CHORUS_MAX_FEEDBACK,
+      AL_CHORUS_DEFAULT_FEEDBACK },
+    { AL_CHORUS_DELAY, P_FLOAT, RV(chorus_delay), AL_CHORUS_MIN_DELAY, AL_CHORUS_MAX_DELAY,
+      AL_CHORUS_DEFAULT_DELAY },
+};
+
+static const param_desc_t s_flanger_params[] = {
+    { AL_FLANGER_WAVEFORM, P_INT, RV(flanger_waveform), AL_FLANGER_MIN_WAVEFORM, AL_FLANGER_MAX_WAVEFORM,
+      AL_FLANGER_DEFAULT_WAVEFORM },
+    { AL_FLANGER_PHASE, P_INT, RV(flanger_phase), AL_FLANGER_MIN_PHASE, AL_FLANGER_MAX_PHASE,
+      AL_FLANGER_DEFAULT_PHASE },
+    { AL_FLANGER_RATE, P_FLOAT, RV(flanger_rate), AL_FLANGER_MIN_RATE, AL_FLANGER_MAX_RATE,
+      AL_FLANGER_DEFAULT_RATE },
+    { AL_FLANGER_DEPTH, P_FLOAT, RV(flanger_depth), AL_FLANGER_MIN_DEPTH, AL_FLANGER_MAX_DEPTH,
+      AL_FLANGER_DEFAULT_DEPTH },
+    { AL_FLANGER_FEEDBACK, P_FLOAT, RV(flanger_feedback), AL_FLANGER_MIN_FEEDBACK, AL_FLANGER_MAX_FEEDBACK,
+      AL_FLANGER_DEFAULT_FEEDBACK },
+    { AL_FLANGER_DELAY, P_FLOAT, RV(flanger_delay), AL_FLANGER_MIN_DELAY, AL_FLANGER_MAX_DELAY,
+      AL_FLANGER_DEFAULT_DELAY },
+};
+
 static const param_desc_t *find_param(ALenum type, ALenum param) {
     const param_desc_t *t = NULL;
     size_t i, n = 0;
@@ -120,6 +161,15 @@ static const param_desc_t *find_param(ALenum type, ALenum param) {
     } else if (type == AL_EFFECT_EAXREVERB) {
         t = s_eaxreverb_params;
         n = COUNT(s_eaxreverb_params);
+    } else if (type == AL_EFFECT_ECHO) {
+        t = s_echo_params;
+        n = COUNT(s_echo_params);
+    } else if (type == AL_EFFECT_CHORUS) {
+        t = s_chorus_params;
+        n = COUNT(s_chorus_params);
+    } else if (type == AL_EFFECT_FLANGER) {
+        t = s_flanger_params;
+        n = COUNT(s_flanger_params);
     }
     for (i = 0; i < n; i++) {
         if (t[i].param == param) return &t[i];
@@ -135,13 +185,12 @@ static ALint *int_field(al_efx_reverb_t *r, const param_desc_t *d) {
     return (ALint *)((char *)r + d->offset);
 }
 
-/* Every reverb field at its default (the EAX table covers the reverb's fields too) */
-static void reverb_defaults(al_efx_reverb_t *r) {
+/* Every field at its default (the EAX table covers the reverb's fields too) */
+static void table_defaults(al_efx_reverb_t *r, const param_desc_t *t, size_t n) {
     size_t i;
-    memset(r, 0, sizeof(*r));
-    for (i = 0; i < COUNT(s_eaxreverb_params); i++) {
-        const param_desc_t *d = &s_eaxreverb_params[i];
-        if (d->kind == P_BOOL) {
+    for (i = 0; i < n; i++) {
+        const param_desc_t *d = &t[i];
+        if (d->kind == P_BOOL || d->kind == P_INT) {
             *int_field(r, d) = (ALint)d->def;
         } else if (d->kind == P_VEC) {
             float_field(r, d)[0] = float_field(r, d)[1] = float_field(r, d)[2] = d->def;
@@ -149,6 +198,14 @@ static void reverb_defaults(al_efx_reverb_t *r) {
             *float_field(r, d) = d->def;
         }
     }
+}
+
+static void reverb_defaults(al_efx_reverb_t *r) {
+    memset(r, 0, sizeof(*r));
+    table_defaults(r, s_eaxreverb_params, COUNT(s_eaxreverb_params));
+    table_defaults(r, s_echo_params, COUNT(s_echo_params));
+    table_defaults(r, s_chorus_params, COUNT(s_chorus_params));
+    table_defaults(r, s_flanger_params, COUNT(s_flanger_params));
 }
 
 static bool in_range(ALfloat v, const param_desc_t *d) {
@@ -312,8 +369,135 @@ AL_API void AL_APIENTRY alXboxEffectProgram(ALuint effect, const ALuint *words, 
     e->props.program = p;
 }
 
+/* The library's own kernels for built-in effect types (SOFT_GAP_PLAN.md phase9-05) */
+static uint32_t s_builtin_params[AL_EFX_MAX_SLOTS][AL_EFX_GP_PARAMS];
+
+static uint32_t q23(float v) {
+    return apu_reverb_q23(v) & 0xFFFFFFu;
+}
+
+static uint32_t samples(float seconds) {
+    return (uint32_t)(seconds * 48000.0f + 0.5f);
+}
+
+/* AL_EFFECT_ECHO -> gp_kefx_echo's parameters: the two taps, feedback, the
+ * damping pole, the taps' left / right gains (SPREAD, constant power: -1 puts
+ * the first tap left and the second right) */
+static void echo_params(const al_efx_reverb_t *r, uint32_t *p) {
+    float s = r->echo_spread;
+    float a = sqrtf(0.5f * (1.0f - s)), b = sqrtf(0.5f * (1.0f + s));
+    memset(p, 0, AL_EFX_GP_PARAMS * sizeof(uint32_t));
+    p[0] = samples(r->echo_delay);
+    p[1] = samples(r->echo_delay + r->echo_lr_delay);
+    p[2] = q23(r->echo_feedback);
+    p[3] = q23(r->echo_damping);
+    p[4] = q23(a);   /* tap 1 left */
+    p[5] = q23(b);   /* tap 1 right */
+    p[6] = q23(b);   /* tap 2 left */
+    p[7] = q23(a);   /* tap 2 right */
+}
+
+/* AL_EFFECT_CHORUS / AL_EFFECT_FLANGER -> gp_kefx_chorus's parameters: the
+ * centre delay D and the LFO's swing DD = DEPTH x D (as fractions of 2048
+ * samples; D + DD is at most 1536, the chorus's 16 ms twice), feedback, the
+ * LFO step a sample (a cycle is 2.0), the right tap's phase offset, the waveform */
+static void chorus_params(ALint wave, ALint phase, float rate, float depth, float fb, float delay, uint32_t *p) {
+    float d = delay * 48000.0f;
+    memset(p, 0, AL_EFX_GP_PARAMS * sizeof(uint32_t));
+    p[0] = q23(d / 2048.0f);
+    p[1] = q23(depth * d / 2048.0f);
+    p[2] = q23(fb);
+    p[3] = q23(2.0f * rate / 48000.0f);
+    p[4] = q23((float)phase / 180.0f);
+    p[5] = (uint32_t)wave;
+}
+
+static void builtin_params(const al_efx_effect_props_t *e, uint32_t *p) {
+    const al_efx_reverb_t *r = &e->reverb;
+    if (e->type == AL_EFFECT_ECHO) {
+        echo_params(r, p);
+    } else if (e->type == AL_EFFECT_CHORUS) {
+        chorus_params(r->chorus_waveform, r->chorus_phase, r->chorus_rate, r->chorus_depth, r->chorus_feedback,
+                      r->chorus_delay, p);
+    } else {
+        chorus_params(r->flanger_waveform, r->flanger_phase, r->flanger_rate, r->flanger_depth, r->flanger_feedback,
+                      r->flanger_delay, p);
+    }
+}
+
+static bool builtin_kernel(ALenum type, apu_gp_kernel_t *k) {
+    static apu_gp_kernel_t echo, chorus;
+    static bool echo_ok, chorus_ok;
+    if (type == AL_EFFECT_ECHO) {
+        if (!echo_ok) {
+            echo_ok = apu_gp_kernel_parse(gp_kefx_echo_image, GP_KEFX_ECHO_IMAGE_WORDS, &echo) == 0;
+        }
+        if (echo_ok && k) *k = echo;
+        return echo_ok;
+    }
+    if (type == AL_EFFECT_CHORUS || type == AL_EFFECT_FLANGER) {
+        if (!chorus_ok) {
+            chorus_ok = apu_gp_kernel_parse(gp_kefx_chorus_image, GP_KEFX_CHORUS_IMAGE_WORDS, &chorus) == 0;
+        }
+        if (chorus_ok && k) *k = chorus;
+        return chorus_ok;
+    }
+    return false;
+}
+
+static bool is_builtin_kernel(ALenum type) {
+    return type == AL_EFFECT_ECHO || type == AL_EFFECT_CHORUS || type == AL_EFFECT_FLANGER;
+}
+
+bool al_efx_slot_is_kernel(const al_efx_slot_t *slot) {
+    return slot && (slot->props.type == AL_EFFECT_XBOX_GP_PROGRAM || is_builtin_kernel(slot->props.type));
+}
+
+/* The GP kernel an effect needs in a slot (the reverb's for the reverbs), false for none */
+static bool props_kernel(const al_efx_effect_props_t *e, apu_gp_kernel_t *k) {
+    if (e->type == AL_EFFECT_REVERB || e->type == AL_EFFECT_EAXREVERB) {
+        const apu_gp_kernel_t *r = apu_gp_reverb_kernel();
+        if (r) *k = *r;
+        return r != NULL;
+    }
+    if (is_builtin_kernel(e->type)) {
+        return builtin_kernel(e->type, k);
+    }
+    if (e->type == AL_EFFECT_XBOX_GP_PROGRAM && e->program) {
+        *k = e->program->kernel;
+        return true;
+    }
+    return false;
+}
+
+/* Do the slots' kernels fit the GP together with `e` in slot `id` (EFX_PLAN.md 3.1: the shared budgets)? */
+static bool effects_fit(ALuint id, const al_efx_effect_props_t *e) {
+    apu_gp_kernel_t k[AL_EFX_MAX_SLOTS];
+    const apu_gp_kernel_t *set[APU_GP_SLOTS] = { NULL, NULL, NULL, NULL };
+    uint32_t i;
+    for (i = 0; i < AL_EFX_MAX_SLOTS && i < APU_GP_SLOTS; i++) {
+        const al_efx_effect_props_t *p = (i + 1u == id) ? e : (s_slots[i].in_use ? &s_slots[i].props : NULL);
+        if (p && props_kernel(p, &k[i])) {
+            set[i] = &k[i];
+        }
+    }
+    return apu_gp_kernels_fit(set);
+}
+
 bool al_efx_slot_kernel(const al_efx_slot_t *slot, apu_gp_kernel_t *k, const uint32_t **params) {
-    if (!slot || slot->props.type != AL_EFFECT_XBOX_GP_PROGRAM || !slot->props.program) {
+    if (!slot) {
+        return false;
+    }
+    if (is_builtin_kernel(slot->props.type)) {
+        uint32_t *p = s_builtin_params[slot - s_slots];
+        if (!builtin_kernel(slot->props.type, k)) {
+            return false;
+        }
+        builtin_params(&slot->props, p);
+        if (params) *params = p;
+        return true;
+    }
+    if (slot->props.type != AL_EFFECT_XBOX_GP_PROGRAM || !slot->props.program) {
         return false;
     }
     if (k) *k = slot->props.program->kernel;
@@ -367,7 +551,7 @@ AL_API void AL_APIENTRY alEffecti(ALuint effect, ALenum param, ALint value) {
     }
     if (param == AL_EFFECT_TYPE) {
         if (value != AL_EFFECT_NULL && value != AL_EFFECT_REVERB && value != AL_EFFECT_EAXREVERB &&
-            value != AL_EFFECT_XBOX_GP_PROGRAM) {
+            !is_builtin_kernel(value) && value != AL_EFFECT_XBOX_GP_PROGRAM) {
             alSetError(AL_INVALID_VALUE);
             return;
         }
@@ -386,11 +570,11 @@ AL_API void AL_APIENTRY alEffecti(ALuint effect, ALenum param, ALint value) {
         }
     }
     d = find_param(e->props.type, param);
-    if (!d || d->kind != P_BOOL) {
+    if (!d || (d->kind != P_BOOL && d->kind != P_INT)) {
         alSetError(AL_INVALID_ENUM);
         return;
     }
-    if (value != AL_FALSE && value != AL_TRUE) {
+    if ((ALfloat)value < d->min || (ALfloat)value > d->max) {
         alSetError(AL_INVALID_VALUE);
         return;
     }
@@ -481,7 +665,7 @@ AL_API void AL_APIENTRY alGetEffecti(ALuint effect, ALenum param, ALint *value) 
         }
     }
     d = find_param(e->props.type, param);
-    if (!d || d->kind != P_BOOL) {
+    if (!d || (d->kind != P_BOOL && d->kind != P_INT)) {
         alSetError(AL_INVALID_ENUM);
         return;
     }
@@ -745,7 +929,6 @@ AL_API void AL_APIENTRY alAuxiliaryEffectSloti(ALuint slot, ALenum param, ALint 
     switch (param) {
         case AL_EFFECTSLOT_EFFECT: {
             const effect_t *e = NULL;
-            ALuint active;
             if (value != 0) {
                 e = get_effect((ALuint)value);
                 if (!e) {
@@ -753,10 +936,9 @@ AL_API void AL_APIENTRY alAuxiliaryEffectSloti(ALuint slot, ALenum param, ALint 
                     return;
                 }
             }
-            /* One effect per device: the GP runs one program (EFX_PLAN 3.1) */
-            active = al_efx_active_slot();
-            if (e && e->props.type != AL_EFFECT_NULL &&
-                ((active != 0u && active != slot) || alIsEnabled(AL_XBOX_REVERB))) {
+            /* Every slot runs its own kernel; refused only when the GP's budgets are full (P, X, Y,
+             * scratch, descriptors), or while AL_XBOX_REVERB owns the GP (EFX_PLAN 3.1) */
+            if (e && e->props.type != AL_EFFECT_NULL && (alIsEnabled(AL_XBOX_REVERB) || !effects_fit(slot, &e->props))) {
                 alSetError(AL_INVALID_OPERATION);
                 return;
             }
@@ -807,7 +989,7 @@ AL_API void AL_APIENTRY alAuxiliaryEffectSlotf(ALuint slot, ALenum param, ALfloa
         return;
     }
     s->gain = value;
-    if (al_efx_active_slot() == slot) {
+    if (s->props.type != AL_EFFECT_NULL) {
         al_source_effects_changed();
     }
 }
@@ -1152,8 +1334,8 @@ void al_efx_timed_service(void) {
         props_assign(&slot->props, &t->props);
         slot->effect = t->effect;
         timed_remove(0);
-        if (al_efx_active_slot() == (ALuint)(slot - s_slots) + 1u) {
-            al_source_gp_params_at(frame);
+        if (slot->props.type != AL_EFFECT_NULL) {
+            al_source_gp_params_at((ALuint)(slot - s_slots) + 1u, frame);
         }
     }
 }
@@ -1173,8 +1355,8 @@ AL_API void AL_APIENTRY alXboxEffectSlotAtSample(ALuint slot, ALuint effect, ALu
         alSetError(alIsSource(source) ? AL_INVALID_OPERATION : AL_INVALID_NAME);
         return;
     }
-    /* Parameters for the kernel the active slot runs, and room in the queue */
-    if (al_efx_active_slot() != slot || !same_kernel(&s->props, &e->props) || s_timed_n == TIMED_MAX) {
+    /* Parameters for the kernel this slot runs, and room in the queue */
+    if (!same_kernel(&s->props, &e->props) || s_timed_n == TIMED_MAX) {
         alSetError(AL_INVALID_OPERATION);
         return;
     }
