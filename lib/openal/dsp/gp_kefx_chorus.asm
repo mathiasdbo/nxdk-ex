@@ -1,7 +1,7 @@
 ; AL_EFFECT_CHORUS and AL_EFFECT_FLANGER on the GP (lib/openal/docs/SOFT_GAP_PLAN.md
 ; phase9-06). Our own code, from the EFX chorus and flanger parameter
-; descriptions; runs inside dsp/gp_loop.asm as a library kernel, loaded like a
-; custom kernel. The two effects differ only in their parameter ranges.
+; descriptions; runs inside dsp/gp_loop.asm as a library kernel (ABI 2,
+; relocatable), loaded like a custom kernel. The two effects differ only in their parameter ranges.
 ;
 ; The slot's two bins summed are the input m (each send arrives half on each).
 ; One line in Y RAM, written and read every sample, two modulated taps:
@@ -14,42 +14,47 @@
 ;   0  D / 2048, 1  DD / 2048 (delays in samples, D + DD <= 1536)
 ;   2  feedback, 3  LFO step a sample (one cycle = 2.0), 4  PHASE / 180,
 ;   5  waveform (0 sine, 1 triangle), all Q23
-; The line takes all of Y RAM (2048 words); no scratch, no DMA.
+; The line takes all of Y RAM (2048 words, from KY); no scratch, no DMA.
 
 K_SCRATCH_BYTES equ 0           ; image header: scratch the kernel needs
 K_DESCRIPTORS   equ 0           ; image header: descriptors a frame (both chains)
+K_XWORDS        equ $30         ; image header: the X block, ABI words included
+K_YWORDS        equ 2048        ; image header: the line
 
-KIN     equ     $E0             ; ABI (gp_loop.asm)
-KPARAM  equ     $E8
+KIN     equ     KX              ; ABI (docs/GP_KERNELS.md)
+KPARAM  equ     KX+8
 OUTL    equ     $20
 OUTR    equ     $40
 
 LINE    equ     2048            ; samples in the line (Y RAM)
 SIN_K   equ     $1CCCCD         ; 0.225: the parabola's refinement
 
-INIT    equ     $108            ; 1 once the line is cleared
-WPTR    equ     $109            ; the line's write index
-PH      equ     $10A            ; the LFO phase, -1 .. 1 (wraps)
-MIN     equ     $10B            ; this sample's input
-TV      equ     $10C            ; tap: its value
-TL      equ     $10D            ; the left tap's value
-SCNT    equ     $10E            ; samples left in the frame
+INIT    equ     KX+$28          ; 1 once the line is cleared
+WPTR    equ     KX+$29          ; the line's write index (Y:KY + WPTR)
+PH      equ     KX+$2A          ; the LFO phase, -1 .. 1 (wraps)
+MIN     equ     KX+$2B          ; this sample's input
+TV      equ     KX+$2C          ; tap: its value
+TL      equ     KX+$2D          ; the left tap's value
+SCNT    equ     KX+$2E          ; samples left in the frame
 
-        org     p:$100
+        org     p:0
 kernel  move    x:INIT,a
         tst     a
         jne     ready
 
 ; first call: the line starts from silence (Y RAM keeps what was there)
         clr     a
-        move    #0,r0
+        move    #KY,r0
         do      #LINE,clr_end
         move    a,y:(r0)+
 clr_end
         move    #1,x0
         move    x0,x:INIT
 
-ready   move    x:KIN,r4                ; left bin
+ready   move    #KY,n6                  ; line indices are from KY: (rn+nn) addressing
+        move    #KY,n0
+        move    #KY,n1
+        move    x:KIN,r4                ; left bin
         move    x:KIN,a
         add     #32,a
         move    a1,r5                   ; right bin
@@ -63,7 +68,7 @@ sloop   move    x:(r4)+,a
         add     x0,a                    ; m
         move    a,x:MIN
         move    x:WPTR,r6
-        move    a,y:(r6)                ; line[t] = m (a delay under one sample reads it)
+        move    a,y:(r6+n6)             ; line[t] = m (a delay under one sample reads it)
 
         move    x:PH,a                  ; the LFO: phase += step, wrapping at 1
         move    x:KPARAM+3,x0
@@ -95,7 +100,7 @@ sloop   move    x:(r4)+,a
         move    x:MIN,a
         move    x:KPARAM+2,y0
         mac     x0,y0,a
-        move    a,y:(r6)
+        move    a,y:(r6+n6)
 
         move    x:WPTR,a                ; t + 1 (mod LINE)
         move    #1,x0
@@ -170,8 +175,8 @@ a_ok    move    a1,r0
         move    #LINE,x0
         add     x0,a
 b_ok    move    a1,r1
-        move    y:(r0),x0
-        move    y:(r1),a
+        move    y:(r0+n0),x0
+        move    y:(r1+n1),a
         sub     x0,a                    ; s1 - s0
         move    a,x1
         tfr     x0,a

@@ -2,7 +2,7 @@
  * AL_XBOX_gp_program (task phase8-04, lib/openal/docs/EFX_PLAN.md 3.6): the
  * effect type, alXboxEffectProgram's checks and copy, AL_XBOX_GP_PARAM0 + n
  * as integers and Q23 fractions, the slot's copy of image and parameters,
- * and the one-effect rule. Null backend: the load into the GP is
+ * and a kernel beside another effect (phase9-04). Null backend: the load into the GP is
  * tests/test_apu_gp.c [8], the kernel's arithmetic tests/test_gp_programs.py [5].
  */
 #include <assert.h>
@@ -103,8 +103,9 @@ static void test_slot(ALuint e) {
     assert(al_efx_active_slot() == slot);
     assert(al_source_debug_gp_kernel(&k, &params));
     assert(k.words == GP_KECHO_WORDS && k.scratch_bytes == GP_KECHO_K_SCRATCH_BYTES);
-    assert(memcmp(k.code, gp_kecho_image + 4, GP_KECHO_WORDS * sizeof(uint32_t)) == 0);
-    assert(k.code != gp_kecho_image + 4);                   /* the library's copy */
+    assert(k.abi == 2u && k.reloc_count == gp_kecho_image[6]);   /* relocatable */
+    assert(memcmp(k.code, gp_kecho_image + 7 + k.reloc_count, GP_KECHO_WORDS * sizeof(uint32_t)) == 0);
+    assert(k.code != gp_kecho_image + 7 + k.reloc_count);   /* the library's copy */
     assert(params[0] == 100u && params[2] == 0x400000u && params[3] == 0xFFFFFBu);
 
     /* AL_EFFECTSLOT_GAIN scales the sends into a custom kernel (it has no word for it), live */
@@ -164,7 +165,7 @@ static void test_slot(ALuint e) {
     alAuxiliaryEffectSloti(slot, AL_EFFECTSLOT_EFFECT, (ALint)e);
     assert(al_source_debug_gp_kernel(&k, &params) && params[0] == 200u);
 
-    /* one effect per device */
+    /* AL_XBOX_REVERB is still the mix's alone; an EFX reverb runs beside the kernel in its own slot */
     alEnable(AL_XBOX_REVERB);
     assert(alGetError() == AL_INVALID_OPERATION);
     alGenEffects(1, &e2);
@@ -173,8 +174,11 @@ static void test_slot(ALuint e) {
         ALuint slot2 = 0;
         alGenAuxiliaryEffectSlots(1, &slot2);
         alAuxiliaryEffectSloti(slot2, AL_EFFECTSLOT_EFFECT, (ALint)e2);
-        assert(alGetError() == AL_INVALID_OPERATION);
+        assert(alGetError() == AL_NO_ERROR);
+        assert(al_source_debug_gp_slot(slot - 1u, NULL, NULL, NULL) == AL_GP_KERNEL);
+        assert(al_source_debug_gp_slot(slot2 - 1u, NULL, NULL, NULL) == AL_GP_REVERB);
         alDeleteAuxiliaryEffectSlots(1, &slot2);
+        assert(alGetError() == AL_NO_ERROR);
     }
 
     /* deleting the effect leaves the slot's copy running */

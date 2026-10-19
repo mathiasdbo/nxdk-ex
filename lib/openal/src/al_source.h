@@ -255,12 +255,18 @@ bool al_reverb_active(void);
  * re-apply it and update every voice's sends. */
 void al_source_effects_changed(void);
 
-/** Tests: the custom kernel the GP should run (an active AL_EFFECT_XBOX_GP_PROGRAM slot with an image). */
+/** Tests: what GP slot `slot` should run (AL_GP_NONE, AL_GP_REVERB with `p`, AL_GP_KERNEL with `k` and `params`). */
+enum { AL_GP_NONE, AL_GP_REVERB, AL_GP_KERNEL };
+int al_source_debug_gp_slot(uint32_t slot, apu_reverb_params_t *p, apu_gp_kernel_t *k, const uint32_t **params);
+
+/** Tests: the first slot's custom kernel (an AL_EFFECT_XBOX_GP_PROGRAM slot with an image, or a built-in kernel effect). */
 bool al_source_debug_gp_kernel(apu_gp_kernel_t *k, const uint32_t **params);
 
-/** Host tests: the GP effect's parameters (false: none runs), and a source's send gains as they would reach its voice. */
+/** Host tests: the first reverb's parameters (false: none runs), and a source's send gains (and their GP slots,
+ * 0xFF unused) as they would reach its voice. */
 bool al_source_debug_gp_effect(apu_reverb_params_t *p);
 bool al_source_debug_sends(ALuint source, float out[APU_VOICE_SENDS]);
+bool al_source_debug_send_route(ALuint source, float out[APU_VOICE_SENDS], uint8_t gp_slot[APU_VOICE_SENDS]);
 
 #ifdef __cplusplus
 }

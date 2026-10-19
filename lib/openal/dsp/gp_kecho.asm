@@ -1,6 +1,7 @@
 ; Example custom GP kernel: a stereo echo (lib/openal/docs/EFX_PLAN.md 3.6).
-; Our own code; runs inside dsp/gp_loop.asm (kernel ABI there), loaded with
-; alXboxEffectProgram() from the image tools/dsp56asm.py --image makes.
+; Our own code; runs inside dsp/gp_loop.asm (kernel ABI 2, docs/GP_KERNELS.md),
+; loaded with alXboxEffectProgram() from the relocatable image
+; tools/dsp56asm.py --image makes.
 ;
 ; Per ear: delayed = line[t - DELAY]; OUT += WET * delayed;
 ;          line[t] = in + FEEDBACK * delayed
@@ -16,13 +17,14 @@
 
 K_SCRATCH_BYTES equ $20000      ; image header: scratch the kernel needs
 K_DESCRIPTORS   equ 4           ; image header: descriptors a frame (both chains)
+K_XWORDS        equ $E0         ; image header: X words from KX, the ABI's $28 included
+K_YWORDS        equ 0           ; image header: Y words from KY
 
-KIN     equ     $E0             ; ABI (gp_loop.asm)
-KSCR    equ     $E1
-KPARAM  equ     $E8
-K_RHEAD equ     $19
-K_WHEAD equ     $1A
-FIFO2   equ     $08
+KIN     equ     KX              ; ABI: the slot's X block starts at KX (relocated)
+KSCR    equ     KX+1
+K_RHEAD equ     KX+3
+K_WHEAD equ     KX+4
+KPARAM  equ     KX+8
 OUTL    equ     $20
 OUTR    equ     $40
 
@@ -30,33 +32,32 @@ LINE    equ     $10000          ; bytes per line
 MAXDLY  equ     16384           ; samples
 MINDLY  equ     32
 
-INIT    equ     $108            ; 1 once the descriptors are set up
-RDL     equ     $110            ; read descriptors (left, right), 7 words each
-RDR     equ     $118
-WRL     equ     $120            ; write descriptors
-WRR     equ     $128
-DLYL    equ     $140            ; the delayed block, per ear
-DLYR    equ     $160
-WBL     equ     $180            ; the block written back, per ear
-WBR     equ     $1A0
+INIT    equ     KX+$28          ; 1 once the descriptors are set up
+RDL     equ     KX+$30          ; read descriptors (left, right), 7 words each
+RDR     equ     KX+$38
+WRL     equ     KX+$40          ; write descriptors
+WRR     equ     KX+$48
+DLYL    equ     KX+$60          ; the delayed block, per ear
+DLYR    equ     KX+$80
+WBL     equ     KX+$A0          ; the block written back, per ear
+WBR     equ     KX+$C0
 
 EOL     equ     $004000
 CTL_R   equ     $0049D0         ; memory -> DSP, write-back, circular scratch, 24-bit, step 1
 CTL_W   equ     $0049D2         ; DSP -> memory, the same
 
-        org     p:$100
+        org     p:0
 kernel  move    x:INIT,a
         tst     a
         jne     ready
 
-; first call: descriptors and chain heads (read L -> R; write L -> R -> FIFO2)
+; first call: descriptors and chain heads (read L -> R; write L -> R; both end at EOL)
         move    #RDR,x0
         move    x0,x:RDL
-        move    #EOL,x0
-        move    x0,x:RDR
         move    #WRR,x0
         move    x0,x:WRL
-        move    #FIFO2,x0
+        move    #EOL,x0
+        move    x0,x:RDR
         move    x0,x:WRR
         move    #CTL_R,x0
         move    x0,x:RDL+1
