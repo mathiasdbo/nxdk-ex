@@ -138,6 +138,7 @@ on a console (64 on xemu). The others wait in virtual standby, or stop if `AL_XB
 | `AL_XBOX_PRIORITY` | `alSourcef` | ≥ 0, or −1 (default) | your priority for voice allocation and stealing; −1 uses the library's score from gain and distance |
 | `AL_XBOX_VIRTUALIZE` | `alSourcei` | `AL_TRUE` (default) / `AL_FALSE` | without a voice: wait in standby, or stop (`AL_STOPPED`) so you can mix it yourself |
 | `AL_XBOX_HAS_VOICE` | `alGetSourcei` | `AL_TRUE` / `AL_FALSE` | whether the source holds a hardware voice now |
+| `AL_XBOX_SEND_PANNED` | `alSourcei` / get | `AL_TRUE` / `AL_FALSE` (default) | in direct mode, the sends into a custom GP kernel follow the direct gains: left input = send × left, right input = send × right (mono: the sample on both; stereo: each channel on its own); the direct path's gain and filter do not touch them, so a source muted by a lowpass at gain 0 is heard only through the kernel (ENGINE_INTEGRATION 3.13) |
 | `AL_XBOX_REVERB_SEND` | `alSourcef` | 0..1, default 0 | how much goes to the `AL_XBOX_reverb` room (7.1) |
 
 ### 5.2 EFX source attributes (`AL/efx.h`)
