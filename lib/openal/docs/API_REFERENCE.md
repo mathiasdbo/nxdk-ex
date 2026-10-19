@@ -39,7 +39,7 @@ As in OpenAL 1.1: `alGetError()` returns the first error since the last call and
 | `AL_INVALID_NAME` | a buffer, source, effect, filter or slot that does not exist |
 | `AL_INVALID_ENUM` | a parameter the object does not have |
 | `AL_INVALID_VALUE` | a value out of range, a NULL pointer, an unsupported effect or filter type, a bad GP image |
-| `AL_INVALID_OPERATION` | no current context; deleting something in use; a second effect while one runs |
+| `AL_INVALID_OPERATION` | no current context; deleting something in use; an effect that does not fit the GP beside the other slots' |
 | `AL_OUT_OF_MEMORY` | no free objects, or memory for buffer data |
 
 ## 3. Devices and contexts (ALC)
@@ -220,8 +220,9 @@ Up to 256 filters. Sources hold copies, so attach the filter again after changin
 | `AL_EFFECTSLOT_AUXILIARY_SEND_AUTO` | `AL_TRUE` (default) / `AL_FALSE` | the reverb's own room rolloff added to the sends |
 
 **Limits:**
-- There are 4 slots, and the GP runs one effect at a time. Attaching an effect to a second slot while one runs
-  gives `AL_INVALID_OPERATION`. `AL_XBOX_REVERB` counts as that effect too.
+- There are 4 slots, each running its own GP kernel (slot s reads bins 2+2(s-1) / 3+2(s-1)). Attaching an effect
+  gives `AL_INVALID_OPERATION` when it does not fit beside the other slots' (P, X, Y, scratch, 60 descriptors:
+  a reverb, an echo and a chorus fit; two reverbs or two choruses do not), or while `AL_XBOX_REVERB` is on.
 - Empty slots are legal and silent.
 - Deleting a slot a source sends to gives `AL_INVALID_OPERATION`.
 

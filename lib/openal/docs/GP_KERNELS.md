@@ -1,13 +1,15 @@
 # Writing a GP kernel (AL_XBOX_gp_program)
 
-A GP kernel is your own DSP56300 code that the APU's GP DSP runs on the effect send of every source, every
+A GP kernel is your own DSP56300 code that the APU's GP DSP runs on the effect sends to one effect slot, every
 0.67 ms, as an `ALC_EXT_EFX` effect. It costs no CPU time. The library owns the frame, the output and the
-parameter delivery; the kernel only processes one 32-sample block per call.
+parameter delivery; the kernel only processes one 32-sample block per call. Each of the 4 slots runs its own
+kernel, so yours runs beside the library's reverb, echo or chorus.
 
-**Status:** host-tested (assembler, simulator, loader) and run on a console by `samples/openal_efx`
-(2026-10-18). The echo landed exactly on its delay on both ears, a parameter change reached the kernel in one
-frame, every load went through the P window without a GP restart, and 5 minutes of switching effects gave
-0 underruns. The ABI is version 1 (`AL_XBOX_GP_IMAGE_ABI`).
+**Status:** ABI 1 (one kernel at fixed addresses) ran on a console in `samples/openal_efx` (2026-10-18): the
+echo landed exactly on its delay on both ears, a parameter change reached the kernel in one frame, every load
+went through the P window without a GP restart, and 5 minutes of switching effects gave 0 underruns. **ABI 2**
+(relocatable, one kernel per slot, phase9-04) is host-tested (assembler, simulator, loader); its console run is
+phase9-08. The current ABI is 2 (`AL_XBOX_GP_IMAGE_ABI`); ABI 1 images still load, and run only alone.
 
 The example used throughout is `dsp/gp_kecho.asm`, a stereo echo (154 words).
 
@@ -33,7 +35,8 @@ alSource3i(src, AL_AUXILIARY_SEND_FILTER, (ALint)slot, 0, AL_FILTER_NULL);
   `AL_EFFECT_XBOX_GP_PROGRAM` (`AL_INVALID_OPERATION` otherwise). The library checks the image and keeps its own
   copy, so the game's array can be freed afterwards. `count` 0 clears the program. `flags` must be 0.
   - A bad image gives `AL_INVALID_VALUE`: wrong magic or ABI, code outside 1..0x700 words, a word above 24
-    bits, more than 60 descriptors, or more scratch than the device has (about 180 KiB).
+    bits, more than 60 descriptors, more scratch than the device has (about 500 KiB), an X block outside
+    $28..$B20 words, more than 2048 Y words, or a reloc outside the code.
   - Setting `AL_EFFECT_TYPE` again drops the image and resets the parameters to 0.
 - **Parameters** `AL_XBOX_GP_PARAM0 + n`, n < `AL_XBOX_GP_PARAMS` (32): 24-bit words the kernel reads at
   `X:KPARAM + n`.
@@ -42,15 +45,18 @@ alSource3i(src, AL_AUXILIARY_SEND_FILTER, (ALint)slot, 0, AL_FILTER_NULL);
   - Out of range: `AL_INVALID_VALUE`, and the old value stays.
 - **Changes take effect on attach**, as with every EFX effect: the slot holds a copy. After changing parameters,
   call `alAuxiliaryEffectSloti(slot, AL_EFFECTSLOT_EFFECT, fx)` again. With the same image only the changed
-  words are sent, all together, at the start of one frame. A different image reloads the kernel (section 5).
+  words are sent, all together, at the start of one frame. A different image reloads the kernel (section 7).
 - **Deleting the effect** leaves the slot's copy running, as EFX specifies.
-- **One effect per device:** the GP runs one program. While a slot holds a kernel, attaching an effect to
-  another slot, or `alEnable(AL_XBOX_REVERB)`, gives `AL_INVALID_OPERATION`. Attaching a reverb to the same slot
-  replaces the kernel and puts the reverb's code back.
+- **One kernel per slot, shared budgets.** Every slot (up to 4) runs its own kernel, in slot order, beside the
+  others. The GP's memory and DMA are shared: P:$100..$7FF (0x700 words), X:$E0..$BFF ($B20 words), Y (2048
+  words), scratch (about 500 KiB) and 60 descriptors a frame, summed over the slots. Attaching an effect that
+  does not fit beside the other slots' gives `AL_INVALID_OPERATION` (and nothing changes); so does attaching
+  any while `AL_XBOX_REVERB` is on, or an ABI 1 kernel beside anything. For scale: the reverb takes 101 P,
+  $8C0 X, 180 KiB, 50 descriptors; the echo 169 P, $C0 X, 128 KiB, 3; the chorus 177 P, $30 X, all of Y.
 - **`AL_EFFECTSLOT_GAIN`** scales the sends into the kernel (the kernel has no word for it), live. For a
   linear kernel such as the echo that is the same as scaling its output; a kernel that is not linear (a
   compressor, a distortion) sees a quieter input, so give it its own output-gain parameter if it needs one.
-- **Load:** `alXboxGetHardwareStatus(AL_XBOX_GP_LOAD, &v)` is the share of the last frame the effect took, in
+- **Load:** `alXboxGetHardwareStatus(AL_XBOX_GP_LOAD, &v)` is the share of the last frame the effects took, in
   percent; `AL_XBOX_GP_LOAD_PEAK` the highest since the previous peak query. 100 means frames are late and the
   dry mix stutters. Console only: 0 elsewhere (section 7).
 
@@ -59,40 +65,43 @@ alSource3i(src, AL_AUXILIARY_SEND_FILTER, (ALint)slot, 0, AL_FILTER_NULL);
 Each frame is 32 samples at 48 kHz. The library's loop (`dsp/gp_loop.asm`) does, in order:
 
 1. wait for the APU's frame start (counting how long it waits: the load meter);
-2. apply the mailbox: parameter changes, written into `X:KPARAM + n` before your kernel runs;
-3. run your **read chain** (`X:K_RHEAD`, 0 for none) and wait for it: DMA from your scratch into X;
+2. apply the mailbox: parameter changes, written into `X:KPARAM + n` before the kernels run;
+3. run each running slot's **read chain** (`X:K_RHEAD`, 0 for none) and wait for it: DMA from scratch into X;
 4. copy the dry mix (bins 0/1) into OUT L / OUT R;
-5. `jsr $100`: **your kernel**;
-6. the output lowpass (off for custom kernels);
-7. run your **write chain** (`X:K_WHEAD`), which must end at the mix descriptor `FIFO2` ($08): DMA from X to
-   your scratch, then OUT L/R to the output.
+5. call each running slot's kernel in slot order (`jsr` to the slot's trampoline, a `jmp` to your entry);
+6. the output lowpass (only while the reverb runs);
+7. run each running slot's **write chain** (`X:K_WHEAD`, 0 for none, ending at end of list `$004000`) and
+   wait for it: DMA from X to scratch; then the mix descriptor sends OUT L/R to the output.
 
-Because the reads run before the kernel and the writes after it, data the kernel writes to scratch in frame n
+Because the reads run before the kernels and the writes after them, data a kernel writes to scratch in frame n
 can be read back at the earliest in frame n+1.
 
 ## 3. Memory and the ABI words
 
+The library places each kernel where its P, X, Y and scratch fit (first fit, section 7): the image is
+assembled at 0 and relocated (section 6). `KX` is the slot's X block, `KY` its Y range, `KSCR` its scratch.
+
 | Where | What | Who sets it |
 |---|---|---|
-| P:$100..$7FF | your code; entry at $100, return with `rts` | the library, from the image |
-| X:KIN ($E0) | X address of the input's left block ($1440, bins 2/3); the right block is 32 words on | library |
-| X:KSCR ($E1) | byte offset of your scratch ($2000) | library |
-| X:KSCRN ($E2) | the scratch size you declared, in bytes | library |
-| X:KPARAM ($E8..$107) | the 32 parameters | library, then the mailbox |
-| X:KOWN ($108..$BFF) | your own X memory (descriptors, buffers, state) | you |
-| X:K_RHEAD ($19) | first read descriptor, 0 for none | you (the library writes 0) |
-| X:K_WHEAD ($1A) | first write descriptor; the chain ends at FIFO2 | you (the library writes FIFO2) |
-| X:OUTL ($20) / OUTR ($40) | 32 words each: the dry mix; add your output to them | loop |
-| all of Y | yours; **not initialised** | you |
+| P (your words, anywhere in $100..$7FF) | your code; entry at its first word, return with `rts` | the library, from the image |
+| X:KX+0, KIN | X address of the input's left block (slot k: bins 2+2k, the right block 32 words on) | library |
+| X:KX+1, KSCR | byte offset of your scratch | library |
+| X:KX+2, KSCRN | the scratch size you declared, in bytes | library |
+| X:KX+3, K_RHEAD | first read descriptor, 0 for none | you (the library writes 0) |
+| X:KX+4, K_WHEAD | first write descriptor, 0 for none; the chain ends at `$004000` | you (the library writes 0) |
+| X:KX+8..KX+$27, KPARAM | the 32 parameters | library, then the mailbox |
+| X:KX+$28..KX+K_XWORDS-1 | your own X memory (descriptors, buffers, state) | you |
+| X:OUTL ($20) / OUTR ($40) | 32 words each: the dry mix and the earlier slots' output; add yours | loop |
+| Y:KY..KY+K_YWORDS-1 | yours; **not initialised** | you |
 | scratch from KSCR | your delay lines and tables (system RAM through DMA), zeroed | library |
 
-Before the first frame, the library zeroes X:$E0..$BFF and the declared scratch, then writes the ABI words.
+Before the first frame, the library zeroes your X block and declared scratch, then writes the ABI words.
 Anything else you need (descriptors, chain heads, tables, Y) you set up yourself. The usual pattern is a flag
 in your X that is 0 on the first call:
 
 ```asm
-INIT    equ     $108
-        org     p:$100
+INIT    equ     KX+$28
+        org     p:0
 kernel  move    x:INIT,a
         tst     a
         jne     ready
@@ -106,20 +115,22 @@ ready   ...                     ; the per-frame work
 **Rules:**
 - Use any register; the loop keeps nothing in them across the call. `jsr` and `do` nest on the DSP's
   hardware stack, and the loop's call takes one level of it.
-- Do not write X below $E0 except K_RHEAD and K_WHEAD, nor OUT L/R beyond their 32 words.
+- Write X only in your block, OUT L/R (32 words each) and your descriptors' targets; Y only in your range.
 - Read the parameters every frame (or compare them with a copy). A change arrives between two calls with no
   other notice, and all the words of one change arrive in the same frame.
 
 ## 4. Input, output and levels
 
 - **Samples** are 24-bit fractions (Q23) in the low 24 bits of each word.
-- **Input:** every EFX send of every source mixes into bins 2/3, whatever slot it names (with one effect per
-  device, sends to other slots are muted). Each voice output carries half the send's gain: a mono source
-  feeds both bins at half, so L + R is the send; a stereo source puts its left channel on bin 2 and its right
-  on bin 3. A mono-input effect reads `L + R`; a stereo one reads the pair.
-- **Output:** add to OUT L / OUT R, which already hold the dry mix. The mix descriptor sends the top 16 bits
-  of each 24-bit word to the codec. Adding in an accumulator and moving the result back to X saturates at full
-  scale, so a loud scene clips: keep headroom in the wet gain.
+- **Input:** the EFX sends to your slot. Send n of a source to slot s leaves on voice outputs 4+2n / 5+2n and
+  mixes into GP slot k = s - 1's bins, 2+2k / 3+2k (`KIN`). Each voice output carries half the send's gain: a
+  mono source feeds both bins at half, so L + R is the send; a stereo source puts its left channel on the even
+  bin and its right on the odd one (into an `AL_EFFECT_XBOX_GP_PROGRAM` slot at the whole send gain, so a send
+  of 1 is exact). A mono-input effect reads `L + R`; a stereo one reads the pair. When a playing source's send
+  moves to another slot, the library mutes it, waits two frames for the VP's volume ramp, then moves the bins.
+- **Output:** add to OUT L / OUT R, which already hold the dry mix and the earlier slots' output. The mix
+  descriptor sends the top 16 bits of each 24-bit word to the codec. Adding in an accumulator and moving the
+  result back to X saturates at full scale, so a loud scene clips: keep headroom in the wet gain.
 
 ## 5. DMA and scratch
 
@@ -141,24 +152,32 @@ scratch, `$F` linear scratch), 12:10 format (2: 24-bit), 23:14 channel stride. T
 memory to X, write-back, circular, 24-bit, stride 1) and `$0049D2` (the same, X to memory). A 24-bit sample
 takes 4 bytes of scratch. Memory to X works only for non-interleaved scratch transfers.
 
-- **Budget:** at most 60 descriptors a frame across both chains (declare them in `K_DESCRIPTORS`); the
-  library's own copy and mix descriptors are extra. The reverb uses 50.
+- **Budget:** at most 60 descriptors a frame across both chains of every slot (declare yours in
+  `K_DESCRIPTORS`); the library's own copy and mix descriptors are extra. The reverb uses 50.
 - **Moving a read position.** With write-back on, the engine moves each offset by the transfer size every
   frame. To change a delay, set the read descriptor's offset (word 4) yourself. The echo sets it every frame
   from the write descriptor's offset:
   `read = write + 128 - 4 * DELAY (mod line size)`. The 128 skips the block being written this frame, so a
   new delay applies from the next frame.
-- **Scratch layout** is yours: `KSCR` is where it starts, `KSCRN` its size. The echo keeps two 64 KiB lines,
-  left at `KSCR`, right at `KSCR + $10000`.
+- **Scratch layout** is yours: `KSCR` is where it starts (4 KiB aligned), `KSCRN` its size. The echo keeps two
+  64 KiB lines, left at `KSCR`, right at `KSCR + $10000`.
 
 ## 6. Building the image
 
-Two equates at the top of the source declare what the kernel needs; the assembler writes them into the
-image header:
+The source is assembled at 0 and relocated by the loader. `KX` and `KY` are predefined (the slot's X block
+and Y base), and labels move with P. Equates at the top declare what the kernel needs; the assembler writes
+them into the image header:
 
 ```asm
 K_SCRATCH_BYTES equ $20000      ; scratch bytes
 K_DESCRIPTORS   equ 4           ; descriptors a frame, both chains
+K_XWORDS        equ $E0         ; the X block from KX, the $28 ABI words included
+K_YWORDS        equ 0           ; Y words from KY
+
+KIN     equ     KX              ; the ABI words, as equates of your own
+K_RHEAD equ     KX+3
+RDL     equ     KX+$30          ; your X
+        org     p:0
 ```
 
 ```bash
@@ -166,9 +185,19 @@ python3 lib/openal/tools/dsp56asm.py lib/openal/dsp/gp_kecho.asm -o lib/openal/d
 ```
 
 The header holds `NAME_image[NAME_IMAGE_WORDS]`, the image to pass to `alXboxEffectProgram`, plus every equate
-as `NAME_<SYMBOL>`. The image layout is: `$47504B` ('GPK'), the ABI version, scratch bytes, descriptors, then
-the code for P:$100. Any tool that writes this layout works. `--image` refuses a source without the two
-equates or one whose code does not start at `org p:$100`.
+as `NAME_<SYMBOL>` (relocatable ones as offsets from their base). The image layout (ABI 2): `$47504B` ('GPK'),
+2, scratch bytes, descriptors, X words, Y words, the reloc count, the relocs, then the code assembled at 0. A
+reloc is one word: bits 11:0 the code offset, 13:12 the kind: 0 a P extension word, 1 the 12-bit address field
+of a short `jmp` / `jsr` / `jCC`, 2 an X extension word, 3 a Y extension word; the loader adds that base. Any
+tool that writes this layout works.
+
+**Expressions:** a relocatable value plus or minus a constant is relocatable, the difference of two of one
+space a constant; anything else that involves one (`KX*2`, `KX+KY`, `KX&$FF`) is an error. An operand that
+relocates always takes the long form (an extension word, never the 6-bit `aa` address), and the forms with no
+room for one refuse it: `jclr` / `jset` / `bset` / `bclr` on `x:KX+n`, `do x:KX`, `rep #KX`. Point a register
+at the word instead. `--image` refuses a source without the four equates, one that does not start at
+`org p:0`, or a word that does not relocate cleanly. A source without `K_XWORDS` builds an ABI 1 image (code
+at `org p:$100`, header magic, 1, scratch, descriptors).
 
 `tools/dsp56asm.py` covers the subset of DSP56300 instructions its header lists (moves, `mac`/`mpy`, `do`/
 `rep`, jumps and calls, bit tests, `movep`). Encodings follow Motorola's public DSP56300 Family Manual.
@@ -176,49 +205,53 @@ equates or one whose code does not start at `org p:$100`.
 ## 7. Loading, switching and the load meter
 
 When a slot gets a new image, the library:
-1. switches the kernel off for two frames (the dry mix keeps playing);
-2. measures how long an empty frame waits (the load meter's reference);
-3. writes the code into P memory through the GP's P window and reads it back. If the read-back differs, it
-   restarts the GP from its bootstrap image, which also holds the new code. `apu_gp_debug_code_restarts()`
-   counts the restarts. On a console the P window took the code every time while the GP ran (no restart in
-   the dozen loads of `openal_efx`); the restart stays as the fallback;
-4. zeroes X and scratch, writes the ABI words, and switches the kernel on.
+1. switches that slot off and waits two frames (the dry mix and the other slots keep playing);
+2. places the kernel: the first range of P ($100..$7FF), X ($E0..$BFF), Y and scratch (4 KiB aligned) that is
+   free in each. There is no compaction: a range freed by another slot is reused when something fits in it,
+   and an attach that fits the sums but no free range is refused;
+3. relocates the code and writes it into P memory through the GP's P window, that range only, and points the
+   slot's trampoline (a short `jmp` in the loop) at it, then reads both back. If the read-back differs, it
+   restarts the GP from its bootstrap image, which also holds the new code; the restart stops the other slots,
+   which the library loads again at its next update. `apu_gp_debug_code_restarts()` counts the restarts;
+4. zeroes the slot's X block and scratch, writes the ABI words and the slot table entry, and switches it on.
 
-The kernel starts from silence: delay lines are empty after every load. Switching back to the reverb reloads
-the reverb's code the same way.
+The kernel starts from silence: delay lines are empty after every load. With nothing running, the meter's
+reference (an empty frame's wait) is measured again.
 
 **Load meter.** No cycle counter is known on the GP, so the loop counts how many times it polls for the next
 frame start. The library compares that count with an empty frame's: the percentage is the share of the frame
-your effect (kernel and its DMA) takes. For scale, the reverb runs about 10,800 instructions a frame in the
-host simulator and takes 34 % of the frame on a console; the echo takes 4 %. A kernel that overruns does not crash, but the output gets
-late frames: watch `AL_XBOX_GP_LOAD_PEAK`, and `ac97_padded` / `output_slips` in `AL_XBOX_stats`.
+the effects (kernels and their DMA) take. For scale, in the host simulator the reverb runs about 10,800
+instructions a frame (34 % of the frame on a console), the echo about 1,060, the chorus about 4,950, and the
+three together about 15,600. A kernel that overruns does not crash, but the output gets late frames: watch
+`AL_XBOX_GP_LOAD_PEAK`, and `ac97_padded` / `output_slips` in `AL_XBOX_stats`.
 
 ## 8. Testing on the host
 
-`tools/dsp56sim.py` runs the loop and a kernel on the PC with the same DMA model, so a kernel can be checked
+`tools/dsp56sim.py` runs the loop and kernels on the PC with the same DMA model, so a kernel can be checked
 sample by sample before it reaches a console. `tests/test_gp_programs.py` [5] does it for the echo:
 
 ```python
-gp = dsp56sim.Gp(LOOP, extra=(ECHO,))        # loop + kernel sources
-for i, v in enumerate(COPY_DESC): gp.x[i] = v
-gp.run_until_wait()
-load_custom(gp, [100, 0, 0x400000], gp.symbols['K_SCRATCH_BYTES'])   # what apu_gp.c does
-fifo = gp.frame({2: block_left, 3: block_right})                    # one frame; returns the output
+at = {'p': 0x140, 'x': 0x300, 'y': 0}                  # anywhere: the loader's job on a console
+gp = new_gp([(ECHO, at)])                               # loop + kernel source, assembled at those bases
+load_slot(gp, 0, 0, at, [100, 0, 0x400000])             # what apu_gp.c does: ABI words, trampoline, on
+fifo = gp.frame({2: block_left, 3: block_right})        # one frame; returns the output
 ```
 
-Its helpers `load_custom` (the library's load sequence) and `run_echo` (impulses in, output streams out) can be
+Its helpers `load_slot` (the library's load sequence) and `run_echo` (impulses in, output streams out) can be
 copied for a new kernel. Parameter changes are tested by writing the mailbox (`MBOX`, `MB_N`, `MB_SEQ`) as the
-library does. The simulator knows the instructions the assembler knows; it does not model the GP's timing,
-only the instruction count (`gp.frame_steps` for the last frame).
+library does. [9] checks that every library image relocated by the loader's rules equals its source assembled
+at those bases, [10] that three kernels in one loop add exactly what each adds alone. The simulator knows the
+instructions the assembler knows; it does not model the GP's timing, only the instruction count
+(`gp.frame_steps` for the last frame).
 
-The library's loader is tested with the null backend in `tests/test_apu_gp.c` [8], and the AL entry points in
-`tests/test_efx_program.c`.
+The library's loader is tested with the null backend in `tests/test_apu_gp.c` [7]-[9], and the AL entry points
+in `tests/test_efx_program.c` and `tests/test_efx_multi.c`.
 
 ## 9. Checklist
 
-- `org p:$100`, `rts` at the end, under 0x700 words.
-- `K_SCRATCH_BYTES` and `K_DESCRIPTORS` declared and true.
-- Descriptors built on the first call; the write chain ends at `FIFO2`; K_RHEAD is 0 if you read nothing.
-- Your X from `KOWN`; Y initialised by you.
+- `org p:0`, `rts` at the end, under 0x700 words; addresses as `KX` / `KY` + offsets, never absolute.
+- `K_SCRATCH_BYTES`, `K_DESCRIPTORS`, `K_XWORDS` (with the $28 ABI words) and `K_YWORDS` declared and true.
+- Descriptors built on the first call; both chains end at `$004000`; K_RHEAD / K_WHEAD 0 if unused.
+- Your X from `KX+$28`; Y from `KY`, initialised by you.
 - Parameters read every frame; delays that change rewrite their read offsets.
 - Headroom in the output; `AL_XBOX_GP_LOAD_PEAK` checked on a console with the worst case running.

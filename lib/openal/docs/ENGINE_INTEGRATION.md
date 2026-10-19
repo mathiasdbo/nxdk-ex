@@ -335,14 +335,17 @@ alSource3i(src, AL_AUXILIARY_SEND_FILTER, (ALint)slot, 0, AL_FILTER_NULL);   /* 
   - Filters: `AL_FILTER_NULL` and `AL_FILTER_LOWPASS` (below). Highpass and bandpass give `AL_INVALID_VALUE`.
   - Up to 4 slots and 256 effects and filters. `ALC_MAX_AUXILIARY_SENDS` is 2 (the default; larger requests are
     clamped).
-- **One effect per device.** The GP runs one program. While one slot holds an effect, attaching an effect to
-  another slot gives `AL_INVALID_OPERATION`. `AL_XBOX_REVERB` (3.7) counts as that effect too. Empty slots are
-  legal and silent.
+- **One effect per slot, several at once** (phase9-04). Each slot runs its own GP kernel: a reverb, an echo and
+  a chorus play together. Attaching an effect gives `AL_INVALID_OPERATION` only when it does not fit the GP
+  beside the other slots' (two reverbs or two choruses do not), or while `AL_XBOX_REVERB` (3.7) is on. Empty
+  slots are legal and silent.
 - **Sends:**
   - A send's level is the source's gain with distance attenuation by `AL_ROOM_ROLLOFF_FACTOR`, plus the
     reverb's own room rolloff; the cone too when `AL_AUXILIARY_SEND_FILTER_GAIN_AUTO` is on.
   - Volume changes apply live, while the sound plays.
-  - Sends to a slot that does not hold the active effect are silent.
+  - Sends to a slot without an effect are silent. Pointing a playing source's send at another slot moves it
+    with a volume ramp, no click: that send is silent until the first `alXboxUpdateVoices` at least two APU
+    frames (1.3 ms) later.
 - **Copy semantics, as in the spec:** a slot takes a copy of the effect when it is attached. After changing
   the effect, attach it again. A source keeps its slot; deleting a slot a source sends to gives
   `AL_INVALID_OPERATION`.
