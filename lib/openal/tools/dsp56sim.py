@@ -12,8 +12,11 @@ It runs the assembled source line by line (not the encoded words), so it checks
 a program's logic and fixed-point arithmetic on the host; encodings are checked
 by the assembler and on hardware.
 
-    sim = Gp(program_text)          # or Gp(text, extra=[(origin_text), ...])
+    sim = Gp(program_text, extra=[text, (kernel_text, bases), ...])
+                                    # extra: absolute sources, or relocatable kernels (ABI 2)
+                                    # assembled at bases {'p': .., 'x': .., 'y': ..}
     sim.x[addr] = value             # the CPU's X-window writes
+    sim.patch_jmp(pc, target)       # the CPU's P-window write of a trampoline
     out = sim.frame(bins)           # bins: {n: [32 ints]}; returns FIFO 0 samples of the frame
 """
 import os
@@ -49,9 +52,13 @@ class Gp:
 
     def __init__(self, text, extra=(), max_steps=200_000):
         self.code = {}          # pc -> (mnemonic, operands, size, line)
-        self.symbols = {}
-        for src in (text,) + tuple(extra):
-            mem, symbols, _, listing = dsp56asm.assemble(src)
+        self.symbols = {}       # the program's, then the extras' that do not clash
+        self.ksymbols = []      # each extra source's own symbols (a relocated kernel's at its bases)
+        for n, src in enumerate((text,) + tuple(extra)):
+            if isinstance(src, tuple):
+                mem, symbols, _, listing = dsp56asm.assemble(src[0], src[1])
+            else:
+                mem, symbols, _, listing = dsp56asm.assemble(src)
             for pc, words, raw in listing:
                 _, mn, ops = dsp56asm.parse_line(raw)
                 if mn is None or mn.lower() == 'dc':
@@ -59,7 +66,10 @@ class Gp:
                 if pc in self.code:
                     raise SimError('P:$%04X defined twice' % pc)
                 self.code[pc] = (mn.lower(), ops or '', len(words), raw.strip(), symbols)
-            self.symbols.update(symbols)
+            for k, v in symbols.items():
+                self.symbols.setdefault(k, v)
+            if n:
+                self.ksymbols.append(symbols)
         self.x = [0] * 0x2000
         self.y = [0] * 0x800
         self.scratch = {}       # byte address -> 24-bit word (format 2/6 both keep 24 bits)
@@ -77,6 +87,12 @@ class Gp:
         self.steps = 0
         self.frame_steps = 0
         self.waiting = False    # parked on the START_FRAME poll
+
+    def patch_jmp(self, pc, target):
+        """Replace the instruction at pc with a short jmp (a trampoline rewrite)."""
+        if pc not in self.code or self.code[pc][2] != 1:
+            raise SimError('P:$%04X is not a one-word instruction' % pc)
+        self.code[pc] = ('jmp', '$%X' % target, 1, 'jmp $%X' % target, {})
 
     # ---------------------------------------------------------- memory
     def xread(self, a):
@@ -282,8 +298,9 @@ class Gp:
             self.r[k] = (self.r[k] + inc) & MASK24
 
     # ---------------------------------------------------------- ALU
-    def alu(self, mn, ops):
-        ops = [o.lower() for o in dsp56asm.split_operands(ops)]
+    def alu(self, mn, ops, symbols=None):
+        raw = dsp56asm.split_operands(ops)
+        ops = [o.lower() for o in raw]
         if mn in ('clr', 'tst', 'neg', 'abs', 'asl', 'asr', 'lsr', 'not', 'rnd', 'inc', 'dec'):
             d = ops[0]
             v = self.reg[d]
@@ -325,7 +342,7 @@ class Gp:
         if mn in ('tfr', 'add', 'sub', 'cmp', 'cmpm'):
             s, d = ops
             if s.startswith('#'):
-                sv = dsp56asm.evaluate(s[1:].lstrip('>'), self.symbols, 2)
+                sv = dsp56asm.evaluate(raw[0][1:].lstrip('>'), symbols or self.symbols, 2)
                 sv = sx24(sv) << 24
             elif s in ('a', 'b'):
                 sv = self.reg[s]
@@ -442,7 +459,7 @@ class Gp:
             parts = ops.split(None, 1)
             alu_ops = parts[0] if parts else ''
             moves = dsp56asm.split_moves(parts[1]) if len(parts) > 1 else []
-            self.do_moves(moves, symbols, lambda: self.alu(mn, alu_ops))
+            self.do_moves(moves, symbols, lambda: self.alu(mn, alu_ops, symbols))
         self.pc = nxt
         self.after(here, nxt, jumped)
 
