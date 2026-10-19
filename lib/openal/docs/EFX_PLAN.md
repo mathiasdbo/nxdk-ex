@@ -139,7 +139,8 @@ As built:
 | X:$07 / X:$0F | IDLE (START_FRAME polls before this frame) / IDLMIN (the smallest since the CPU wrote $7FFFFF): the load meter |
 | X:$10-$1F | CNT, FLAGS (bit 0 kernel on), BURN, SPINS, SPMAX, TMOUT, MB_SEQ, MB_ACK, MB_N, K_RHEAD, K_WHEAD, OUTLP, OUTST[4] |
 | X:$20 / X:$40 | OUT L / OUT R (32 words each): the dry bins 0/1, the kernel adds to them, then the output lowpass |
-| X:$60-$DF | mailbox: 64 (address, value) pairs |
+| X:$60-$DD | mailbox: 63 (address, value) pairs |
+| X:$DE (since phase9-04 X:$D5) | mailbox: the frame (X:CNT, mod 2^24) to apply it at; the CPU writes it with every post |
 | X:$E0-$BFF, all of Y | the kernel; the reverb: KIN (input pair address) at $E0, coefficients $E1-$E5, tables, chains at $1B0, blocks from $340 to $97F |
 | scratch from byte $2000 | the kernel's delay lines |
 
@@ -149,9 +150,9 @@ the loop and kernel on the host: `tests/test_gp_programs.py` checks the reverb a
 reference word for word (the old program matched it the same way first), and the mailbox and burn. On the
 host simulator the loop plus the reverb is about 10800 instructions a frame (the old program 10500).
 
-**Since phase9-04** (one kernel per slot, `GP_KERNELS.md`): the loop is 202 words with four trampolines
+**Since phase9-04** (one kernel per slot, `GP_KERNELS.md`): the loop is 209 words with four trampolines
 (`TRAMPk: jmp entry`, rewritten by the CPU with the slot off); FLAGS bits 0-3 switch slots 0-3, bit 4 an ABI 1
-kernel at P:$100 (alone, the old path), bit 5 the output lowpass (the reverb's); the mailbox is 56 pairs
+kernel at P:$100 (alone, the old path), bit 5 the output lowpass (the reverb's); the mailbox is 56 pairs (MB_AT at $D5)
 ($60-$CF), the slot table (each slot's X block) at $D0-$D3. Kernels are relocatable images placed first fit
 in P:$100-$7FF, X:$E0-$BFF, Y and scratch from $2000; each has its own chains (both ending at end of list),
 run and waited for slot by slot, then the mix descriptor. The reverb's X block is $8C0 words.

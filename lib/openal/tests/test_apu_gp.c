@@ -318,6 +318,70 @@ int main(void) {
         assert(XR(GP_LOOP_MBOX + 2u) == xx + APU_GP_KERNEL_PARAM0 + 31u);
         assert(XR(xx + APU_GP_KERNEL_PARAM0 + 31u) == 0x7FFFFFu);
         assert(XR(xx + 3u) == xx + 0x30u);                            /* the kernel kept running */
+        /* timed parameters for slot 2: held until their frame, then all at once, at that slot's KPARAM only */
+        {
+            const uint32_t XC = MCPX_APU_GP_XMEM + 4u * GP_LOOP_CNT;
+            const uint32_t XP = MCPX_APU_GP_XMEM + 4u * (xx + APU_GP_KERNEL_PARAM0);
+            apu_reverb_word_t one = { (uint16_t)(xx + APU_GP_KERNEL_PARAM0 + 5u), 77u };
+            uint32_t j;
+            for (j = 0; j < 0x40u; j++) {
+                s_code[j] = XR(GP_LOOP_KX_BASE + j);                   /* the reverb's block: ABI words, coefficients */
+            }
+            set_reg(XC, 100u);
+            params[0] = 300u;
+            params[1] = 9u;
+            assert(apu_gp_kernel_params_at(base, 2, &k, params, 103u) == 0);
+            assert(apu_gp_mailbox_pending(base));
+            assert(XR(GP_LOOP_MB_AT) == 103u && XR(GP_LOOP_MB_N) == 2u);
+            assert(XR(GP_LOOP_MBOX) == xx + APU_GP_KERNEL_PARAM0 && XR(GP_LOOP_MBOX + 2u) == xx + APU_GP_KERNEL_PARAM0 + 1u);
+            assert(reg(XP) == 200u);                                    /* not yet */
+            params[0] = 400u;
+            assert(apu_gp_kernel_params_at(base, 2, &k, params, 104u) == 1);   /* one waits at a time */
+            params[0] = 300u;
+            apu_gp_debug_host_frames(base, 3u);                         /* frames 100..102 */
+            assert(reg(XP) == 200u && apu_gp_mailbox_pending(base));
+            apu_gp_debug_host_frames(base, 1u);                         /* frame 103 */
+            assert(reg(XP) == 300u && reg(XP + 4u) == 9u && !apu_gp_mailbox_pending(base));
+            for (j = 0; j < 0x40u; j++) {
+                assert(XR(GP_LOOP_KX_BASE + j) == s_code[j]);           /* slot 0's block untouched */
+            }
+            /* nothing changed: nothing posted */
+            assert(apu_gp_kernel_params_at(base, 2, &k, params, 200u) == 0 && !apu_gp_mailbox_pending(base));
+            /* an immediate post lets a waiting timed one land first, then lands after it */
+            params[0] = 500u;
+            assert(apu_gp_kernel_params_at(base, 2, &k, params, 5000u) == 0 && apu_gp_mailbox_pending(base));
+            assert(apu_gp_mailbox(base, &one, 1u) == 0);
+            assert(reg(XP) == 500u && reg(XP + 4u * 5u) == 77u && !apu_gp_mailbox_pending(base));
+            /* across the counter's wrap */
+            set_reg(XC, 0xFFFFFEu);
+            params[0] = 600u;
+            assert(apu_gp_kernel_params_at(base, 2, &k, params, 1u) == 0);
+            apu_gp_debug_host_frames(base, 2u);                         /* 0xFFFFFE, 0xFFFFFF */
+            assert(reg(XP) == 500u);
+            apu_gp_debug_host_frames(base, 2u);                         /* 0, 1 */
+            assert(reg(XP) == 600u && reg(XC) == 2u);
+            /* a frame already past: the next one */
+            params[0] = 700u;
+            assert(apu_gp_kernel_params_at(base, 2, &k, params, 0u) == 0);
+            apu_gp_debug_host_frames(base, 1u);
+            assert(reg(XP) == 700u);
+            /* not what the slot runs: another code, the reverb's slot, an empty slot */
+            {
+                apu_gp_kernel_t other = k;
+                other.words = k.words - 1u;
+                assert(apu_gp_kernel_params_at(base, 2, &other, params, 0u) == -1);
+                assert(apu_gp_kernel_params_at(base, 0, &k, params, 0u) == -1);
+                assert(apu_gp_kernel_params_at(base, 1, &k, params, 0u) == -1);
+            }
+            for (j = 0; j < 0x40u; j++) {
+                assert(XR(GP_LOOP_KX_BASE + j) == s_code[j]);
+            }
+            params[0] = 200u;
+            params[1] = 0u;
+            params[31] = 0x7FFFFFu;
+            assert(apu_gp_kernel_set(base, 2, &k, params, true) == 0);   /* back as before, through the mailbox */
+            assert(reg(XP) == 200u && reg(XP + 4u) == 0u);
+        }
         /* the reverb stops; the EFX echo in slot 3 takes the first hole that fits each space */
         assert(apu_gp_reverb_set(base, 0, &p, false) == 0 && !apu_gp_reverb_on());
         assert(XR(GP_LOOP_FLAGS) == 4u);                              /* the lowpass went with it */
@@ -352,7 +416,7 @@ int main(void) {
         apu_vp_deinit(base);
     }
     printf("    -> image checks (ABI 1 and 2), load beside the reverb (P window, relocated, trampoline, ABI words "
-           "at the slot's X block, its bins), live parameters at its KPARAM, first fit reuses a freed hole, "
+           "at the slot's X block, its bins), live parameters at its KPARAM, timed parameters at that slot only, first fit reuses a freed hole, "
            "ABI 1 only alone [PASS]\n");
 
     printf("[9] Budgets and relocation...\n");

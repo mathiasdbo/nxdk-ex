@@ -1,9 +1,11 @@
+#define AL_ALEXT_PROTOTYPES
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
 #include <math.h>
 #include <AL/al.h>
+#include <AL/efx.h>
 #include "al_source.h"
 #include "al_buffer.h"
 #include "al_listener.h"
@@ -111,6 +113,32 @@ int main(void) {
         alSourcef(src_id, AL_GAIN, 1.0f);
         alListenerf(AL_GAIN, 0.0f);
         assert(apu_voice_mgr_calc_priority(src) == 0.0f);
+
+        /* 1f. Heard only through an effect: the direct path muted (lowpass GAIN 0),
+         * a send at full level into the active slot. Not silent: P = the send level */
+        alListenerf(AL_GAIN, 1.0f);
+        alSource3f(src_id, AL_POSITION, 0.0f, 0.0f, 1.0f);
+        {
+            ALuint fx = 0, slot = 0, mute = 0;
+            alGenFilters(1, &mute);
+            alFilteri(mute, AL_FILTER_TYPE, AL_FILTER_LOWPASS);
+            alFilterf(mute, AL_LOWPASS_GAIN, 0.0f);
+            alSourcei(src_id, AL_DIRECT_FILTER, (ALint)mute);
+            assert(apu_voice_mgr_calc_priority(src) == 0.0f);                 /* no send yet */
+            alGenEffects(1, &fx);
+            alEffecti(fx, AL_EFFECT_TYPE, AL_EFFECT_REVERB);
+            alGenAuxiliaryEffectSlots(1, &slot);
+            alAuxiliaryEffectSloti(slot, AL_EFFECTSLOT_EFFECT, (ALint)fx);
+            alSource3i(src_id, AL_AUXILIARY_SEND_FILTER, (ALint)slot, 0, AL_FILTER_NULL);
+            assert(fabsf(apu_voice_mgr_calc_priority(src) - 1.0f) < 0.02f);
+            alSource3i(src_id, AL_AUXILIARY_SEND_FILTER, 0, 0, AL_FILTER_NULL);
+            alSourcei(src_id, AL_DIRECT_FILTER, AL_FILTER_NULL);
+            alAuxiliaryEffectSloti(slot, AL_EFFECTSLOT_EFFECT, 0);
+            alDeleteAuxiliaryEffectSlots(1, &slot);
+            alDeleteEffects(1, &fx);
+            alDeleteFilters(1, &mute);
+            assert(alGetError() == AL_NO_ERROR);
+        }
 
         /* Restore listener gain and delete test source */
         alListenerf(AL_GAIN, 1.0f);

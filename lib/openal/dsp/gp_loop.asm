@@ -6,9 +6,10 @@
 ;   idle     polls of START_FRAME while waiting for it into X:IDLE, the
 ;            smallest since the CPU last reset it into X:IDLMIN (the CPU's
 ;            measure of the GP's load: no cycle counter is known on the GP)
-;   mailbox  if X:MB_SEQ differs from X:MB_ACK, apply the X:MB_N (address,
-;            value) pairs at X:MBOX, then MB_ACK = MB_SEQ: a change of several
-;            words lands in one frame
+;   mailbox  if X:MB_SEQ differs from X:MB_ACK and the frame counter has
+;            reached X:MB_AT (mod 2^24), apply the X:MB_N (address, value)
+;            pairs at X:MBOX, then MB_ACK = MB_SEQ: a change of several words
+;            lands in one frame, the frame the CPU asked for
 ;   no kernel (X:FLAGS 0): the copy program, the FIFO descriptor at X:0 sends
 ;            mixbins 0/1 to GP output FIFO 0
 ;   slots (FLAGS bit k: slot k on; X:SLOTX + k: its X block, KX):
@@ -58,6 +59,7 @@ MB_MAX  equ     56
 SLOTX   equ     $D0             ; slot table: X block of slot k at SLOTX + k
 SLOTS   equ     4
 CHAIN   equ     $D4             ; the chain being started
+MB_AT   equ     $D5             ; mailbox: the frame (X:CNT) to apply it at
 KX_BASE equ     $E0             ; the kernels' X memory starts here
 K_RH    equ     3               ; ABI 2: read chain head, at KX + 3
 K_WH    equ     4               ; ABI 2: write chain head, at KX + 4
@@ -90,6 +92,13 @@ idle_ok
         move    x:MB_ACK,x0
         cmp     x0,a
         jeq     nomail
+        move    x:CNT,b                 ; not before frame MB_AT: CNT - MB_AT, mod 2^24
+        move    x:MB_AT,x0
+        sub     x0,b
+        move    b1,x1
+        tfr     x1,b
+        tst     b
+        jlt     nomail
         move    x:MB_N,b
         tst     b
         jeq     mbdone

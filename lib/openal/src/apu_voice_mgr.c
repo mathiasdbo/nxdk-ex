@@ -69,9 +69,11 @@ int apu_voice_mgr_get_owner(uint32_t hw_voice_idx) {
  * Dynamic Priority Calculation
  * ============================================================================
  * Priority Formula:
- *   P = priority_base * (effective_gain / max(distance, 0.1f))
- * Looping sources receive +2.0 boost (base 3.0 vs 1.0).
- * Sources with gain or effective gain < 0.001 are strictly priority 0.
+ *   P = priority_base * (level / max(distance, 0.1f))
+ * level: the louder of the direct path (effective_gain) and the effect sends,
+ * so a source heard only through an effect (its direct path muted) keeps its
+ * voice. Looping sources receive +2.0 boost (base 3.0 vs 1.0).
+ * Sources with gain or level < 0.001 are strictly priority 0.
  * ============================================================================
  */
 
@@ -85,8 +87,13 @@ float apu_voice_mgr_calc_priority(const ALsource *src) {
 
     AL_SPATIAL_CALC calc;
     al_source_calc_spatial(src, &calc);
+    float level = calc.effective_gain;
+    float send = al_source_send_level(src, &calc);
+    if (send > level) {
+        level = send;
+    }
 
-    if (calc.effective_gain < 0.001f) {
+    if (level < 0.001f) {
         return 0.0f;
     }
 
@@ -96,7 +103,7 @@ float apu_voice_mgr_calc_priority(const ALsource *src) {
     }
 
     float base_priority = al_source_voice_loops(src) ? 3.0f : 1.0f;   /* looping and streaming sources */
-    return base_priority * (calc.effective_gain / d);
+    return base_priority * (level / d);
 }
 
 /*

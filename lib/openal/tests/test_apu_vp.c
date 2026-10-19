@@ -265,6 +265,40 @@ int main(void) {
     assert(apu_vp_voice_start(base, 70, &p) != 0);                   /* not initialised */
     printf("    -> Pause keeps the position, off unlinks, lists emptied on teardown [PASS]\n");
 
+    /* 7b. Batches: voices started together join the list with one head write */
+    printf("[7b] Same-frame starts (apu_vp_batch_begin / _end)...\n");
+    assert(apu_vp_init(base) == 0);
+    p.phys = phys_a;
+    p.bytes = 20000;
+    p.channels = 1;
+    p.loop = true;
+    assert(apu_vp_voice_start(base, 80, &p) == 0);
+    assert(reg(MCPX_APU_TVL2D) == 80);
+    apu_vp_batch_begin(base);
+    assert(apu_vp_voice_start(base, 81, &p) == 0);
+    assert(apu_vp_voice_start(base, 82, &p) == 0);
+    assert(reg(MCPX_APU_TVL2D) == 80);                               /* not reachable yet */
+    assert((voice_dw(82, MCPX_VOICE_TAR_PITCH_LINK) & 0xFFFFu) == 81u);
+    assert((voice_dw(81, MCPX_VOICE_TAR_PITCH_LINK) & 0xFFFFu) == 80u);
+    apu_vp_voice_pause(base, 81, true);                              /* out again, inside the batch */
+    assert((voice_dw(82, MCPX_VOICE_TAR_PITCH_LINK) & 0xFFFFu) == 80u);
+    apu_vp_voice_pause(base, 81, false);
+    apu_vp_batch_end(base);
+    assert(reg(MCPX_APU_TVL2D) == 81);                               /* one write: 81 -> 82 -> 80 */
+    assert((voice_dw(81, MCPX_VOICE_TAR_PITCH_LINK) & 0xFFFFu) == 82u);
+    assert((voice_dw(82, MCPX_VOICE_TAR_PITCH_LINK) & 0xFFFFu) == 80u);
+    /* the head leaving inside a batch leaves at its end, with the others */
+    apu_vp_batch_begin(base);
+    apu_vp_voice_pause(base, 81, true);
+    assert(reg(MCPX_APU_TVL2D) == 81);
+    apu_vp_voice_pause(base, 82, true);
+    apu_vp_batch_end(base);
+    assert(reg(MCPX_APU_TVL2D) == 80);
+    apu_vp_batch_end(base);                                          /* no batch: nothing */
+    assert(reg(MCPX_APU_TVL2D) == 80);
+    apu_vp_deinit(base);
+    printf("    -> new voices chained out of sight, one head write per list, pause inside a batch [PASS]\n");
+
     /* 8. Real console: the front end runs one method and stalls */
     printf("[8] Stalled front end (real console)...\n");
     memset(s_bar0, 0, BAR0_SIZE);
