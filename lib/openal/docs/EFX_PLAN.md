@@ -79,6 +79,11 @@ Toolchain note: nxdk's pdclib `lrint*()` is an `assert(0)` stub; round by hand.
   `alcGetIntegerv`.
 - Up to **4 slot objects**. Phase 1 runs **one effect per device**: attaching a non-null effect while another
   slot (or `AL_XBOX_REVERB`) has one gives `AL_INVALID_OPERATION`. Slots without an effect are legal and silent.
+- **As built (phase9-04):** each slot runs its own GP kernel (EFX slot s in GP slot s - 1), so a reverb, an echo
+  and a chorus play at once. An attach gives `AL_INVALID_OPERATION` only when the GP's shared budgets are full:
+  the kernels' P (0x700 words), X ($B20), Y (2048), scratch (512 KiB less the bootstrap image) and 60
+  descriptors, summed, and while the GP runs, the loader's own first fit (no compaction). A refused attach
+  changes nothing. `AL_XBOX_REVERB` stays exclusive with EFX effects; an ABI 1 kernel runs only alone.
 
 ### 3.2 Slots, bins and sends
 
@@ -92,6 +97,13 @@ Toolchain note: nxdk's pdclib `lrint*()` is an `assert(0)` stub; round by hand.
   whatever its slot; a send whose slot does not hold the active effect is muted. Moving a send or an effect
   between slots therefore only changes volumes, which a playing voice takes live, so nothing waits for the
   live-`VBIN` probe. The per-slot pairs (slot k on bins 2+2k / 3+2k) come with several kernels.
+- **As built (phase9-04):** send n of a source to EFX slot s leaves on outputs 4+2n / 5+2n to GP slot k = s - 1's
+  pair, **bins 2+2k / 3+2k** (2/3 .. 8/9, all reachable at full level: 2.1); a send to a slot without an effect
+  is muted where it is. The per-channel-full rule of a stereo source into an `AL_EFFECT_XBOX_GP_PROGRAM` slot
+  holds per send. A send that moves on a playing voice ramps (`apu_voice.c`): its targets go to mute, after 2
+  GP frames (the VP has ramped the current volumes down) `CFG_VBIN` / the `CFG_FMT` bin bits change and the
+  targets come back; moving back within the ramp calls it off. A voice not playing takes the bins at its start.
+  `AL_XBOX_REVERB` is GP slot 0 on bins 2/3, as before.
 - Send volume = source gain x distance attenuation with `AL_ROOM_ROLLOFF_FACTOR` (and the effect's room
   rolloff, as the spec adds them) x send-filter gain. `AL_AUXILIARY_SEND_FILTER_GAIN_AUTO` follows the spec;
   the HF parts wait for filters. **Phase 9:** `AL_AIR_ABSORPTION_FACTOR` and `AL_CONE_OUTER_GAINHF` (with
@@ -137,6 +149,13 @@ the loop and kernel on the host: `tests/test_gp_programs.py` checks the reverb a
 reference word for word (the old program matched it the same way first), and the mailbox and burn. On the
 host simulator the loop plus the reverb is about 10800 instructions a frame (the old program 10500).
 
+**Since phase9-04** (one kernel per slot, `GP_KERNELS.md`): the loop is 202 words with four trampolines
+(`TRAMPk: jmp entry`, rewritten by the CPU with the slot off); FLAGS bits 0-3 switch slots 0-3, bit 4 an ABI 1
+kernel at P:$100 (alone, the old path), bit 5 the output lowpass (the reverb's); the mailbox is 56 pairs
+($60-$CF), the slot table (each slot's X block) at $D0-$D3. Kernels are relocatable images placed first fit
+in P:$100-$7FF, X:$E0-$BFF, Y and scratch from $2000; each has its own chains (both ending at end of list),
+run and waited for slot by slot, then the mix descriptor. The reverb's X block is $8C0 words.
+
 ### 3.4 Mailbox
 
 The CPU writes up to 64 (address, value) pairs and their count, then a sequence word; at the top of the next
@@ -162,7 +181,9 @@ An approximation, documented as one. All parameters are stored and read back; th
 | `ROOM_ROLLOFF_FACTOR` | used by the sends (3.2) |
 
 `AL_XBOX_reverb` stays: `alEnable(AL_XBOX_REVERB)` runs the same kernel through an internal slot on bins 2/3,
-so existing code is unchanged; `AL_XBOX_REVERB_OUTPUT_LOWPASS` stays an Xbox extra.
+so existing code is unchanged; `AL_XBOX_REVERB_OUTPUT_LOWPASS` stays an Xbox extra. Since phase9-04 the reverb
+kernel is relocatable like the others (`apu_reverb_layout` / `apu_reverb_coefficients` take the slot's X block
+and scratch), its output lowpass acts on the whole mix while it runs, and only one reverb fits (X).
 
 ### 3.6 Custom kernels (`AL_XBOX_gp_program`, vendor)
 
@@ -247,4 +268,4 @@ library than the ABI and the mailbox.
 | The split loop costs too much with the reverb | keep the reverb monolithic for `AL_EFFECT_REVERB`; custom kernels replace the whole program with a loop template we ship |
 | The VP filter is unusable | probed usable (2.1); until the follow-up, filters stay `AL_INVALID_VALUE` and muffling goes via `AL_XBOX_REVERB_OUTPUT_LOWPASS` or the game's kernel |
 | A custom kernel overruns the frame | `padded` / `slips` in `AL_XBOX_stats` and `AL_XBOX_GP_LOAD_PEAK` show it; nothing guards it on the DSP |
-| Games expect several slots (EAX-style per-room) | one active effect is reported by `AL_INVALID_OPERATION`; a later phase links several light kernels into one image |
+| Games expect several slots (EAX-style per-room) | done in phase9-04: one relocatable kernel per slot; `AL_INVALID_OPERATION` only when the shared budgets are full |
