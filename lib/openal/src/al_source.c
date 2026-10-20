@@ -2217,7 +2217,7 @@ al_source_clock_t al_source_stream_clock(ALuint source, uint32_t *pos, uint32_t 
     if (src->state != AL_PLAYING) {
         return AL_SOURCE_CLOCK_STOPPED;
     }
-    *pos = s_dbg_clock ? s_dbg_pos : al_stream_read_pos(src->stream);
+    *pos = s_dbg_clock ? s_dbg_pos : al_stream_clock(src->stream);   /* not read_pos: an unqueue moves it back */
     *gp_frame = s_dbg_clock ? s_dbg_frame : apu_gp_frames(al_source_get_apu_base());
     *per_frame = 32.0f * (float)ring->frequency * src->pitch / 48000.0f;
     return AL_SOURCE_CLOCK_RUN;
@@ -2390,7 +2390,7 @@ static al_source_clock_t timed_clock(ALuint stream, uint32_t *pos) {
     if (st->state != AL_PLAYING) {
         return AL_SOURCE_CLOCK_STOPPED;
     }
-    *pos = s_dbg_clock ? s_dbg_pos : al_stream_read_pos(st->stream);
+    *pos = s_dbg_clock ? s_dbg_pos : al_stream_clock(st->stream);   /* not read_pos: an unqueue moves it back */
     return AL_SOURCE_CLOCK_RUN;
 }
 
