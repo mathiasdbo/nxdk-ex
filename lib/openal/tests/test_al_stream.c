@@ -282,6 +282,58 @@ int main(void) {
     alDeleteBuffers(1, &other);
     assert(alGetError() == AL_NO_ERROR);
 
+    /* [10] The timed operations' clock (al_stream_clock): an application
+     * unqueues buffers as the stream plays, which moves read_pos (and
+     * AL_SAMPLE_OFFSET) back to the new start of the queue; the clock runs on
+     * from the play, so a start timed to a frame of it happens there. On
+     * read_pos it never did: the frame stayed ahead by everything unqueued
+     * (the console, 2026-10-19). */
+    printf("[10] the clock runs on through unqueues; a timed start lands on it\n");
+    {
+        ALuint cs, cb[4], snd, sb, done;
+        const al_stream_t *cst;
+        alGenSources(1, &cs);
+        alGenSources(1, &snd);
+        alGenBuffers(4, cb);
+        alGenBuffers(1, &sb);
+        for (i = 0; i < 4; i++) fill_buffer(cb[i], (int16_t)(i + 1));
+        fill_buffer(sb, 9);
+        alSourceQueueBuffers(cs, 4, cb);
+        alSourcei(snd, AL_BUFFER, (ALint)sb);
+        alSourcePlay(cs);
+        assert(alGetError() == AL_NO_ERROR);
+        cst = al_source_get(cs)->stream;
+        assert(cst && al_stream_clock(cst) == 0u);
+        set_pos(cs, 2048);
+        set_pos(cs, CHUNK + 100);
+        assert(geti(cs, AL_BUFFERS_PROCESSED) == 1);
+        alSourceUnqueueBuffers(cs, 1, &done);
+        assert(alGetError() == AL_NO_ERROR && done == cb[0]);
+        assert(geti(cs, AL_SAMPLE_OFFSET) == 100);                 /* from the new start of the queue */
+        assert(al_stream_clock(cst) == CHUNK + 100);               /* from the play */
+        alXboxSourcePlayAtSample(snd, cs, 8000);
+        assert(alGetError() == AL_NO_ERROR && geti(snd, AL_SOURCE_STATE) == AL_INITIAL);
+        set_pos(cs, CHUNK + 100 + 2048);                           /* 1756 ahead; the window is still 0 */
+        assert(geti(snd, AL_SOURCE_STATE) == AL_INITIAL);
+        set_pos(cs, CHUNK + 100 + 4096);                           /* 292 late, window 1024: starts 292 in */
+        assert(geti(snd, AL_SOURCE_STATE) == AL_PLAYING && geti(snd, AL_SAMPLE_OFFSET) == 292);
+        assert(al_stream_clock(cst) == CHUNK + 100 + 4096 && geti(cs, AL_SAMPLE_OFFSET) == 100 + 4096);
+        alSourceStop(snd);
+        alSourceStop(cs);
+        alSourcePlay(cs);                                          /* from a stop: the clock starts again */
+        assert(al_stream_clock(cst) == 0u);
+        alSourceStop(cs);
+        alSourcei(cs, AL_BUFFER, 0);
+        alSourcei(snd, AL_BUFFER, 0);
+        alDeleteSources(1, &cs);
+        alDeleteSources(1, &snd);
+        alDeleteBuffers(1, &cb[0]);
+        alDeleteBuffers(3, &cb[1]);
+        alDeleteBuffers(1, &sb);
+        assert(alGetError() == AL_NO_ERROR);
+    }
+    printf("    -> unqueues move the offset back and not the clock; the start lands on the clock's frame; a play from a stop starts it at 0 [PASS]\n");
+
     alDeleteSources(1, &src);
     alDeleteSources(1, &stat);
     alcMakeContextCurrent(NULL);

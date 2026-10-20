@@ -38,6 +38,7 @@ struct al_stream {
     uint32_t write_pos;
     uint32_t silent_pos;         /* the ring is silent from write_pos up to here */
     uint32_t base;
+    uint32_t shift;              /* frames the positions moved back since the last rewind (unqueue, loop laps) */
     uint32_t last_cbo;
     uint32_t starved;
     /* Scrubbing by the output thread (al_stream_scrub_tick) */
@@ -221,7 +222,11 @@ ALenum al_stream_unqueue(al_stream_t *s, ALsizei n, ALuint *ids) {
      * stop, the read position may be inside the removed data; the next play
      * rewinds anyway. The ring keeps its content: base moves with the positions. */
     s->total -= removed;
-    s->read_pos = sub_floor0(s->read_pos, removed);
+    {
+        const uint32_t was = s->read_pos;
+        s->read_pos = sub_floor0(s->read_pos, removed);
+        s->shift += was - s->read_pos;   /* the clock runs on (al_stream_clock) */
+    }
     s->write_pos = sub_floor0(s->write_pos, removed);
     s->silent_pos = sub_floor0(s->silent_pos, removed);
     s->base -= removed;
@@ -281,6 +286,7 @@ ALuint al_stream_current_buffer(const al_stream_t *s) {
 
 void al_stream_rewind(al_stream_t *s) {
     s->read_pos = s->write_pos = s->silent_pos = s->base = 0;
+    s->shift = 0;
     s->last_cbo = 0;
     s->q_done = 0;
 }
@@ -310,6 +316,10 @@ void al_stream_seek(al_stream_t *s, uint32_t frames) {
 
 uint32_t al_stream_read_pos(const al_stream_t *s) {
     return s->read_pos;
+}
+
+uint32_t al_stream_clock(const al_stream_t *s) {
+    return s->shift + s->read_pos;
 }
 
 static void ring_put(al_stream_t *s, uint32_t pos, const uint8_t *src, uint32_t frames) {
@@ -423,6 +433,7 @@ bool al_stream_update(al_stream_t *s, uint32_t ring_pos, bool looping) {
             s->write_pos -= laps;
             s->silent_pos -= laps;
             s->base -= laps;
+            s->shift += laps;
         }
         return false;
     }
