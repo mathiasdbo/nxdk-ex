@@ -78,6 +78,9 @@ uint32_t al_stream_total_frames(const al_stream_t *s);
  */
 const ALbuffer *al_stream_ring_buffer(const al_stream_t *s);
 
+/** Tests: the bytes the stream's ring holds (0: none yet). */
+uint32_t al_stream_debug_ring_bytes(const al_stream_t *s);
+
 /** Id of the queued buffer being played (AL_BUFFER), 0 if none. */
 ALuint al_stream_current_buffer(const al_stream_t *s);
 
