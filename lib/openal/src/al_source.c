@@ -111,6 +111,13 @@ static void source_reset_defaults(ALsource *src, ALuint id) {
     src->timed_op = 0;
     src->timed_stream = 0;
     src->timed_sample = 0;
+    src->timed_par_n = 0;
+    src->timed_par_gains = 0;
+    src->timed_par_stream = 0;
+    src->lead_used = false;
+    src->lead_have = false;
+    src->lead_pos = 0;
+    src->lead_half = 0;
     src->xbox_priority = -1.0f;
     src->virtualize = AL_TRUE;
 }
@@ -135,6 +142,8 @@ void al_source_init_subsystem(void) {
     s_subsystem_initialized = true;
 }
 
+static void timed_reset(void);
+
 void al_source_cleanup_subsystem(void) {
     for (size_t i = 0; i < AL_MAX_SOURCES; i++) {
         ALsource *src = &g_sources[i];
@@ -150,6 +159,7 @@ void al_source_cleanup_subsystem(void) {
             source_reset_defaults(src, (ALuint)(i + 1));
         }
     }
+    timed_reset();   /* the sources' waiting operations went with them */
     al_stream_shutdown();
     apu_voice_mgr_deinit();
     apu_spatial_reset();
@@ -894,6 +904,7 @@ void al_source_tick_cycles(uint64_t *stream, uint64_t *voices) {
 
 /* alXboxSourcePlayAtSample / StopAtSample (the end of this file) */
 static void timed_cancel(ALsource *src);
+static void timed_par_drop(ALsource *src);
 static void timed_lead_update(void);
 static void timed_ops(void);
 
@@ -1912,6 +1923,7 @@ AL_API void AL_APIENTRY alSourceStop(ALuint source) {
         return;
     }
     timed_cancel(src);
+    timed_par_drop(src);
 
     if (src->state == AL_PLAYING || src->state == AL_PAUSED) {
         apu_voice_mgr_release(src);
@@ -1934,6 +1946,7 @@ AL_API void AL_APIENTRY alSourceRewind(ALuint source) {
         return;
     }
     timed_cancel(src);
+    timed_par_drop(src);
 
     if (src->state == AL_PLAYING || src->state == AL_PAUSED || src->state == AL_STOPPED) {
         apu_voice_mgr_release(src);
@@ -2594,20 +2607,20 @@ AL_API ALboolean AL_APIENTRY alIsEnabled(ALenum capability) {
 
 /*
  * ============================================================================
- * Starts and stops timed to a stream (alXboxSourcePlayAtSample / StopAtSample)
+ * Starts, stops and parameter changes timed to a stream
+ * (alXboxSourcePlayAtSample / StopAtSample / alXboxSourcefvAtSample)
  * ============================================================================
  * The voice tick acts on them (al_source_update_frame): at the first update
  * where the stream is at most half an update from the frame asked for, half
  * an update being half the frames the stream played between the last two
  * updates. A start found late begins as far into the sound as the stream has
- * gone past it, at the sound's own rate.
+ * gone past it, at the sound's own rate. A source's parameter changes are
+ * made before its start or stop.
  */
 enum { TIMED_NONE = 0, TIMED_PLAY = 1, TIMED_STOP = 2 };
 
 static uint32_t s_timed_src_n;     /* sources with an operation waiting */
-static ALuint s_lead_stream;       /* the stream the update interval is measured on */
-static uint32_t s_lead_pos, s_lead_half;
-static bool s_lead_have;
+static uint32_t s_timed_par_src_n; /* sources with parameter changes waiting */
 
 static void timed_cancel(ALsource *src) {
     if (src->timed_op != TIMED_NONE) {
@@ -2637,22 +2650,77 @@ static al_source_clock_t timed_clock(ALuint stream, uint32_t *pos) {
     return AL_SOURCE_CLOCK_RUN;
 }
 
-/* Half the frames the stream played since the last update (once per update) */
+/* Each stream timed work waits on: half the frames it played since the last
+ * update (once per update) */
 static void timed_lead_update(void) {
-    uint32_t pos = 0;
-    if (s_lead_stream == 0u) {
+    for (size_t i = 0; i < s_source_end; i++) {
+        ALsource *st = &g_sources[i];
+        uint32_t pos = 0;
+        if (!st->in_use || !st->lead_used) {
+            continue;
+        }
+        if (timed_clock(st->id, &pos) != AL_SOURCE_CLOCK_RUN) {
+            st->lead_have = false;
+            continue;
+        }
+        if (st->lead_have) {
+            uint32_t d = pos - st->lead_pos;
+            st->lead_half = (d < 48000u) ? d / 2u : 0u;   /* more than a second: a stall, not an interval */
+        }
+        st->lead_pos = pos;
+        st->lead_have = true;
+    }
+}
+
+/* The window around a frame of `stream`: half its last update */
+static uint32_t timed_half(ALuint stream) {
+    const ALsource *st = al_source_get(stream);
+    return st ? st->lead_half : 0u;
+}
+
+/* Makes change i of src (as alSourcef / alSourcefv; checked when queued) and
+ * removes it, keeping the rest in order */
+static void timed_par_apply(ALsource *src, uint32_t i) {
+    uint32_t n = src->timed_par_n, j;
+    uint8_t below = (uint8_t)((1u << i) - 1u);
+    if (src->timed_par_gains & (1u << i)) {
+        alSourcefv(src->id, AL_XBOX_DIRECT_GAINS, src->timed_par[i].v);
+    } else {
+        alSourcef(src->id, AL_PITCH, src->timed_par[i].v[0]);
+    }
+    for (j = i; j + 1u < n; j++) {
+        src->timed_par[j] = src->timed_par[j + 1u];
+    }
+    src->timed_par_gains = (uint8_t)((src->timed_par_gains & below) | ((src->timed_par_gains >> 1) & ~below));
+    src->timed_par_n = (uint8_t)(n - 1u);
+    if (src->timed_par_n == 0u) {
+        s_timed_par_src_n--;
+    }
+}
+
+static void timed_par_drop(ALsource *src) {
+    if (src->timed_par_n != 0u) {
+        src->timed_par_n = 0;
+        src->timed_par_gains = 0;
+        s_timed_par_src_n--;
+    }
+}
+
+/* Makes the changes of src that are due, oldest first */
+static void timed_par_run(ALsource *src) {
+    uint32_t pos = 0, half, i = 0;
+    al_source_clock_t c = timed_clock(src->timed_par_stream, &pos);
+    if (c == AL_SOURCE_CLOCK_WAIT) {
         return;
     }
-    if (timed_clock(s_lead_stream, &pos) != AL_SOURCE_CLOCK_RUN) {
-        s_lead_have = false;
-        return;
+    half = timed_half(src->timed_par_stream);
+    while (i < src->timed_par_n) {
+        if (c == AL_SOURCE_CLOCK_RUN && (int32_t)(src->timed_par[i].sample - pos) > (int32_t)half) {
+            i++;   /* not yet (the position wraps at 2^32) */
+            continue;
+        }
+        timed_par_apply(src, i);
     }
-    if (s_lead_have) {
-        uint32_t d = pos - s_lead_pos;
-        s_lead_half = (d < 48000u) ? d / 2u : 0u;   /* more than a second: a stall, not an interval */
-    }
-    s_lead_pos = pos;
-    s_lead_have = true;
 }
 
 /* Starts src `late` stream frames after its frame: that far into the sound */
@@ -2693,17 +2761,23 @@ static void timed_play(ALsource *src, ALuint stream, uint32_t late) {
 }
 
 static void timed_ops(void) {
-    if (s_timed_src_n == 0u) {
+    if (s_timed_src_n == 0u && s_timed_par_src_n == 0u) {
         return;
     }
     apu_voice_batch(al_source_get_apu_base(), true);   /* the ones due together start on one APU frame */
-    for (size_t i = 0; i < s_source_end && s_timed_src_n > 0u; i++) {
+    for (size_t i = 0; i < s_source_end && (s_timed_src_n > 0u || s_timed_par_src_n > 0u); i++) {
         ALsource *src = &g_sources[i];
         uint32_t pos = 0, late = 0;
         uint8_t op;
         ALuint stream;
         al_source_clock_t c;
-        if (!src->in_use || src->timed_op == TIMED_NONE) {
+        if (!src->in_use) {
+            continue;
+        }
+        if (src->timed_par_n != 0u) {
+            timed_par_run(src);   /* before the start or stop */
+        }
+        if (src->timed_op == TIMED_NONE) {
             continue;
         }
         c = timed_clock(src->timed_stream, &pos);
@@ -2712,7 +2786,7 @@ static void timed_ops(void) {
         }
         if (c == AL_SOURCE_CLOCK_RUN) {
             int32_t ahead = (int32_t)(src->timed_sample - pos);   /* the position wraps at 2^32 */
-            uint32_t half = (src->timed_stream == s_lead_stream) ? s_lead_half : 0u;
+            uint32_t half = timed_half(src->timed_stream);
             if (ahead > (int32_t)half) {
                 continue;
             }
@@ -2728,6 +2802,22 @@ static void timed_ops(void) {
         }
     }
     apu_voice_batch(al_source_get_apu_base(), false);
+}
+
+/* The device closed: no source holds an operation or a change any more */
+static void timed_reset(void) {
+    s_timed_src_n = 0;
+    s_timed_par_src_n = 0;
+}
+
+/* From the first timed work on it, a stream's update interval is measured */
+static void timed_lead_set(ALuint stream) {
+    ALsource *st = al_source_get(stream);
+    if (st && !st->lead_used) {
+        st->lead_used = true;
+        st->lead_have = false;
+        st->lead_half = 0u;
+    }
 }
 
 static void timed_queue(ALuint source, ALuint stream, ALuint sample, uint8_t op) {
@@ -2748,11 +2838,7 @@ static void timed_queue(ALuint source, ALuint stream, ALuint sample, uint8_t op)
     src->timed_stream = stream;
     src->timed_sample = sample;
     s_timed_src_n++;
-    if (s_lead_stream != stream) {
-        s_lead_stream = stream;
-        s_lead_have = false;
-        s_lead_half = 0u;
-    }
+    timed_lead_set(stream);
     timed_ops();   /* one already due, or a stopped stream: now */
 }
 
@@ -2762,6 +2848,69 @@ AL_API void AL_APIENTRY alXboxSourcePlayAtSample(ALuint source, ALuint stream, A
 
 AL_API void AL_APIENTRY alXboxSourceStopAtSample(ALuint source, ALuint stream, ALuint sample) {
     timed_queue(source, stream, sample, TIMED_STOP);
+}
+
+AL_API void AL_APIENTRY alXboxSourcefvAtSample(ALuint source, ALenum param, const ALfloat *values, ALuint stream, ALuint sample) {
+    ALsource *src, *st;
+    uint32_t n;
+    ensure_subsystem_initialized();
+    src = al_source_get(source);
+    st = al_source_get(stream);
+    if (!src || !st) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+    if (!st->stream || src == st) {
+        alSetError(AL_INVALID_OPERATION);
+        return;
+    }
+    if (param != AL_PITCH && param != AL_XBOX_DIRECT_GAINS) {
+        alSetError(AL_INVALID_ENUM);
+        return;
+    }
+    if (!values) {
+        alSetError(AL_INVALID_VALUE);
+        return;
+    }
+    if (param == AL_PITCH ? !(values[0] > 0.0f)
+                          : !(values[0] >= 0.0f && values[0] <= 1.0f && values[1] >= 0.0f && values[1] <= 1.0f)) {
+        alSetError(AL_INVALID_VALUE);   /* as alSourcef / alSourcefv */
+        return;
+    }
+    if (src->timed_par_n != 0u && src->timed_par_stream != stream) {
+        while (src->timed_par_n != 0u) {
+            timed_par_apply(src, 0u);   /* another stream's: now */
+        }
+    }
+    if (src->timed_par_n == AL_XBOX_TIMED_PARAMS) {
+        timed_par_apply(src, 0u);       /* full: the oldest now */
+    }
+    n = src->timed_par_n;
+    if (n == 0u) {
+        s_timed_par_src_n++;
+    }
+    src->timed_par[n].sample = sample;
+    src->timed_par[n].v[0] = values[0];
+    src->timed_par[n].v[1] = (param == AL_PITCH) ? 0.0f : values[1];
+    if (param == AL_XBOX_DIRECT_GAINS) {
+        src->timed_par_gains |= (uint8_t)(1u << n);
+    } else {
+        src->timed_par_gains &= (uint8_t)~(1u << n);
+    }
+    src->timed_par_n = (uint8_t)(n + 1u);
+    src->timed_par_stream = stream;
+    timed_lead_set(stream);
+    timed_ops();   /* one already due, or a stopped stream: now */
+}
+
+uint32_t al_source_debug_timed_params(ALuint source) {
+    ALsource *src = al_source_get(source);
+    return src ? src->timed_par_n : 0u;
+}
+
+void al_source_debug_timed_counts(uint32_t *ops, uint32_t *params) {
+    *ops = s_timed_src_n;
+    *params = s_timed_par_src_n;
 }
 
 uint32_t al_source_debug_timed_pending(ALuint source) {

@@ -420,6 +420,8 @@ alAuxiliaryEffectSloti(slot, AL_EFFECTSLOT_EFFECT, (ALint)fx);       /* loads an
   stream at frame `f` starts with `alXboxSourcePlayAtSample(src, room_stream, f)` and, if cut short, stops
   with `alXboxSourceStopAtSample(src, room_stream, f_end)`, so it is heard when the mix would have played it
   (~0.12 s after the call for Half-Life), not at once. Within half an update of the frame (API_REFERENCE 6.4).
+  Its pitch and gains changes go the same way, `alXboxSourcefvAtSample(src, AL_PITCH or AL_XBOX_DIRECT_GAINS,
+  values, room_stream, f)`, so a volume or pan change is heard with the chunk it belongs to, not 0.12 s early.
 - **Cost:** `alXboxGetHardwareStatus(AL_XBOX_GP_LOAD / AL_XBOX_GP_LOAD_PEAK)` is how much of the GP's frame
   the effect takes, in percent.
 - **Example:** `dsp/gp_kecho.asm` is a stereo echo with delay (32-16384 samples), feedback and wet parameters.
