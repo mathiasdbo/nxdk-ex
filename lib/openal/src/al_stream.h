@@ -98,6 +98,17 @@ void al_stream_seek(al_stream_t *s, uint32_t frames);
 uint32_t al_stream_read_pos(const al_stream_t *s);
 
 /**
+ * Frames played since the stream last started from the start of its queue
+ * (al_stream_rewind: alSourcePlay from INITIAL or STOPPED, alSourceRewind),
+ * wrapping at 2^32. Unlike read_pos, unqueueing buffers and a looping
+ * stream's laps do not move it back, so it is the clock the timed operations
+ * run on (alXboxSourcePlayAtSample, alXboxEffectSlotAtSample): an
+ * application that unqueues as the stream plays, as every streaming one
+ * does, would otherwise see read_pos fall behind each frame it named.
+ */
+uint32_t al_stream_clock(const al_stream_t *s);
+
+/**
  * A voice starts playing the ring at index 0 from the current read position:
  * fill the ring for it. Call before the voice is triggered.
  */

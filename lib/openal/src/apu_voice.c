@@ -51,6 +51,9 @@ static float s_voice_send[APU_VOICE_MAX_SLOTS][APU_VOICE_SENDS];
 /* apu_voice_set_send_per_channel: each output carries the whole send (a stereo
  * voice into a stereo kernel) instead of half of it */
 static bool s_voice_send_full[APU_VOICE_MAX_SLOTS][APU_VOICE_SENDS];
+/* apu_voice_set_send_panned: in direct mode the send's outputs follow the
+ * direct gains (AL_XBOX_SEND_PANNED) */
+static bool s_voice_send_panned[APU_VOICE_MAX_SLOTS];
 static float s_voice_lowpass[APU_VOICE_MAX_SLOTS];   /* gain at 5 kHz; 1 = no filter */
 
 /* Console: send n leaves on outputs 4 + 2n (left or mono) and 5 + 2n (right
@@ -172,17 +175,27 @@ static void vp_params_core(uint32_t index, const NVAPU_VOICE_CONTEXT_3D *ctx, bo
     }
 }
 
-/* The volume of each of send n's two outputs (apu_voice_send_atten): muted while they move */
-uint16_t apu_voice_send_atten(uint32_t index, uint32_t n) {
+/* The volume of send n's left (side 0) or right (side 1) output: muted while it moves */
+uint16_t apu_voice_send_atten_side(uint32_t index, uint32_t n, uint32_t side) {
     float g;
     if (index >= APU_VOICE_MAX_SLOTS || n >= APU_VOICE_SENDS) {
         return 0xFFFu;
     }
     g = s_voice_send[index][n];
+    if (s_voice_send_panned[index] && s_voice_direct[index].on) {
+        g *= side ? s_voice_direct[index].right : s_voice_direct[index].left;
+    } else if (!s_voice_send_full[index][n]) {
+        g *= 0.5f;
+    }
     if (!(g > 0.0f) || (s_send_moving[index] && s_send_live[index][n] != s_send_want[index][n])) {
         return 0xFFFu;
     }
-    return apu_vp_atten_from_gain(s_voice_send_full[index][n] ? g : 0.5f * g);
+    return apu_vp_atten_from_gain(g);
+}
+
+/* The volume of each of send n's two outputs (the left one of a panned send) */
+uint16_t apu_voice_send_atten(uint32_t index, uint32_t n) {
+    return apu_voice_send_atten_side(index, n, 0u);
 }
 
 uint32_t apu_voice_send_bin(uint32_t index, uint32_t n) {
@@ -204,10 +217,10 @@ static void vp_params_from_context(uint32_t index, const NVAPU_VOICE_CONTEXT_3D 
     vp_params_core(index, ctx, hrtf, pitch, bins, vols);
     if (!apu_vp_front_end_ok()) {
         for (n = 0; n < APU_VOICE_SENDS; n++) {
-            uint16_t v = apu_voice_send_atten(index, n);
             bins[SEND_OUT + 2u * n] = (uint8_t)SEND_BIN(s_send_live[index][n]);
             bins[SEND_OUT + 2u * n + 1u] = (uint8_t)(SEND_BIN(s_send_live[index][n]) + 1u);
-            vols[SEND_OUT + 2u * n] = vols[SEND_OUT + 2u * n + 1u] = v;
+            vols[SEND_OUT + 2u * n] = apu_voice_send_atten_side(index, n, 0u);
+            vols[SEND_OUT + 2u * n + 1u] = apu_voice_send_atten_side(index, n, 1u);
         }
     }
 }
@@ -676,6 +689,13 @@ static void sends_progress(uintptr_t base)
             apu_vp_voice_set_bins(base, vp_handle(i), bins);
             apu_voice_commit(base, i);
         }
+    }
+}
+
+void apu_voice_set_send_panned(uint32_t index, bool on)
+{
+    if (index < APU_VOICE_MAX_SLOTS) {
+        s_voice_send_panned[index] = on;
     }
 }
 

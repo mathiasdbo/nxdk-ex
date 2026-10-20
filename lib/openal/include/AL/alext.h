@@ -214,8 +214,11 @@ typedef void (AL_APIENTRY *LPALXBOXEFFECTPROGRAM)(ALuint effect, const ALuint *w
  *
  * attaches `effect` to `slot` (copying it now, like AL_EFFECTSLOT_EFFECT) at
  * the 0.67 ms GP frame that mixes frame `sample` of the streaming source
- * `source`: its stream position, the frames it has played since its queue
- * started (32 bits, wrapping; what an engine that mixes ahead counts). The
+ * `source`: its stream clock, the frames it has played since it last started
+ * from the start of its queue (alSourcePlay from AL_INITIAL or AL_STOPPED,
+ * alSourceRewind; 32 bits, wrapping; what an engine that mixes ahead
+ * counts). Unqueueing played buffers does not move it back, unlike
+ * AL_SAMPLE_OFFSET. The
  * effect must run the kernel the slot already runs (the same image) with new
  * parameters, and the slot must be the active one; otherwise, or with 16
  * changes already queued, AL_INVALID_OPERATION. A source that is not
@@ -231,6 +234,34 @@ typedef void (AL_APIENTRY *LPALXBOXEFFECTPROGRAM)(ALuint effect, const ALuint *w
  */
 AL_API void AL_APIENTRY alXboxEffectSlotAtSample(ALuint slot, ALuint effect, ALuint source, ALuint sample);
 typedef void (AL_APIENTRY *LPALXBOXEFFECTSLOTATSAMPLE)(ALuint slot, ALuint effect, ALuint source, ALuint sample);
+
+/*
+ * Starts and stops timed to a stream (AL_XBOX_timed_source):
+ *
+ *   alXboxSourcePlayAtSample(source, stream, sample);
+ *   alXboxSourceStopAtSample(source, stream, sample);
+ *
+ * For an engine that mixes ahead into a streaming source and also plays some
+ * sounds on sources of their own: the sound starts (stops) when the stream
+ * plays frame `sample`, its stream clock as alXboxEffectSlotAtSample
+ * counts it, so it lines up with what the engine mixed into the stream for
+ * that moment. `source` is any other source; `stream` must be a streaming
+ * source (AL_INVALID_OPERATION otherwise, AL_INVALID_NAME for a name that is
+ * no source). The voice tick (alXboxUpdateVoices) acts on it at the first
+ * update where the stream is at most half an update from `sample` (the
+ * frames the stream played between the last two updates, halved), so it
+ * lands up to half an update early or late; a start found late begins that
+ * far into the sound (a non-looping sound already over by then just stops; a
+ * looping one wraps in its loop). A source holds one of them at a time: a
+ * new one replaces it, and alSourcePlay, alSourceStop, alSourceRewind or
+ * deleting the source drops it. While the stream is paused or not started
+ * they wait; with the stream stopped they act at once. Until it acts the
+ * source is in the state it was in.
+ */
+AL_API void AL_APIENTRY alXboxSourcePlayAtSample(ALuint source, ALuint stream, ALuint sample);
+AL_API void AL_APIENTRY alXboxSourceStopAtSample(ALuint source, ALuint stream, ALuint sample);
+typedef void (AL_APIENTRY *LPALXBOXSOURCEPLAYATSAMPLE)(ALuint source, ALuint stream, ALuint sample);
+typedef void (AL_APIENTRY *LPALXBOXSOURCESTOPATSAMPLE)(ALuint source, ALuint stream, ALuint sample);
 
 /*
  * ============================================================================
@@ -417,12 +448,25 @@ typedef ALCboolean (ALC_APIENTRY *LPALCRESETDEVICESOFT)(ALCdevice *device, const
  *                        standby; AL_FALSE stops it instead (AL_STOPPED), so
  *                        the engine knows and can mix it itself.
  * AL_XBOX_HAS_VOICE      alGetSourcei: AL_TRUE while the source holds a hardware voice.
+ * AL_XBOX_SEND_PANNED    alSourcei/alGetSourcei: AL_TRUE / AL_FALSE (default). In
+ *                        direct mode, the source's sends into a custom GP kernel
+ *                        (AL_XBOX_gp_program) are panned by AL_XBOX_DIRECT_GAINS:
+ *                        the kernel's left input gets the send times the left
+ *                        gain, its right input the send times the right gain (a
+ *                        mono source's sample on both, a stereo source's left
+ *                        and right channels on their own), instead of half the
+ *                        send on each (mono) or the whole send on each (stereo).
+ *                        The direct path's own gain and filter do not touch it,
+ *                        so a source muted by a lowpass at AL_LOWPASS_GAIN 0 is
+ *                        heard only through the kernel, panned as the engine
+ *                        panned it. Outside direct mode it changes nothing.
  */
 #define AL_XBOX_DIRECT_GAINS                     0x7010
 #define AL_XBOX_DIRECT_MODE                      0x7011
 #define AL_XBOX_PRIORITY                         0x7012
 #define AL_XBOX_VIRTUALIZE                       0x7013
 #define AL_XBOX_HAS_VOICE                        0x7014
+#define AL_XBOX_SEND_PANNED                      0x7018
 
 /*
  * Xbox AV Pack Encodings for AL_XBOX_AV_PACK_TYPE Query

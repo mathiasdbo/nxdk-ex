@@ -343,7 +343,20 @@ bool apu_voice_send_moving(uint32_t index);
  */
 void apu_voice_set_send_per_channel(uint32_t index, uint32_t n, bool full);
 
-/** The attenuation word (1/64 dB, 0xFFF mute) of each output of send n (mute while it moves). */
+/**
+ * AL_XBOX_SEND_PANNED: while the voice is in direct mode (apu_voice_set_direct),
+ * send n's left output carries the send times the direct left gain and its right
+ * output the send times the direct right gain, each at the whole send. Takes
+ * effect with the sends.
+ */
+void apu_voice_set_send_panned(uint32_t index, bool on);
+
+/** The attenuation word (1/64 dB, 0xFFF mute) of send n's left output (side 0)
+ *  or right output (side 1); mute while it moves. */
+uint16_t apu_voice_send_atten_side(uint32_t index, uint32_t n, uint32_t side);
+
+/** The attenuation word (1/64 dB, 0xFFF mute) of each output of send n (its
+ *  left one, for a panned send; mute while it moves). */
 uint16_t apu_voice_send_atten(uint32_t index, uint32_t n);
 
 /**
