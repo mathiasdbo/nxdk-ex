@@ -264,6 +264,31 @@ typedef void (AL_APIENTRY *LPALXBOXSOURCEPLAYATSAMPLE)(ALuint source, ALuint str
 typedef void (AL_APIENTRY *LPALXBOXSOURCESTOPATSAMPLE)(ALuint source, ALuint stream, ALuint sample);
 
 /*
+ * Pitch and direct gains timed to a stream (AL_XBOX_timed_source):
+ *
+ *   alXboxSourcefvAtSample(source, param, values, stream, sample);
+ *
+ * `param` is AL_PITCH (values[0]) or AL_XBOX_DIRECT_GAINS (values[0..1]),
+ * checked as alSourcef / alSourcefv check them (AL_INVALID_ENUM for any other
+ * parameter, AL_INVALID_VALUE for NULL or a value they refuse); `source` and
+ * `stream` as alXboxSourcePlayAtSample. The change is made as alSourcef(v)
+ * would make it when the stream plays frame `sample`, in the same window as
+ * the timed starts and stops: up to half an update early or late. A source
+ * holds up to AL_XBOX_TIMED_PARAMS of them, acted on in the order they were
+ * given: queue them in the order of their frames. One more than that makes
+ * the oldest at once to make room; one for another stream than those waiting
+ * makes the waiting ones at once. Changes due with a timed start or stop are
+ * made before it, so a sound starts at its new pitch and gains. While the
+ * stream is paused or not started they wait; with the stream stopped, or one
+ * already due, they act at once. alSourceStop, alSourceRewind and deleting
+ * the source drop the ones waiting; alSourcePlay and a plain alSourcef(v)
+ * leave them.
+ */
+#define AL_XBOX_TIMED_PARAMS 8
+AL_API void AL_APIENTRY alXboxSourcefvAtSample(ALuint source, ALenum param, const ALfloat *values, ALuint stream, ALuint sample);
+typedef void (AL_APIENTRY *LPALXBOXSOURCEFVATSAMPLE)(ALuint source, ALenum param, const ALfloat *values, ALuint stream, ALuint sample);
+
+/*
  * ============================================================================
  * AL_SOFT_loop_points (same token and semantics as OpenAL Soft)
  * ============================================================================
