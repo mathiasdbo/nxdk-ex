@@ -317,19 +317,35 @@ alSource3i(src, AL_AUXILIARY_SEND_FILTER, (ALint)slot, 0, AL_FILTER_NULL);   /* 
 - **What there is:**
   - `ALC_EXT_EFX` 1.0 in the device's extension string. Every EFX function is available through
     `alGetProcAddress`.
-  - Effect types: `AL_EFFECT_NULL`, `AL_EFFECT_REVERB`, `AL_EFFECT_EAXREVERB` and `AL_EFFECT_XBOX_GP_PROGRAM`
-    (3.13). Other types give `AL_INVALID_VALUE`, as the extension allows.
+  - Effect types: `AL_EFFECT_NULL`, `AL_EFFECT_REVERB`, `AL_EFFECT_EAXREVERB`, `AL_EFFECT_ECHO`,
+    `AL_EFFECT_CHORUS`, `AL_EFFECT_FLANGER` (below) and `AL_EFFECT_XBOX_GP_PROGRAM` (3.13). Other types give
+    `AL_INVALID_VALUE`, as the extension allows.
+  - **`AL_EFFECT_ECHO`** runs on a library kernel on the GP, with every EFX echo parameter: two taps at `DELAY`
+    and `DELAY + LRDELAY` from one delay line, panned by `SPREAD` (constant power), the second tap fed back
+    by `FEEDBACK` through a one-pole lowpass set by `DAMPING`, so each repeat is darker. The input is the
+    slot's sends summed to mono. Taps closer than 32 samples (0.67 ms) are moved to 32. `AL_EFFECTSLOT_GAIN`
+    scales the sends into it. Parameter changes reach it when the effect is attached again, in one frame.
+  - **`AL_EFFECT_CHORUS` and `AL_EFFECT_FLANGER`** run on one library kernel (they differ only in their ranges
+    and defaults), with every EFX parameter: two taps, left and right, at `DELAY` swung by an LFO by up to
+    `DEPTH x DELAY`, the right LFO `PHASE` degrees ahead, `RATE` Hz, `WAVEFORM` triangle or sine (a parabola
+    within 0.11 % of a sine). Taps are interpolated between samples and may reach 0 (the flanger's sweep);
+    the taps' average goes back into the line by `FEEDBACK`. The input is the slot's sends summed to mono.
+    The line is all of the GP's Y RAM (2048 samples), so the kernel needs no scratch memory and no DMA;
+    about 4900 instructions a frame (about 10 % of the GP). `AL_EFFECTSLOT_GAIN` scales the sends into it.
   - Filters: `AL_FILTER_NULL` and `AL_FILTER_LOWPASS` (below). Highpass and bandpass give `AL_INVALID_VALUE`.
   - Up to 4 slots and 256 effects and filters. `ALC_MAX_AUXILIARY_SENDS` is 2 (the default; larger requests are
     clamped).
-- **One effect per device.** The GP runs one program. While one slot holds an effect, attaching an effect to
-  another slot gives `AL_INVALID_OPERATION`. `AL_XBOX_REVERB` (3.7) counts as that effect too. Empty slots are
-  legal and silent.
+- **One effect per slot, several at once** (phase9-04). Each slot runs its own GP kernel: a reverb, an echo and
+  a chorus play together. Attaching an effect gives `AL_INVALID_OPERATION` only when it does not fit the GP
+  beside the other slots' (two reverbs or two choruses do not), or while `AL_XBOX_REVERB` (3.7) is on. Empty
+  slots are legal and silent.
 - **Sends:**
   - A send's level is the source's gain with distance attenuation by `AL_ROOM_ROLLOFF_FACTOR`, plus the
     reverb's own room rolloff; the cone too when `AL_AUXILIARY_SEND_FILTER_GAIN_AUTO` is on.
   - Volume changes apply live, while the sound plays.
-  - Sends to a slot that does not hold the active effect are silent.
+  - Sends to a slot without an effect are silent. Pointing a playing source's send at another slot moves it
+    with a volume ramp, no click: that send is silent until the first `alXboxUpdateVoices` at least two APU
+    frames (1.3 ms) later.
 - **Copy semantics, as in the spec:** a slot takes a copy of the effect when it is attached. After changing
   the effect, attach it again. A source keeps its slot; deleting a slot a source sends to gives
   `AL_INVALID_OPERATION`.
@@ -387,7 +403,9 @@ alAuxiliaryEffectSloti(slot, AL_EFFECTSLOT_EFFECT, (ALint)fx);       /* loads an
   ahead) queues each change at the stream position it was mixed for:
   `alXboxEffectSlotAtSample(slot, fx, room_stream, painted_frame)`. The change lands in the GP frame that
   mixes that frame, not when it was sent. Start the dry and the room streams together with `alSourcePlayv`
-  so their positions match. Details in API_REFERENCE 6.4.
+  so their positions match. Details in API_REFERENCE 6.4. On a console (`samples/openal_efx` 6c) a timed
+  change lands on the sample asked for in every trial, and `alSourcePlayv` starts two streams on the same sample
+  where two `alSourcePlay` calls are a frame (32 samples) apart.
 - **A new image** reloads the kernel, starting from silence. A brief gap in the effect, not in the dry sound.
 - **`AL_EFFECTSLOT_GAIN`** scales the sends into the kernel, live (for a linear kernel, the same as its output).
 - **Input levels:** a stereo source sends its left and right each at the whole send gain, so at send 1 the

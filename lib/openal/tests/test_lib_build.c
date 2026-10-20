@@ -314,6 +314,71 @@ int main(void) {
                 assert(alGetError() == AL_NO_ERROR);
                 alDeleteSources(1, &s);
                 alDeleteBuffers(1, &b);
+            } else if (strcmp(name, "AL_EXT_FLOAT32") == 0) {
+                static const float f32[4] = { 0.0f, 1.0f, -1.0f, 0.5f };
+                ALuint b = 0;
+                ALint v = 0;
+                alGenBuffers(1, &b);
+                alBufferData(b, AL_FORMAT_STEREO_FLOAT32, f32, (ALsizei)sizeof(f32), 48000);
+                alGetBufferi(b, AL_CHANNELS, &v);
+                assert(v == 2 && alGetError() == AL_NO_ERROR);
+                alBufferData(b, AL_FORMAT_STEREO_FLOAT32, f32, 12, 48000);   /* not whole frames */
+                assert(alGetError() == AL_INVALID_VALUE);
+                alDeleteBuffers(1, &b);
+            } else if (strcmp(name, "AL_EXT_source_distance_model") == 0) {
+                ALuint s = 0;
+                ALint v = 0;
+                alGenSources(1, &s);
+                alGetSourcei(s, AL_DISTANCE_MODEL, &v);
+                assert(v == AL_INVERSE_DISTANCE_CLAMPED);
+                alSourcei(s, AL_DISTANCE_MODEL, AL_LINEAR_DISTANCE);
+                alGetSourcei(s, AL_DISTANCE_MODEL, &v);
+                assert(v == AL_LINEAR_DISTANCE);
+                assert(alIsEnabled(AL_SOURCE_DISTANCE_MODEL) == AL_FALSE);
+                alEnable(AL_SOURCE_DISTANCE_MODEL);
+                assert(alIsEnabled(AL_SOURCE_DISTANCE_MODEL) == AL_TRUE);
+                alDisable(AL_SOURCE_DISTANCE_MODEL);
+                alSourcei(s, AL_DISTANCE_MODEL, 0x1234);
+                assert(alGetError() == AL_INVALID_VALUE);
+                alDeleteSources(1, &s);
+            } else if (strcmp(name, "AL_SOFT_direct_channels") == 0 ||
+                       strcmp(name, "AL_SOFT_source_spatialize") == 0) {
+                ALuint s = 0;
+                ALint v = -1;
+                ALenum p = (name[8] == 'd') ? AL_DIRECT_CHANNELS_SOFT : AL_SOURCE_SPATIALIZE_SOFT;
+                alGenSources(1, &s);
+                alGetSourcei(s, p, &v);
+                assert(v == (p == AL_DIRECT_CHANNELS_SOFT ? AL_FALSE : AL_AUTO_SOFT));
+                alSourcei(s, p, AL_TRUE);
+                alGetSourcei(s, p, &v);
+                assert(v == AL_TRUE && alGetError() == AL_NO_ERROR);
+                alSourcei(s, p, 7);
+                assert(alGetError() == AL_INVALID_VALUE);
+                alDeleteSources(1, &s);
+            } else if (strcmp(name, "AL_SOFT_deferred_updates") == 0) {
+                LPALDEFERUPDATESSOFT defer = (LPALDEFERUPDATESSOFT)ptr_to_fn(alGetProcAddress("alDeferUpdatesSOFT"));
+                LPALPROCESSUPDATESSOFT process =
+                    (LPALPROCESSUPDATESSOFT)ptr_to_fn(alGetProcAddress("alProcessUpdatesSOFT"));
+                assert(defer && process && alGetBoolean(AL_DEFERRED_UPDATES_SOFT) == AL_FALSE);
+                defer();
+                assert(alGetBoolean(AL_DEFERRED_UPDATES_SOFT) == AL_TRUE);
+                process();
+                assert(alGetBoolean(AL_DEFERRED_UPDATES_SOFT) == AL_FALSE && alGetError() == AL_NO_ERROR);
+            } else if (strcmp(name, "AL_SOFT_source_latency") == 0) {
+                LPALGETSOURCEI64VSOFT get64 =
+                    (LPALGETSOURCEI64VSOFT)ptr_to_fn(alGetProcAddress("alGetSourcei64vSOFT"));
+                LPALGETSOURCEDVSOFT getdv = (LPALGETSOURCEDVSOFT)ptr_to_fn(alGetProcAddress("alGetSourcedvSOFT"));
+                ALint64SOFT v64[2] = { -1, -1 };
+                ALdouble dv[2] = { -1.0, -1.0 };
+                ALuint s = 0;
+                assert(get64 && getdv);
+                alGenSources(1, &s);
+                get64(s, AL_SAMPLE_OFFSET_LATENCY_SOFT, v64);
+                getdv(s, AL_SEC_OFFSET_LATENCY_SOFT, dv);
+                assert(v64[0] == 0 && v64[1] >= 0 && dv[0] == 0.0 && dv[1] >= 0.0 && alGetError() == AL_NO_ERROR);
+                alDeleteSources(1, &s);
+            } else if (strcmp(name, "AL_SOFT_gain_clamp_ex") == 0) {
+                assert(alGetFloat(AL_GAIN_LIMIT_SOFT) == 1.0f && alGetError() == AL_NO_ERROR);
             } else {
                 printf("advertised extension without a functional check: %s\n", name);
                 assert(0);

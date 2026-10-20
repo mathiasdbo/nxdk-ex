@@ -5,6 +5,7 @@
  * of GAINHF at 5 kHz to the VP's 2-pole Butterworth (apu_vp_lowpass).
  */
 #include <assert.h>
+#include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -179,6 +180,76 @@ static void test_source(uint8_t *mmio) {
     assert(alGetError() == AL_NO_ERROR);
 }
 
+/* AL_DIRECT_FILTER_GAINHF_AUTO: cone outer GAINHF and air absorption on the voice filter */
+static void test_auto_hf(void) {
+    ALuint f = 0, src = 0, buf = 0;
+    int16_t pcm[256] = { 0 };
+    const float air10 = powf(0.99426f, 10.0f);   /* 10 m beyond the reference distance */
+    ALsource *as;
+    float lp;
+
+    printf("[4] cone outer GAINHF and air absorption (GAINHF auto)\n");
+    alGenBuffers(1, &buf);
+    alBufferData(buf, AL_FORMAT_MONO16, pcm, (ALsizei)sizeof(pcm), 48000);
+    alGenSources(1, &src);
+    alSourcei(src, AL_BUFFER, (ALint)buf);
+    alSourcei(src, AL_LOOPING, AL_TRUE);
+    alSource3f(src, AL_POSITION, 0.0f, 0.0f, -11.0f);   /* 11 units ahead, reference distance 1 */
+    alSourcePlay(src);
+    as = al_source_get(src);
+    assert(as && as->hw_voice_idx >= 0);
+    assert(apu_voice_debug_lowpass((uint32_t)as->hw_voice_idx) == 1.0f);   /* defaults: factor 0, GAINHF 1 */
+
+    alSourcef(src, AL_AIR_ABSORPTION_FACTOR, 1.0f);
+    lp = apu_voice_debug_lowpass((uint32_t)as->hw_voice_idx);
+    assert(near(lp, air10, 1e-5f));
+    alListenerf(AL_METERS_PER_UNIT, 2.0f);   /* 20 m now */
+    assert(near(apu_voice_debug_lowpass((uint32_t)as->hw_voice_idx), air10 * air10, 1e-5f));
+    alListenerf(AL_METERS_PER_UNIT, 1.0f);
+    alSourcef(src, AL_MAX_DISTANCE, 6.0f);   /* clamped to 5 m */
+    assert(near(apu_voice_debug_lowpass((uint32_t)as->hw_voice_idx), powf(0.99426f, 5.0f), 1e-5f));
+    alSourcef(src, AL_MAX_DISTANCE, FLT_MAX);
+    alSource3f(src, AL_POSITION, 0.0f, 0.0f, -0.5f);   /* inside the reference distance: none */
+    assert(apu_voice_debug_lowpass((uint32_t)as->hw_voice_idx) == 1.0f);
+    alSource3f(src, AL_POSITION, 0.0f, 0.0f, -11.0f);
+
+    /* the cone: pointing away, AL_CONE_OUTER_GAIN 1 (the volume stays), GAINHF 0.5 */
+    alSource3f(src, AL_DIRECTION, 0.0f, 0.0f, -1.0f);
+    alSourcef(src, AL_CONE_INNER_ANGLE, 30.0f);
+    alSourcef(src, AL_CONE_OUTER_ANGLE, 90.0f);
+    alSourcef(src, AL_CONE_OUTER_GAINHF, 0.5f);
+    assert(alGetError() == AL_NO_ERROR);
+    assert(near(apu_voice_debug_lowpass((uint32_t)as->hw_voice_idx), 0.5f * air10, 1e-5f));
+    alSource3f(src, AL_DIRECTION, 0.0f, 0.0f, 1.0f);   /* facing the listener: inside the cone */
+    assert(near(apu_voice_debug_lowpass((uint32_t)as->hw_voice_idx), air10, 1e-5f));
+    alSource3f(src, AL_DIRECTION, 0.0f, 0.0f, -1.0f);
+
+    /* with the direct filter: the gains multiply */
+    alGenFilters(1, &f);
+    alFilteri(f, AL_FILTER_TYPE, AL_FILTER_LOWPASS);
+    alFilterf(f, AL_LOWPASS_GAINHF, 0.5f);
+    alSourcei(src, AL_DIRECT_FILTER, (ALint)f);
+    assert(near(apu_voice_debug_lowpass((uint32_t)as->hw_voice_idx), 0.25f * air10, 1e-5f));
+
+    /* GAINHF auto off: the filter only */
+    alSourcei(src, AL_DIRECT_FILTER_GAINHF_AUTO, AL_FALSE);
+    assert(near(apu_voice_debug_lowpass((uint32_t)as->hw_voice_idx), 0.5f, 1e-6f));
+    alSourcei(src, AL_DIRECT_FILTER_GAINHF_AUTO, AL_TRUE);
+
+    /* direct mode: the engine spatializes, the filter only */
+    {
+        const ALfloat g[2] = { 1.0f, 1.0f };
+        alSourcefv(src, AL_XBOX_DIRECT_GAINS, g);
+    }
+    assert(near(apu_voice_debug_lowpass((uint32_t)as->hw_voice_idx), 0.5f, 1e-6f));
+
+    alSourceStop(src);
+    alDeleteFilters(1, &f);
+    alDeleteSources(1, &src);
+    alDeleteBuffers(1, &buf);
+    assert(alGetError() == AL_NO_ERROR);
+}
+
 int main(void) {
     uint8_t *mmio = (uint8_t *)calloc(1, MOCK_MMIO_SIZE);
     ALCdevice *dev;
@@ -194,6 +265,7 @@ int main(void) {
     test_object();
     test_fit();
     test_source(mmio);
+    test_auto_hf();
 
     alcMakeContextCurrent(NULL);
     alcDestroyContext(ctx);

@@ -16,6 +16,9 @@
  * acoustics: delays, decay time, damping and dry pass-through.
  */
 
+#define XB  0x1A0u      /* the reverb slot's X block (anywhere: the kernel is relocatable) */
+#define SCR 0x40000u    /* and its scratch */
+
 static uint32_t find(const apu_reverb_word_t *w, uint32_t n, uint32_t addr) {
     uint32_t i, found = 0xFFFFFFFFu;
     for (i = 0; i < n; i++) {
@@ -62,12 +65,12 @@ int main(void) {
     printf("=== GP reverb ===\n");
     printf("[1] Layout...\n");
     apu_reverb_default_params(&p);
-    n = apu_reverb_layout(&p, w);
+    n = apu_reverb_layout(&p, XB, SCR, w);                    /* the slot's X block and scratch */
     assert(n <= APU_REVERB_MAX_WORDS);
     apu_reverb_line_lengths(&p, len);
     assert(len[0] == 960u);                                   /* 20 ms pre-delay */
     for (k = 0; k < APU_REVERB_LINES; k++) {
-        uint32_t r = 0x1B0u + 16u * k, wd = r + 8u, off, size, off2, size2;
+        uint32_t r = XB + GP_KFREEVERB_RCHAIN + 16u * k, wd = r + 8u, off, size, off2, size2;
         apu_reverb_line_buffer(k, &off, &size);
         assert(len[k] >= APU_REVERB_MIN_PRE);                 /* never reads the frame it writes */
         assert(size % 4096u == 0 && size >= 4u * (len[k] + 64u));
@@ -78,47 +81,50 @@ int main(void) {
         }
         assert(off + size <= APU_REVERB_SCRATCH_BASE + apu_reverb_scratch_bytes());
         assert(find(w, n, r + 0u) == ((k + 1u < APU_REVERB_LINES) ? r + 16u : 0x4000u));
-        assert(find(w, n, wd + 0u) == ((k + 1u < APU_REVERB_LINES) ? wd + 16u : 0x08u));   /* writes end at the FIFO */
+        assert(find(w, n, wd + 0u) == ((k + 1u < APU_REVERB_LINES) ? wd + 16u : 0x4000u));   /* both end at EOL */
         assert(find(w, n, r + 1u) == (0x9D0u | (1u << 14)));  /* dsp_step 1 (console: rounds 1-2) */
         assert(find(w, n, wd + 1u) == (0x9D2u | (1u << 14)));
         assert(find(w, n, r + 2u) == 32u && find(w, n, wd + 2u) == 32u);
-        assert(find(w, n, r + 3u) == 0x340u + 64u * k && find(w, n, wd + 3u) == 0x360u + 64u * k);
+        assert(find(w, n, r + 3u) == XB + GP_KFREEVERB_PRE_IN + 64u * k);
+        assert(find(w, n, wd + 3u) == XB + GP_KFREEVERB_PRE_OUT + 64u * k);
         assert(find(w, n, wd + 4u) - find(w, n, r + 4u) == 4u * len[k]);   /* the delay, in bytes */
-        assert(find(w, n, r + 5u) == off && find(w, n, wd + 6u) == size - 1u);
+        assert(find(w, n, r + 5u) == off - APU_REVERB_SCRATCH_BASE + SCR && find(w, n, wd + 6u) == size - 1u);
     }
-    assert(find(w, n, 0x08u) == 0x4000u && find(w, n, 0x0Bu) == GP_LOOP_OUTL);
-    assert(find(w, n, 0x0Au) == ((32u << 4) | 1u));
-    assert(find(w, n, GP_KFREEVERB_KIN) == 0x1440u);               /* input pair: bins 2/3 */
-    assert(find(w, n, GP_LOOP_K_RHEAD) == GP_KFREEVERB_RCHAIN && find(w, n, GP_LOOP_K_WHEAD) == GP_KFREEVERB_WCHAIN);
+    /* chain heads in the slot's X block (ABI 2: KX + 3, KX + 4); KIN and the loop's descriptors are the loader's */
+    assert(find(w, n, XB + 3u) == XB + GP_KFREEVERB_RCHAIN && find(w, n, XB + 4u) == XB + GP_KFREEVERB_WCHAIN);
+    for (k = 0; k < n; k++) {
+        assert(w[k].addr != XB + GP_KFREEVERB_KIN && w[k].addr >= GP_LOOP_OUTLP);
+        assert(w[k].addr < GP_LOOP_OUTST + 4u || (w[k].addr >= XB && w[k].addr < XB + GP_KFREEVERB_K_XWORDS));
+    }
     assert(apu_reverb_scratch_bytes() + APU_REVERB_SCRATCH_BASE <= 2u * 1024u * 1024u);
-    /* The loop and the kernel fit their parts of the bootstrap image and of X memory */
-    assert(GP_LOOP_WORDS <= GP_LOOP_KERNEL && GP_KFREEVERB_ORIGIN == GP_LOOP_KERNEL);
-    assert(GP_KFREEVERB_ORIGIN + GP_KFREEVERB_WORDS <= 0x800u);
+    assert(GP_KFREEVERB_K_SCRATCH_BYTES == apu_reverb_scratch_bytes());   /* the image header says the same */
+    /* The kernel's X words (offsets from its X block) as apu_reverb.c lays them out */
     assert(GP_LOOP_FIFO2 == 0x08u && GP_LOOP_OUTL == 0x20u && GP_LOOP_OUTR == 0x40u);
-    assert(GP_LOOP_MBOX + 2u * GP_LOOP_MB_MAX <= GP_LOOP_KX_BASE && GP_KFREEVERB_KIN >= GP_LOOP_KX_BASE);
     assert(GP_LOOP_OUTLP == 0x1Bu && GP_LOOP_OUTST == 0x1Cu && GP_LOOP_OUTST + 4u <= GP_LOOP_OUTL);
-    assert(GP_KFREEVERB_INGAIN == 0xE1u && GP_KFREEVERB_WET == 0xE4u && GP_KFREEVERB_APG == 0xE5u);
-    assert(GP_KFREEVERB_CTAB == 0xF0u && GP_KFREEVERB_ATAB == 0x150u && GP_KFREEVERB_RCHAIN == 0x1B0u);
-    assert(GP_KFREEVERB_ACCL == 0x170u && GP_KFREEVERB_ACCR == 0x190u && GP_KFREEVERB_PRE_IN == 0x340u);
+    assert(GP_KFREEVERB_KIN == 0u && GP_KFREEVERB_INGAIN == 0x28u && GP_KFREEVERB_WET == 0x2Bu);
+    assert(GP_KFREEVERB_APG == 0x2Cu && GP_KFREEVERB_INST == 0x2Au && GP_KFREEVERB_INLP == 0x29u);
+    assert(GP_KFREEVERB_CTAB == 0x30u && GP_KFREEVERB_ATAB == 0x90u && GP_KFREEVERB_RCHAIN == 0xF0u);
+    assert(GP_KFREEVERB_ACCL == 0xB0u && GP_KFREEVERB_ACCR == 0xD0u && GP_KFREEVERB_PRE_IN == 0x280u);
+    assert(GP_KFREEVERB_WCHAIN == GP_KFREEVERB_RCHAIN + 8u && GP_KFREEVERB_PRE_OUT == GP_KFREEVERB_PRE_IN + 32u);
     assert(GP_KFREEVERB_OUTL == GP_LOOP_OUTL);
-    assert(0x360u + 64u * (APU_REVERB_LINES - 1u) + 32u <= 0xC00u);   /* line blocks below the mixbin mirror */
-    assert(0x1B8u + 16u * (APU_REVERB_LINES - 1u) + 7u <= 0x340u);    /* descriptors below the blocks */
-    assert(2u * APU_REVERB_LINES <= 60u);                              /* the kernel's descriptor quota */
+    assert(GP_KFREEVERB_PRE_OUT + 64u * (APU_REVERB_LINES - 1u) + 32u == GP_KFREEVERB_K_XWORDS);   /* the X block's end */
+    assert(GP_KFREEVERB_WCHAIN + 16u * (APU_REVERB_LINES - 1u) + 7u <= GP_KFREEVERB_PRE_IN);   /* descriptors below the blocks */
+    assert(GP_KFREEVERB_K_DESCRIPTORS == 2u * APU_REVERB_LINES && GP_KFREEVERB_K_DESCRIPTORS <= 60u);
     assert(GP_LOOP_FLAGS == 0x11u && GP_LOOP_CNT == 0x10u);
-    printf("    -> 25 lines, chains end at EOL and at the FIFO descriptor, buffers apart [PASS]\n");
+    printf("    -> 25 lines in the slot's X block and scratch, both chains end at EOL, buffers apart [PASS]\n");
 
     printf("[2] Coefficients...\n");
     assert(apu_reverb_q23(0.5f) == 0x400000u && apu_reverb_q23(-1.0f) == 0x800000u);
     assert(apu_reverb_q23(1.0f) == 0x7FFFFFu && apu_reverb_q23(-2.0f) == 0x800000u);
     {
-        uint32_t g_short = find(w, n, GP_KFREEVERB_CTAB + 3u), g_long = find(w, n, GP_KFREEVERB_CTAB + 6u * 15u + 3u);
+        uint32_t g_short = find(w, n, XB + GP_KFREEVERB_CTAB + 3u), g_long = find(w, n, XB + GP_KFREEVERB_CTAB + 6u * 15u + 3u);
         assert(g_short > g_long && g_short < 0x7FFFFFu);      /* a longer comb decays more per pass */
         p.decay_time = 3.0f;
-        n = apu_reverb_coefficients(&p, w);
-        assert(find(w, n, GP_KFREEVERB_CTAB + 3u) > g_short);              /* longer decay, more feedback */
+        n = apu_reverb_coefficients(&p, XB, w);
+        assert(find(w, n, XB + GP_KFREEVERB_CTAB + 3u) > g_short);              /* longer decay, more feedback */
         p.hf_ratio = 1.0f;
-        n = apu_reverb_coefficients(&p, w);
-        assert(find(w, n, GP_KFREEVERB_CTAB + 4u) == 0);                  /* no damping */
+        n = apu_reverb_coefficients(&p, XB, w);
+        assert(find(w, n, XB + GP_KFREEVERB_CTAB + 4u) == 0);                  /* no damping */
     }
     printf("    -> feedback follows the decay time, damping the HF ratio [PASS]\n");
 

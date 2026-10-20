@@ -69,7 +69,14 @@ class AsmError(Exception):
 
 # ---------------------------------------------------------------- expressions
 
-def evaluate(expr, symbols, pass_no):
+# Relocatable assembly (ABI 2 kernel images, docs/GP_KERNELS.md): the space
+# ('p', 'x' or 'y') each relocatable symbol moves with. None: absolute assembly.
+_REL = None
+_REL_SHIFTS = (0x2A1, 0x553)     # trial base moves that tell a relocatable expression from a constant
+
+
+def evaluate(expr, symbols, pass_no, shift=None):
+    """shift: {space: n} adds n to every relocatable symbol of that space (reloc_kind)."""
     e = expr.strip()
     if not e:
         raise AsmError('empty expression')
@@ -81,7 +88,10 @@ def evaluate(expr, symbols, pass_no):
         if name.lower().startswith('0x'):
             return name
         if name in symbols:
-            return str(symbols[name])
+            v = symbols[name]
+            if shift and _REL:
+                v += shift.get(_REL.get(name), 0)
+            return str(v)
         if pass_no == 1:
             return '0'
         raise AsmError('undefined symbol %s' % name)
@@ -90,6 +100,33 @@ def evaluate(expr, symbols, pass_no):
         raise AsmError('bad expression %r' % expr)
     e = e.replace('/', '//')
     return int(eval(e, {'__builtins__': {}}, {}))
+
+
+def reloc_kind(expr, symbols, pass_no):
+    """The space an expression moves with: None (a constant), 'p', 'x' or 'y'.
+    reloc +- constant is relocatable, reloc - reloc of one space a constant;
+    anything else that involves a relocatable symbol is an error."""
+    if not _REL:
+        return None
+    v0 = evaluate(expr, symbols, pass_no)
+    kind = None
+    for space in 'pxy':
+        moves = [evaluate(expr, symbols, pass_no, {space: d}) - v0 for d in _REL_SHIFTS]
+        if moves == [0, 0]:
+            continue
+        if moves != list(_REL_SHIFTS) or kind:
+            raise AsmError('%r is not relocatable (only reloc +- constant, or reloc - reloc of one space)' % expr)
+        kind = space
+    return kind
+
+
+def is_rel(expr, symbols, pass_no):
+    return reloc_kind(expr, symbols, pass_no) is not None
+
+
+def no_rel(expr, symbols, pass_no, what):
+    if is_rel(expr, symbols, pass_no):
+        raise AsmError('%s cannot take a relocatable operand (%s)' % (what, expr))
 
 
 # ---------------------------------------------------------------- operands
@@ -154,6 +191,8 @@ def parse_ea(ea, symbols, pass_no):
     m = re.fullmatch(r'-\(r([0-7])\)', e)
     if m:
         return 'rn', (0b111 << 3) | int(m.group(1))
+    if is_rel(ea, symbols, pass_no):
+        return 'long', evaluate(ea, symbols, pass_no) & 0xFFFFFF   # relocatable: always the extension word
     return 'abs', evaluate(ea, symbols, pass_no) & 0xFFFFFF
 
 
@@ -232,6 +271,7 @@ def encode_moves(moves, alu, symbols, pass_no):
         if d not in REG5:
             raise AsmError('bad immediate destination %s' % dst)
         r = REG5[d]
+        reloc_kind(src[1:], symbols, pass_no)              # only reloc +- constant
         val = evaluate(src[1:], symbols, pass_no) & 0xFFFFFF
         return [0x400000 | ((r >> 3) << 20) | ((r & 7) << 16) | (1 << 15) | (1 << 14) | (0b110100 << 8) | alu, val]
     # register -> register
@@ -250,7 +290,7 @@ def encode_moves(moves, alu, symbols, pass_no):
     base = 0x400000 | ((reg >> 3) << 20) | ((1 if space == 'y' else 0) << 19) | ((reg & 7) << 16) | (w << 15) | alu
     if kind == 'rn':
         return [base | (1 << 14) | (v << 8)]
-    if v < 0x40 and not ea.strip().startswith('>'):
+    if kind == 'abs' and v < 0x40 and not ea.strip().startswith('>'):
         return [base | (v << 8)]
     return [base | (1 << 14) | (0b110000 << 8), v]
 
@@ -326,9 +366,18 @@ def imm(op, symbols, pass_no):
     return evaluate(op[1:], symbols, pass_no)
 
 
+def short_addr(op, symbols, pass_no, what):
+    """An x:/y: operand of a form with no extension word: never relocatable."""
+    m = parse_mem(op)
+    if m:
+        no_rel(m[1], symbols, pass_no, what)
+    return mem_addr(op, symbols, pass_no)
+
+
 def bit_no(op, symbols, pass_no):
     """Bit number of jclr/jset/bset/bclr. The DSP56300 field is 5 bits, but xemu's
     templates only decode 0-15, so larger numbers are refused."""
+    no_rel(op[1:], symbols, pass_no, 'a bit number')
     n = imm(op, symbols, pass_no)
     if not 0 <= n < 16:
         raise AsmError('bit number %d: only 0-15 (xemu decodes 4 bits)' % n)
@@ -349,11 +398,15 @@ def encode(mn, operands, pc, symbols, pass_no):
         d = ops[0].lower()
         return [(0x000008 if mn_l == 'inc' else 0x00000A) | (1 if d == 'b' else 0)]
     if mn_l in ('jmp', 'jsr'):
+        if reloc_kind(ops[0], symbols, pass_no) not in (None, 'p'):
+            raise AsmError('%s: the target must be in P' % mn)
         t = evaluate(ops[0], symbols, pass_no)
         if t < 0x1000:
             return [(0x0C0000 if mn_l == 'jmp' else 0x0D0000) | t]
         return [0x0AF080 if mn_l == 'jmp' else 0x0BF080, t & 0xFFFFFF]
     if mn_l.startswith('j') and mn_l[1:] in CC:
+        if reloc_kind(ops[0], symbols, pass_no) not in (None, 'p'):
+            raise AsmError('%s: the target must be in P' % mn)
         t = evaluate(ops[0], symbols, pass_no)
         if t >= 0x1000:
             raise AsmError('%s target beyond 12 bits' % mn)
@@ -364,7 +417,7 @@ def encode(mn, operands, pc, symbols, pass_no):
         set_bit = 0x20 if mn_l == 'jset' else 0
         if is_reg(ops[1], REG6):
             return [0x0AC000 | (REG6[ops[1].lower()] << 8) | set_bit | n, target]
-        sp, a = mem_addr(ops[1], symbols, pass_no)
+        sp, a = short_addr(ops[1], symbols, pass_no, mn)
         if a >= 0xFFFFC0:
             return [0x0A8080 | ((a & 0x3F) << 8) | (space_bit(sp) << 6) | set_bit | n, target]
         if a < 0x40:
@@ -376,7 +429,7 @@ def encode(mn, operands, pc, symbols, pass_no):
             low = {'bclr': 0x40, 'bset': 0x60, 'bchg': 0x40}[mn_l]
             base = 0x0BC000 if mn_l == 'bchg' else 0x0AC000
             return [base | (REG6[ops[1].lower()] << 8) | low | n]
-        sp, a = mem_addr(ops[1], symbols, pass_no)
+        sp, a = short_addr(ops[1], symbols, pass_no, mn)
         base = 0x0B0000 if mn_l == 'bchg' else 0x0A0000
         bit = 0x20 if mn_l == 'bset' else 0
         if a >= 0xFFFFC0:
@@ -392,13 +445,16 @@ def encode(mn, operands, pc, symbols, pass_no):
             sp, a = mem_addr(dst, symbols, pass_no)
             if a < 0xFFFFC0:
                 raise AsmError('movep: destination must be a peripheral')
+            reloc_kind(src[1:], symbols, pass_no)
             v = imm(src, symbols, pass_no) & 0xFFFFFF
             return [0x084080 | (space_bit(sp) << 16) | (1 << 15) | (0b110100 << 8) | (a & 0x3F), v]
         # pp <-> register:  0000100sW1dddddd00pppppp  (W=1: register -> pp)
         if is_reg(dst, REG6) and msrc:
+            no_rel(msrc[1], symbols, pass_no, 'movep pp')
             sp, a = msrc[0], evaluate(msrc[1], symbols, pass_no) & 0xFFFFFF
             return [0x084000 | (space_bit(sp) << 16) | (REG6[dst.lower()] << 8) | (a & 0x3F)]
         if is_reg(src, REG6) and mdst:
+            no_rel(mdst[1], symbols, pass_no, 'movep pp')
             sp, a = mdst[0], evaluate(mdst[1], symbols, pass_no) & 0xFFFFFF
             return [0x084000 | (space_bit(sp) << 16) | (1 << 15) | (REG6[src.lower()] << 8) | (a & 0x3F)]
         # pp <-> absolute memory: 0000100sW1MMMRRR1Spppppp (W=1: ea -> pp)
@@ -418,6 +474,7 @@ def encode(mn, operands, pc, symbols, pass_no):
         src = ops[0]
         tail = 0x00 if mn_l == 'do' else 0x20
         if src.startswith('#'):
+            no_rel(src[1:], symbols, pass_no, mn)
             n = imm(src, symbols, pass_no)
             if not 0 < n < 0x1000:
                 raise AsmError('%s count must be 1..4095' % mn)
@@ -426,12 +483,13 @@ def encode(mn, operands, pc, symbols, pass_no):
         if is_reg(src, REG6):
             w = 0x06C000 | (REG6[src.lower()] << 8) | tail
             return [w, last] if last is not None else [w]
-        sp, a = mem_addr(src, symbols, pass_no)
+        sp, a = short_addr(src, symbols, pass_no, mn)
         if a >= 0x40:
             raise AsmError('%s: memory count must be at an address < $40' % mn)
         w = 0x060000 | (a << 8) | (space_bit(sp) << 6) | tail
         return [w, last] if last is not None else [w]
     if mn_l in ('ori', 'andi'):
+        no_rel(ops[0][1:], symbols, pass_no, mn)
         n = imm(ops[0], symbols, pass_no)
         ee = {'mr': 0, 'ccr': 1, 'com': 1, 'omr': 2, 'eom': 2}[ops[1].lower()]
         return [((n & 0xFF) << 8) | (0xF8 if mn_l == 'ori' else 0xB8) | ee]
@@ -439,7 +497,7 @@ def encode(mn, operands, pc, symbols, pass_no):
         v = imm(ops[0], symbols, pass_no)
         d = 1 if ops[1].lower() == 'b' else 0
         code = {'add': 0, 'sub': 4, 'cmp': 5}[mn_l]
-        if 0 <= v < 0x40 and not ops[0].startswith('#>'):
+        if 0 <= v < 0x40 and not ops[0].startswith('#>') and not is_rel(ops[0][1:], symbols, pass_no):
             return [0x014080 | (v << 8) | (d << 3) | code]
         return [0x0140C0 | (d << 3) | code, v & 0xFFFFFF]
     if mn_l in ('move', 'movec'):
@@ -491,7 +549,7 @@ def encode_movec(p, symbols, pass_no):
     base = 0x050020 | (w << 15) | (space_bit(space) << 6) | c
     if kind == 'rn':
         return [base | (1 << 14) | (v << 8)]
-    if v < 0x40:
+    if kind == 'abs' and v < 0x40:
         return [base | (v << 8)]
     return [base | (1 << 14) | (0b110000 << 8), v]
 
@@ -520,57 +578,172 @@ def parse_line(line):
     return label, parts[0], parts[1] if len(parts) > 1 else ''
 
 
-def assemble(text):
+def assemble(text, bases=None):
+    """Two passes over the source. bases None: absolute assembly. bases {'p', 'x',
+    'y'}: a relocatable kernel (ABI 2) placed at those bases: KX and KY are
+    predefined as the X and Y bases, `org p:n` means P base + n, and every label
+    moves with P."""
+    global _REL
     lines = text.splitlines()
     symbols = {}
     exported = []
-    for pass_no in (1, 2):
-        pc = 0
-        mem = {}
-        listing = []
-        for no, raw in enumerate(lines, 1):
-            try:
-                label, mn, operands = parse_line(raw)
-                if mn and mn.lower() == 'equ':
-                    v = evaluate(operands, symbols, pass_no)
-                    symbols[label] = v
-                    if pass_no == 1:
-                        exported.append(label)
-                    continue
-                if label:
-                    if pass_no == 1:
-                        if label in symbols:
-                            raise AsmError('duplicate label %s' % label)
-                        exported.append(label)
-                    symbols[label] = pc
-                if not mn:
-                    continue
-                if mn.lower() == 'org':
-                    m = re.fullmatch(r'[pP]:(.+)', operands.strip())
-                    if not m:
-                        raise AsmError('org supports p: only')
-                    pc = evaluate(m.group(1), symbols, pass_no)
+    _REL = {} if bases is not None else None
+    try:
+        for pass_no in (1, 2):
+            pc = 0
+            mem = {}
+            listing = []
+            if bases is not None:
+                symbols['KX'], symbols['KY'] = bases['x'], bases['y']
+                _REL['KX'], _REL['KY'] = 'x', 'y'
+            for no, raw in enumerate(lines, 1):
+                try:
+                    label, mn, operands = parse_line(raw)
+                    if mn and mn.lower() == 'equ':
+                        if bases is not None and label in ('KX', 'KY'):
+                            raise AsmError('%s is predefined' % label)
+                        v = evaluate(operands, symbols, pass_no)
+                        symbols[label] = v
+                        if _REL is not None:
+                            kind = reloc_kind(operands, symbols, pass_no)
+                            if kind:
+                                _REL[label] = kind
+                            else:
+                                _REL.pop(label, None)
+                        if pass_no == 1:
+                            exported.append(label)
+                        continue
                     if label:
+                        if pass_no == 1:
+                            if label in symbols:
+                                raise AsmError('duplicate label %s' % label)
+                            exported.append(label)
                         symbols[label] = pc
-                    continue
-                if mn.lower() == 'dc':
-                    words = [evaluate(x, symbols, pass_no) & 0xFFFFFF for x in split_operands(operands)]
-                else:
-                    words = encode(mn, operands, pc, symbols, pass_no)
-                listing.append((pc, words, raw.rstrip()))
-                for w in words:
-                    if pc in mem:
-                        raise AsmError('P:$%04X written twice' % pc)
-                    mem[pc] = w & 0xFFFFFF
-                    pc += 1
-            except AsmError as e:
-                raise AsmError('line %d: %s\n    %s' % (no, e, raw.strip()))
+                        if _REL is not None:
+                            _REL[label] = 'p'
+                    if not mn:
+                        continue
+                    if mn.lower() == 'org':
+                        m = re.fullmatch(r'[pP]:(.+)', operands.strip())
+                        if not m:
+                            raise AsmError('org supports p: only')
+                        if _REL is not None:
+                            no_rel(m.group(1), symbols, pass_no, 'org')
+                        pc = evaluate(m.group(1), symbols, pass_no) + (bases['p'] if bases is not None else 0)
+                        if label:
+                            symbols[label] = pc
+                        continue
+                    if mn.lower() == 'dc':
+                        words = [evaluate(x, symbols, pass_no) & 0xFFFFFF for x in split_operands(operands)]
+                        for x in split_operands(operands):
+                            reloc_kind(x, symbols, pass_no)      # only reloc +- constant
+                    else:
+                        words = encode(mn, operands, pc, symbols, pass_no)
+                    listing.append((pc, words, raw.rstrip()))
+                    for w in words:
+                        if pc in mem:
+                            raise AsmError('P:$%04X written twice' % pc)
+                        mem[pc] = w & 0xFFFFFF
+                        pc += 1
+                except AsmError as e:
+                    raise AsmError('line %d: %s\n    %s' % (no, e, raw.strip()))
+    finally:
+        _REL = None
     return mem, symbols, exported, listing
 
 
-IMAGE_ORIGIN = 0x100      # dsp/gp_loop.asm KERNEL
+IMAGE_ORIGIN = 0x100      # ABI 1: dsp/gp_loop.asm KERNEL
 IMAGE_MAGIC = 0x47504B    # 'GPK' (AL_XBOX_GP_IMAGE_MAGIC)
-IMAGE_ABI = 1
+IMAGE_ABI = 2
+RELOC_KINDS = {'p': 0, 'p12': 1, 'x': 2, 'y': 3}   # reloc entry bits 13:12
+ABI2_XWORDS_MIN = 0x28    # the ABI words of a slot's X block (KIN .. KPARAM + 31)
+
+
+def is_relocatable_source(text):
+    """An ABI 2 kernel declares K_XWORDS (docs/GP_KERNELS.md)."""
+    return re.search(r'^K_XWORDS\s+equ\b', text, re.M | re.I) is not None
+
+
+def _is_dc(raw):
+    _, mn, _ = parse_line(raw)
+    return mn is not None and mn.lower() == 'dc'
+
+
+def relocations(text):
+    """Assemble a relocatable kernel at base 0 and find, by moving each base,
+    which code words move with which space: [(offset, kind)], plus the base-0
+    assembly. Opcode words move in their 12-bit address field (a short jmp,
+    jsr or jCC into P); extension words move whole."""
+    zero = {'p': 0, 'x': 0, 'y': 0}
+    mem0, symbols, exported, listing = assemble(text, zero)
+    if not mem0 or min(mem0) != 0:
+        raise AsmError('a relocatable kernel starts at org p:0')
+    first = {pc for pc, _, raw in listing if not _is_dc(raw)}
+    found = {}
+    for space in 'pxy':
+        for d in _REL_SHIFTS:
+            mem = assemble(text, dict(zero, **{space: d}))[0]
+            if len(mem) != len(mem0):
+                raise AsmError('the code size depends on the %s base' % space.upper())
+            for i in mem0:
+                w0, w = mem0[i], mem[(i + d) if space == 'p' else i]
+                if w == w0:
+                    continue
+                if i in first:
+                    ok = space == 'p' and (w ^ w0) & ~0xFFF == 0 and (w & 0xFFF) - (w0 & 0xFFF) == d
+                    kind = 'p12'
+                else:
+                    ok = (w - w0) & 0xFFFFFF == d
+                    kind = space
+                if not ok or found.get(i, kind) != kind:
+                    raise AsmError('P:$%04X: a word that does not relocate cleanly' % i)
+                found[i] = kind
+    return sorted((i, RELOC_KINDS[k]) for i, k in found.items()), mem0, symbols, exported, listing
+
+
+def relocate(code, relocs, pbase, xbase, ybase):
+    """What the library's loader does (apu_gp.c): add each base to its words."""
+    out = list(code)
+    for off, kind in relocs:
+        w = out[off]
+        if kind == 0:
+            w = (w + pbase) & 0xFFFFFF
+        elif kind == 1:
+            w = (w & ~0xFFF) | ((w + pbase) & 0xFFF)
+        elif kind == 2:
+            w = (w + xbase) & 0xFFFFFF
+        else:
+            w = (w + ybase) & 0xFFFFFF
+        out[off] = w
+    return out
+
+
+def image_words(text):
+    """An alXboxEffectProgram image -> (words, code, symbols). ABI 2 (the source
+    declares K_XWORDS): magic, 2, scratch bytes, descriptors, X words, Y words,
+    reloc count, the relocs, then the code assembled at P:0 with KX = KY = 0.
+    ABI 1: magic, 1, scratch bytes, descriptors, then the code for P:$100."""
+    if is_relocatable_source(text):
+        relocs, mem, symbols, _, _ = relocations(text)
+        missing = [k for k in ('K_SCRATCH_BYTES', 'K_DESCRIPTORS', 'K_XWORDS', 'K_YWORDS') if k not in symbols]
+        if missing:
+            raise AsmError('an ABI 2 kernel defines K_SCRATCH_BYTES, K_DESCRIPTORS, K_XWORDS and K_YWORDS')
+        if symbols['K_XWORDS'] < ABI2_XWORDS_MIN:
+            raise AsmError('K_XWORDS counts the ABI words too: at least $%X' % ABI2_XWORDS_MIN)
+        code = [mem.get(i, 0) for i in range(max(mem) + 1)]
+        if len(code) > 0x1000:
+            raise AsmError('code beyond the 12-bit reloc offsets')
+        header = [IMAGE_MAGIC, 2, symbols['K_SCRATCH_BYTES'] & 0xFFFFFF, symbols['K_DESCRIPTORS'] & 0xFFFFFF,
+                  symbols['K_XWORDS'] & 0xFFFFFF, symbols['K_YWORDS'] & 0xFFFFFF, len(relocs)]
+        return header + [off | (kind << 12) for off, kind in relocs] + code, code, symbols
+    mem, symbols, _, _ = assemble(text)
+    missing = [k for k in ('K_SCRATCH_BYTES', 'K_DESCRIPTORS') if k not in symbols]
+    if not mem or min(mem) != IMAGE_ORIGIN or missing:
+        raise AsmError('a custom kernel starts at P:$%X and defines K_SCRATCH_BYTES and K_DESCRIPTORS '
+                       '(or is relocatable: K_XWORDS, org p:0)' % IMAGE_ORIGIN)
+    code = [mem.get(IMAGE_ORIGIN + i, 0) for i in range(max(mem) + 1 - IMAGE_ORIGIN)]
+    header = [IMAGE_MAGIC, 1, symbols['K_SCRATCH_BYTES'] & 0xFFFFFF, symbols['K_DESCRIPTORS'] & 0xFFFFFF]
+    return header + code, code, symbols
 
 
 def main():
@@ -582,13 +755,18 @@ def main():
     ap.add_argument('--list')
     ap.add_argument('--kernel', action='store_true', help='the image starts at its first org (NAME_ORIGIN)')
     ap.add_argument('--image', action='store_true',
-                    help='a custom kernel for alXboxEffectProgram: org p:$100, K_SCRATCH_BYTES and K_DESCRIPTORS '
-                         'equates; emits NAME_image[] (header + code)')
+                    help='a kernel image for alXboxEffectProgram (docs/GP_KERNELS.md): relocatable (ABI 2) if '
+                         'the source defines K_XWORDS, else ABI 1 at P:$100; emits NAME_image[] (header + code)')
     args = ap.parse_args()
     with open(args.source, encoding='utf-8') as f:
         text = f.read()
+    rel = args.image and is_relocatable_source(text)
     try:
-        mem, symbols, exported, listing = assemble(text)
+        if rel:
+            _, mem, symbols, exported, listing = relocations(text)
+        else:
+            mem, symbols, exported, listing = assemble(text)
+        image = image_words(text)[0] if args.image else None
     except AsmError as e:
         print('%s: %s' % (args.source, e), file=sys.stderr)
         return 1
@@ -596,13 +774,7 @@ def main():
         print('no code', file=sys.stderr)
         return 1
     origin = min(mem)
-    if args.image:
-        missing = [k for k in ('K_SCRATCH_BYTES', 'K_DESCRIPTORS') if k not in symbols]
-        if origin != IMAGE_ORIGIN or missing:
-            print('a custom kernel starts at P:$%X and defines K_SCRATCH_BYTES and K_DESCRIPTORS' % IMAGE_ORIGIN,
-                  file=sys.stderr)
-            return 1
-    elif origin != 0 and not args.kernel:
+    if not args.image and origin != 0 and not args.kernel:
         print('program must start at P:0 (a kernel image takes --kernel)', file=sys.stderr)
         return 1
     size = max(mem) + 1 - origin
@@ -615,13 +787,17 @@ def main():
            '#define %s_WORDS %du' % (up, size)]
     if origin:
         out.append('#define %s_ORIGIN 0x%Xu' % (up, origin))
+    if rel:
+        out.append('/* relocatable (ABI 2): symbols in X, Y and P are offsets from the slot\'s bases */')
+    seen = {}
     for s in exported:
         if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', s):
+            if seen.setdefault(s.upper(), s) != s:
+                print('%s: %s and %s are the same in the header' % (args.source, seen[s.upper()], s), file=sys.stderr)
+                return 1
             out.append('#define %s_%s 0x%Xu' % (up, s.upper(), symbols[s] & 0xFFFFFF))
     if args.image:
-        # AL/alext.h: magic 'GPK', ABI version, scratch bytes, descriptors a frame, then the code at P:$100
-        header = [IMAGE_MAGIC, IMAGE_ABI, symbols['K_SCRATCH_BYTES'] & 0xFFFFFF, symbols['K_DESCRIPTORS'] & 0xFFFFFF]
-        words = header + words
+        words = image
         out.append('#define %s_IMAGE_WORDS %du' % (up, len(words)))
         out += ['', 'static const uint32_t %s_image[%s_IMAGE_WORDS] = {' % (name, up)]
     else:
