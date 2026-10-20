@@ -18,8 +18,8 @@ extern "C" {
 
 /**
  * Maximum number of concurrent OpenAL sources supported. An application that
- * needs fewer may define it smaller for every library file (a source is ~160
- * bytes of bss); the per-frame tick only walks up to the highest source in
+ * needs fewer may define it smaller for every library file (a source is ~260
+ * bytes of bss, ~100 of them its timed parameter changes); the per-frame tick only walks up to the highest source in
  * use either way (al_source_id_end).
  */
 #ifndef AL_MAX_SOURCES
@@ -69,6 +69,13 @@ typedef struct ALsource {
     uint8_t timed_op;                /* alXboxSource*AtSample waiting: 0 none, 1 play, 2 stop */
     ALuint timed_stream;             /* the stream it waits for */
     uint32_t timed_sample;           /* the stream position it acts at */
+    uint8_t timed_par_n;             /* alXboxSourcefvAtSample changes waiting, oldest first */
+    uint8_t timed_par_gains;         /* bit i: change i is AL_XBOX_DIRECT_GAINS (else AL_PITCH) */
+    ALuint timed_par_stream;         /* the stream they all wait for */
+    struct {
+        uint32_t sample;             /* the stream position it acts at */
+        ALfloat v[2];                /* the pitch, or the left and right gains */
+    } timed_par[AL_XBOX_TIMED_PARAMS];
     ALenum spatialize;               /* AL_SOURCE_SPATIALIZE_SOFT: AL_FALSE, AL_TRUE, AL_AUTO_SOFT */
     ALboolean direct_channels;       /* AL_DIRECT_CHANNELS_SOFT (stored) */
     ALenum distance_model;           /* AL_DISTANCE_MODEL with AL_SOURCE_DISTANCE_MODEL enabled */
@@ -282,6 +289,8 @@ void al_source_debug_clock(bool on, uint32_t pos, uint32_t gp_frame, bool busy);
 uint32_t al_source_debug_timed_frame(void);
 /* alXboxSource*AtSample: the operation a source waits with (0 none, 1 play, 2 stop) */
 uint32_t al_source_debug_timed_pending(ALuint source);
+/* alXboxSourcefvAtSample: the changes a source has waiting */
+uint32_t al_source_debug_timed_params(ALuint source);
 
 
 /** Tests: what GP slot `slot` should run (AL_GP_NONE, AL_GP_REVERB with `p`, AL_GP_KERNEL with `k` and `params`). */

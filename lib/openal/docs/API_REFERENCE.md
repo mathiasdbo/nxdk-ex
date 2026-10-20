@@ -293,6 +293,24 @@ void alXboxSourceStopAtSample(ALuint source, ALuint stream, ALuint sample);
   source drops it. Until it acts the source keeps its state.
 - While `stream` is paused or not started they wait; with it stopped they act at once. `stream` not a streaming
   source, or `source` itself: `AL_INVALID_OPERATION`; a name that is no source: `AL_INVALID_NAME`.
+
+**Pitch and direct gains on a stream's clock (`AL_XBOX_timed_source`):**
+
+```c
+void alXboxSourcefvAtSample(ALuint source, ALenum param, const ALfloat *values, ALuint stream, ALuint sample);
+```
+
+- `param` is `AL_PITCH` (`values[0]`) or `AL_XBOX_DIRECT_GAINS` (`values[0..1]`), checked as `alSourcef` /
+  `alSourcefv` check them: another parameter is `AL_INVALID_ENUM`, `NULL` or a value they refuse
+  `AL_INVALID_VALUE`; `source` and `stream` as `alXboxSourcePlayAtSample`.
+- Made when `stream` plays frame `sample`, in the same window as the timed starts and stops. Changes due with a
+  timed start or stop are made before it, so a sound starts at its new pitch and gains.
+- Up to `AL_XBOX_TIMED_PARAMS` (8) per source, acted on in the order given (queue them in the order of their
+  frames). One more makes the oldest at once to make room; one for another stream than those waiting makes the
+  waiting ones at once.
+- `alSourceStop`, `alSourceRewind` and deleting the source drop the ones waiting; `alSourcePlay` and a plain
+  `alSourcef(v)` leave them. A paused or not started stream holds them; a stopped one, or one already due,
+  makes them at once.
 - `AL_EFFECTSLOT_EFFECT`, or deleting the slot, drops the changes still queued for it.
 
 How to write a kernel: [`GP_KERNELS.md`](GP_KERNELS.md).
