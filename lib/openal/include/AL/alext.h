@@ -214,8 +214,11 @@ typedef void (AL_APIENTRY *LPALXBOXEFFECTPROGRAM)(ALuint effect, const ALuint *w
  *
  * attaches `effect` to `slot` (copying it now, like AL_EFFECTSLOT_EFFECT) at
  * the 0.67 ms GP frame that mixes frame `sample` of the streaming source
- * `source`: its stream position, the frames it has played since its queue
- * started (32 bits, wrapping; what an engine that mixes ahead counts). The
+ * `source`: its stream clock, the frames it has played since it last started
+ * from the start of its queue (alSourcePlay from AL_INITIAL or AL_STOPPED,
+ * alSourceRewind; 32 bits, wrapping; what an engine that mixes ahead
+ * counts). Unqueueing played buffers does not move it back, unlike
+ * AL_SAMPLE_OFFSET. The
  * effect must run the kernel the slot already runs (the same image) with new
  * parameters, and the slot must be the active one; otherwise, or with 16
  * changes already queued, AL_INVALID_OPERATION. A source that is not
@@ -240,7 +243,7 @@ typedef void (AL_APIENTRY *LPALXBOXEFFECTSLOTATSAMPLE)(ALuint slot, ALuint effec
  *
  * For an engine that mixes ahead into a streaming source and also plays some
  * sounds on sources of their own: the sound starts (stops) when the stream
- * plays frame `sample`, its stream position as alXboxEffectSlotAtSample
+ * plays frame `sample`, its stream clock as alXboxEffectSlotAtSample
  * counts it, so it lines up with what the engine mixed into the stream for
  * that moment. `source` is any other source; `stream` must be a streaming
  * source (AL_INVALID_OPERATION otherwise, AL_INVALID_NAME for a name that is

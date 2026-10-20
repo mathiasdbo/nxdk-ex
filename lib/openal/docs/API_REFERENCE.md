@@ -263,8 +263,10 @@ void alXboxEffectSlotAtSample(ALuint slot, ALuint effect, ALuint source, ALuint 
 ```
 
 - Attaches `effect` to `slot` (a copy, taken now) at the GP frame that mixes frame `sample` of the streaming
-  source `source`. `sample` is the source's stream position: frames played since its queue started, 32 bits,
-  wrapping.
+  source `source`. `sample` is the source's stream clock: frames played since it last started from the start of
+  its queue (`alSourcePlay` from `AL_INITIAL` or `AL_STOPPED`, or `alSourceRewind`), 32 bits, wrapping.
+  Unqueueing played buffers does not move it back, unlike `AL_SAMPLE_OFFSET`, which counts from the queue's
+  current start.
 - The effect must run the kernel the slot already runs (the same image), and the slot must be the active one.
   Otherwise, a source that is not streaming, or 16 changes already queued: `AL_INVALID_OPERATION`. A name that
   is no slot, effect or source: `AL_INVALID_NAME`.
@@ -281,7 +283,7 @@ void alXboxSourcePlayAtSample(ALuint source, ALuint stream, ALuint sample);
 void alXboxSourceStopAtSample(ALuint source, ALuint stream, ALuint sample);
 ```
 
-- `source` starts (stops) when the streaming source `stream` plays frame `sample` (its stream position, as
+- `source` starts (stops) when the streaming source `stream` plays frame `sample` (its stream clock, as
   above): a sound an engine plays on a source of its own lines up with what it mixed ahead into the stream.
 - Acted on by `alXboxUpdateVoices()`, at the first update where the stream is at most half an update from
   `sample` (half the frames it played between the last two updates): up to half an update early or late. A
