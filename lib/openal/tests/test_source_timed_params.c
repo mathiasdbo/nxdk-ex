@@ -4,7 +4,8 @@
  * clock stands in for the stream's voice (al_source_debug_clock); each
  * alXboxUpdateVoices is one engine frame. The checks, the half-update window,
  * several changes in order, a full queue, a change and a start on one frame,
- * what drops them, and a paused or stopped stream.
+ * what drops them, a paused or stopped stream, and a device closed with
+ * changes and a start still waiting.
  */
 #define AL_ALEXT_PROTOTYPES
 #include <assert.h>
@@ -219,6 +220,34 @@ static void test_stream_states(void) {
     printf("    -> paused: waits; stopped: at once [PASS]\n");
 }
 
+/* Closing the device with a change and a start waiting leaves nothing counted */
+static ALCdevice *test_close_waiting(ALCdevice *dev, ALCcontext *ctx) {
+    ALuint a = sound();
+    uint32_t ops = 9, params = 9;
+    printf("[6] the device closed with a change and a start waiting\n");
+    alSourcePlay(s_stream);
+    frame_at(70000);
+    frame_at(70400);
+    pitch_at(a, 0.5f, 90000);
+    alXboxSourcePlayAtSample(a, s_stream, 90000);
+    al_source_debug_timed_counts(&ops, &params);
+    assert(ops == 1u && params == 1u);
+    al_source_debug_clock(false, 0u, 0u, false);
+    alcMakeContextCurrent(NULL);
+    alcDestroyContext(ctx);
+    alcCloseDevice(dev);
+    dev = alcOpenDevice(NULL);
+    assert(dev);
+    ctx = alcCreateContext(dev, NULL);
+    alcMakeContextCurrent(ctx);
+    al_source_debug_timed_counts(&ops, &params);
+    assert(ops == 0u && params == 0u);
+    alcMakeContextCurrent(NULL);
+    alcDestroyContext(ctx);
+    printf("    -> both counts back to 0 [PASS]\n");
+    return dev;
+}
+
 int main(void) {
     ALCdevice *dev = alcOpenDevice(NULL);
     ALCcontext *ctx;
@@ -234,9 +263,7 @@ int main(void) {
     test_order_and_full();
     test_with_start_and_drop();
     test_stream_states();
-    al_source_debug_clock(false, 0u, 0u, false);
-    alcMakeContextCurrent(NULL);
-    alcDestroyContext(ctx);
+    dev = test_close_waiting(dev, ctx);
     alcCloseDevice(dev);
     printf("=== pitch and direct gains timed to a stream: all passed ===\n");
     return 0;

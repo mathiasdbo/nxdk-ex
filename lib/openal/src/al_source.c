@@ -138,6 +138,8 @@ void al_source_init_subsystem(void) {
     s_subsystem_initialized = true;
 }
 
+static void timed_reset(void);
+
 void al_source_cleanup_subsystem(void) {
     for (size_t i = 0; i < AL_MAX_SOURCES; i++) {
         ALsource *src = &g_sources[i];
@@ -153,6 +155,7 @@ void al_source_cleanup_subsystem(void) {
             source_reset_defaults(src, (ALuint)(i + 1));
         }
     }
+    timed_reset();   /* the sources' waiting operations went with them */
     al_stream_shutdown();
     apu_voice_mgr_deinit();
     apu_spatial_reset();
@@ -2790,6 +2793,15 @@ static void timed_ops(void) {
     apu_voice_batch(al_source_get_apu_base(), false);
 }
 
+/* The device closed: no source holds an operation or a change any more */
+static void timed_reset(void) {
+    s_timed_src_n = 0;
+    s_timed_par_src_n = 0;
+    s_lead_stream = 0;
+    s_lead_have = false;
+    s_lead_half = 0u;
+}
+
 /* The update interval is measured on the stream last given */
 static void timed_lead_set(ALuint stream) {
     if (s_lead_stream != stream) {
@@ -2885,6 +2897,11 @@ AL_API void AL_APIENTRY alXboxSourcefvAtSample(ALuint source, ALenum param, cons
 uint32_t al_source_debug_timed_params(ALuint source) {
     ALsource *src = al_source_get(source);
     return src ? src->timed_par_n : 0u;
+}
+
+void al_source_debug_timed_counts(uint32_t *ops, uint32_t *params) {
+    *ops = s_timed_src_n;
+    *params = s_timed_par_src_n;
 }
 
 uint32_t al_source_debug_timed_pending(ALuint source) {
