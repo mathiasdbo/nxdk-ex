@@ -76,6 +76,10 @@ typedef struct ALsource {
         uint32_t sample;             /* the stream position it acts at */
         ALfloat v[2];                /* the pitch, or the left and right gains */
     } timed_par[AL_XBOX_TIMED_PARAMS];
+    bool lead_used;                  /* a streaming source timed work waits on: its update interval is measured */
+    bool lead_have;                  /* lead_pos is from the last update */
+    uint32_t lead_pos;               /* its clock at the last update */
+    uint32_t lead_half;              /* half the frames it played between the last two updates */
     ALenum spatialize;               /* AL_SOURCE_SPATIALIZE_SOFT: AL_FALSE, AL_TRUE, AL_AUTO_SOFT */
     ALboolean direct_channels;       /* AL_DIRECT_CHANNELS_SOFT (stored) */
     ALenum distance_model;           /* AL_DISTANCE_MODEL with AL_SOURCE_DISTANCE_MODEL enabled */
