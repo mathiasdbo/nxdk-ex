@@ -15,7 +15,6 @@ static inline void ring_flush(void) {
 }
 
 #define RING_MASK      (AL_STREAM_RING_FRAMES - 1u)
-#define RING_BYTES_MAX (AL_STREAM_RING_FRAMES * 4u)   /* stereo 16-bit */
 /* Silence is kept up to this far behind the play position's next lap */
 #define SILENCE_GUARD  256u
 
@@ -23,6 +22,7 @@ struct al_stream {
     bool in_use;
     uint8_t *ring;               /* kept in the slot when the stream is freed (reused) */
     uint32_t ring_phys;
+    uint32_t ring_bytes;         /* its size: the ring's frames in the first format that needed this much */
     bool has_format;
     ALbuffer ring_buf;           /* the ring, described as a buffer for the voice layer */
     int channels;
@@ -109,10 +109,11 @@ al_stream_t *al_stream_create(void) {
         al_stream_t *s = &s_streams[i];
         if (!s->in_use) {
             uint8_t *ring = s->ring;
-            uint32_t ring_phys = s->ring_phys;
+            uint32_t ring_phys = s->ring_phys, ring_bytes = s->ring_bytes;
             memset(s, 0, sizeof(*s));
             s->ring = ring;
             s->ring_phys = ring_phys;
+            s->ring_bytes = ring_bytes;
             s->in_use = true;
             s_scrub_enabled = 1;
             return s;
@@ -174,6 +175,15 @@ ALenum al_stream_queue(al_stream_t *s, ALsizei n, const ALuint *ids) {
         }
     }
     if (fmt && !s->has_format) {
+        /* Sized by the format (8-bit mono 16 KiB, 16-bit stereo 64 KiB), and
+         * kept in the slot for the next stream: one that needs more replaces
+         * it. The stream has not played yet, so the scrub does not touch it. */
+        uint32_t need = apu_vp_frames_to_bytes(AL_STREAM_RING_FRAMES, fmt->channels, fmt->bits);
+        if (s->ring && s->ring_bytes < need) {
+            apu_mem_free_phys(s->ring);
+            s->ring = NULL;
+            s->ring_bytes = 0;
+        }
         if (!s->ring) {
             /* Write-combining, not uncached: the CPU only writes the ring
              * (data, the silence ahead, the scrub behind), and uncached
@@ -181,10 +191,11 @@ ALenum al_stream_queue(al_stream_t *s, ALsizei n, const ALuint *ids) {
              * go out in whole lines. Its own block, as the table it was: a
              * ring placed in the pool stopped the APU's output on a console
              * (2026-10-16; xemu played it). */
-            s->ring = (uint8_t *)apu_mem_alloc_wc(RING_BYTES_MAX, &s->ring_phys);
+            s->ring = (uint8_t *)apu_mem_alloc_wc(need, &s->ring_phys);
             if (!s->ring) {
                 return AL_OUT_OF_MEMORY;
             }
+            s->ring_bytes = need;
         }
         set_format(s, fmt);
     }
@@ -246,6 +257,10 @@ uint32_t al_stream_processed(const al_stream_t *s) {
 
 uint32_t al_stream_total_frames(const al_stream_t *s) {
     return s->total;
+}
+
+uint32_t al_stream_debug_ring_bytes(const al_stream_t *s) {
+    return s->ring ? s->ring_bytes : 0u;
 }
 
 const ALbuffer *al_stream_ring_buffer(const al_stream_t *s) {
