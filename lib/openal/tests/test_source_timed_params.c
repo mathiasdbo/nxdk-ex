@@ -4,8 +4,8 @@
  * clock stands in for the stream's voice (al_source_debug_clock); each
  * alXboxUpdateVoices is one engine frame. The checks, the half-update window,
  * several changes in order, a full queue, a change and a start on one frame,
- * what drops them, a paused or stopped stream, and a device closed with
- * changes and a start still waiting.
+ * what drops them, a paused or stopped stream, two streams each with its own
+ * window, and a device closed with changes and a start still waiting.
  */
 #define AL_ALEXT_PROTOTYPES
 #include <assert.h>
@@ -220,11 +220,45 @@ static void test_stream_states(void) {
     printf("    -> paused: waits; stopped: at once [PASS]\n");
 }
 
+/* Two streams: work on the second does not take the first's window away */
+static void test_two_streams(void) {
+    ALuint a = sound(), b = sound(), other, ring2;
+    static int16_t pcm[FRAMES];
+    float p = 0.5f;
+    printf("[6] two streams, each with its own window\n");
+    alGenBuffers(1, &ring2);
+    alBufferData(ring2, AL_FORMAT_MONO16, pcm, (ALsizei)sizeof(pcm), 48000);
+    alGenSources(1, &other);
+    alSourceQueueBuffers(other, 1, &ring2);
+    alSourcei(other, AL_LOOPING, AL_TRUE);
+    alSourcePlay(other);
+    alSourcePlay(s_stream);
+    alXboxSourcePlayAtSample(a, other, 99000);           /* the second stream measured too */
+    frame_at(70000);
+    frame_at(70400);                                     /* both: 400 a frame, the window 200 */
+    pitch_at(a, 0.7f, 70700);                            /* on the first: 300 ahead, waits */
+    alXboxSourcefvAtSample(a, AL_PITCH, &p, other, 70700);   /* another stream: the first's at once */
+    assert(pitch(a) == 0.7f && al_source_debug_timed_params(a) == 1u);
+    pitch_at(a, 0.6f, 70700);                            /* back on the first: 0.5 at once */
+    assert(pitch(a) == 0.5f && al_source_debug_timed_params(a) == 1u);
+    alXboxSourceStopAtSample(b, other, 99000);           /* then more work on the second */
+    frame_at(70600);                                     /* 200 a frame: the window 100, 100 ahead */
+    assert(pitch(a) == 0.6f && al_source_debug_timed_params(a) == 0u);
+    alSourceStop(a);
+    alSourceStop(other);
+    alDeleteSources(1, &a);
+    alDeleteSources(1, &b);
+    alDeleteSources(1, &other);
+    alDeleteBuffers(1, &ring2);
+    assert(alGetError() == AL_NO_ERROR);
+    printf("    -> the first stream keeps its window while the second is used [PASS]\n");
+}
+
 /* Closing the device with a change and a start waiting leaves nothing counted */
 static ALCdevice *test_close_waiting(ALCdevice *dev, ALCcontext *ctx) {
     ALuint a = sound();
     uint32_t ops = 9, params = 9;
-    printf("[6] the device closed with a change and a start waiting\n");
+    printf("[7] the device closed with a change and a start waiting\n");
     alSourcePlay(s_stream);
     frame_at(70000);
     frame_at(70400);
@@ -263,6 +297,7 @@ int main(void) {
     test_order_and_full();
     test_with_start_and_drop();
     test_stream_states();
+    test_two_streams();
     dev = test_close_waiting(dev, ctx);
     alcCloseDevice(dev);
     printf("=== pitch and direct gains timed to a stream: all passed ===\n");

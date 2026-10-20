@@ -114,6 +114,10 @@ static void source_reset_defaults(ALsource *src, ALuint id) {
     src->timed_par_n = 0;
     src->timed_par_gains = 0;
     src->timed_par_stream = 0;
+    src->lead_used = false;
+    src->lead_have = false;
+    src->lead_pos = 0;
+    src->lead_half = 0;
     src->xbox_priority = -1.0f;
     src->virtualize = AL_TRUE;
 }
@@ -2617,9 +2621,6 @@ enum { TIMED_NONE = 0, TIMED_PLAY = 1, TIMED_STOP = 2 };
 
 static uint32_t s_timed_src_n;     /* sources with an operation waiting */
 static uint32_t s_timed_par_src_n; /* sources with parameter changes waiting */
-static ALuint s_lead_stream;       /* the stream the update interval is measured on */
-static uint32_t s_lead_pos, s_lead_half;
-static bool s_lead_have;
 
 static void timed_cancel(ALsource *src) {
     if (src->timed_op != TIMED_NONE) {
@@ -2649,22 +2650,32 @@ static al_source_clock_t timed_clock(ALuint stream, uint32_t *pos) {
     return AL_SOURCE_CLOCK_RUN;
 }
 
-/* Half the frames the stream played since the last update (once per update) */
+/* Each stream timed work waits on: half the frames it played since the last
+ * update (once per update) */
 static void timed_lead_update(void) {
-    uint32_t pos = 0;
-    if (s_lead_stream == 0u) {
-        return;
+    for (size_t i = 0; i < s_source_end; i++) {
+        ALsource *st = &g_sources[i];
+        uint32_t pos = 0;
+        if (!st->in_use || !st->lead_used) {
+            continue;
+        }
+        if (timed_clock(st->id, &pos) != AL_SOURCE_CLOCK_RUN) {
+            st->lead_have = false;
+            continue;
+        }
+        if (st->lead_have) {
+            uint32_t d = pos - st->lead_pos;
+            st->lead_half = (d < 48000u) ? d / 2u : 0u;   /* more than a second: a stall, not an interval */
+        }
+        st->lead_pos = pos;
+        st->lead_have = true;
     }
-    if (timed_clock(s_lead_stream, &pos) != AL_SOURCE_CLOCK_RUN) {
-        s_lead_have = false;
-        return;
-    }
-    if (s_lead_have) {
-        uint32_t d = pos - s_lead_pos;
-        s_lead_half = (d < 48000u) ? d / 2u : 0u;   /* more than a second: a stall, not an interval */
-    }
-    s_lead_pos = pos;
-    s_lead_have = true;
+}
+
+/* The window around a frame of `stream`: half its last update */
+static uint32_t timed_half(ALuint stream) {
+    const ALsource *st = al_source_get(stream);
+    return st ? st->lead_half : 0u;
 }
 
 /* Makes change i of src (as alSourcef / alSourcefv; checked when queued) and
@@ -2702,7 +2713,7 @@ static void timed_par_run(ALsource *src) {
     if (c == AL_SOURCE_CLOCK_WAIT) {
         return;
     }
-    half = (src->timed_par_stream == s_lead_stream) ? s_lead_half : 0u;
+    half = timed_half(src->timed_par_stream);
     while (i < src->timed_par_n) {
         if (c == AL_SOURCE_CLOCK_RUN && (int32_t)(src->timed_par[i].sample - pos) > (int32_t)half) {
             i++;   /* not yet (the position wraps at 2^32) */
@@ -2775,7 +2786,7 @@ static void timed_ops(void) {
         }
         if (c == AL_SOURCE_CLOCK_RUN) {
             int32_t ahead = (int32_t)(src->timed_sample - pos);   /* the position wraps at 2^32 */
-            uint32_t half = (src->timed_stream == s_lead_stream) ? s_lead_half : 0u;
+            uint32_t half = timed_half(src->timed_stream);
             if (ahead > (int32_t)half) {
                 continue;
             }
@@ -2797,17 +2808,15 @@ static void timed_ops(void) {
 static void timed_reset(void) {
     s_timed_src_n = 0;
     s_timed_par_src_n = 0;
-    s_lead_stream = 0;
-    s_lead_have = false;
-    s_lead_half = 0u;
 }
 
-/* The update interval is measured on the stream last given */
+/* From the first timed work on it, a stream's update interval is measured */
 static void timed_lead_set(ALuint stream) {
-    if (s_lead_stream != stream) {
-        s_lead_stream = stream;
-        s_lead_have = false;
-        s_lead_half = 0u;
+    ALsource *st = al_source_get(stream);
+    if (st && !st->lead_used) {
+        st->lead_used = true;
+        st->lead_have = false;
+        st->lead_half = 0u;
     }
 }
 
