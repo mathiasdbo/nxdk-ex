@@ -291,6 +291,8 @@ uint32_t al_source_debug_timed_frame(void);
 uint32_t al_source_debug_timed_pending(ALuint source);
 /* alXboxSourcefvAtSample: the changes a source has waiting */
 uint32_t al_source_debug_timed_params(ALuint source);
+/* Tests: the sources with a timed operation, and with timed changes, waiting */
+void al_source_debug_timed_counts(uint32_t *ops, uint32_t *params);
 
 
 /** Tests: what GP slot `slot` should run (AL_GP_NONE, AL_GP_REVERB with `p`, AL_GP_KERNEL with `k` and `params`). */
