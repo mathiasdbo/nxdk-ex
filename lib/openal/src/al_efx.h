@@ -5,9 +5,8 @@
  * ALC_EXT_EFX objects (lib/openal/docs/EFX_PLAN.md 3.1): effects, filters,
  * auxiliary effect slots and the per-source / listener EFX state. This file
  * stores and validates and maps the reverb onto the GP's; al_source.c routes
- * the sends and drives the GP (EFX_PLAN.md 3.2) through al_efx_slot() and
- * al_efx_active_slot(), and hears of slot changes through
- * al_source_effects_changed().
+ * the sends and drives the GP, one kernel per slot (EFX_PLAN.md 3.2), through
+ * al_efx_slot(), and hears of slot changes through al_source_effects_changed().
  */
 
 #include <AL/al.h>
@@ -31,7 +30,8 @@ extern "C" {
 /* An AL_XBOX_gp_program image (al_efx.c): shared, never changed, freed with its last user */
 typedef struct al_efx_program_s al_efx_program_t;
 
-/* Reverb parameters: AL_EFFECT_REVERB uses a subset of AL_EFFECT_EAXREVERB's */
+/* Effect parameters: AL_EFFECT_REVERB uses a subset of AL_EFFECT_EAXREVERB's;
+ * the other built-in effects' fields follow */
 typedef struct {
     ALfloat density, diffusion, gain, gain_hf, gain_lf;
     ALfloat decay_time, decay_hf_ratio, decay_lf_ratio;
@@ -40,6 +40,11 @@ typedef struct {
     ALfloat echo_time, echo_depth, modulation_time, modulation_depth;
     ALfloat air_absorption_gain_hf, hf_reference, lf_reference, room_rolloff_factor;
     ALint decay_hf_limit;
+    ALfloat echo_delay, echo_lr_delay, echo_damping, echo_feedback, echo_spread;   /* AL_EFFECT_ECHO */
+    ALint chorus_waveform, chorus_phase;                                          /* AL_EFFECT_CHORUS */
+    ALfloat chorus_rate, chorus_depth, chorus_feedback, chorus_delay;
+    ALint flanger_waveform, flanger_phase;                                        /* AL_EFFECT_FLANGER */
+    ALfloat flanger_rate, flanger_depth, flanger_feedback, flanger_delay;
 } al_efx_reverb_t;
 
 /* An effect's state: what an effect object holds and what a slot copies */
@@ -113,7 +118,7 @@ ALint al_efx_max_sends(void);
 /** The slot `id` (1..AL_EFX_MAX_SLOTS) if it exists, else NULL. */
 const al_efx_slot_t *al_efx_slot(ALuint id);
 
-/** The slot holding an effect other than AL_EFFECT_NULL (one at a time), 0 if none. */
+/** The first slot holding an effect other than AL_EFFECT_NULL, 0 if none. */
 ALuint al_efx_active_slot(void);
 
 /** Free every effect, filter and slot (last device closed). */
@@ -138,6 +143,7 @@ ALfloat al_efx_room_rolloff(const al_efx_source_t *s, const al_efx_slot_t *slot)
  * The kernel of a slot holding AL_EFFECT_XBOX_GP_PROGRAM with an image: fills
  * `k` (pointing into the image) and `params`. False for any other slot.
  */
+bool al_efx_slot_is_kernel(const al_efx_slot_t *slot);
 bool al_efx_slot_kernel(const al_efx_slot_t *slot, apu_gp_kernel_t *k, const uint32_t **params);
 
 /** Send the queued alXboxEffectSlotAtSample changes the GP can take now (every update). */

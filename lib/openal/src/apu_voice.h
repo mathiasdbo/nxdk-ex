@@ -313,22 +313,35 @@ void apu_voice_set_direct(uint32_t index, bool on, float left, float right);
 #define APU_VOICE_SENDS 2u
 
 /**
- * Effect sends (EFX sends to the active slot, or AL_XBOX_REVERB_SEND): the
- * linear gain of each send, 0..1, already including the source's gain and
+ * Effect sends (EFX sends to slots holding an effect, or AL_XBOX_REVERB_SEND):
+ * the linear gain of each send, 0..1, already including the source's gain and
  * attenuation. On a console send n leaves on outputs 4 + 2n and 5 + 2n (the
- * mono sound twice, or a stereo voice's left and right) to mixbins 2 and 3,
- * the GP kernel's input pair, each at half the gain. Takes effect at the next
- * trigger or commit.
+ * mono sound twice, or a stereo voice's left and right) to the input pair of
+ * its GP slot k, mixbins 2+2k and 3+2k (apu_voice_set_send_slots), each at
+ * half the gain. Takes effect at the next trigger or commit.
  */
 void apu_voice_set_sends(uint32_t index, const float sends[APU_VOICE_SENDS]);
 
 /**
- * Each of a send's two outputs carries the whole send gain (true) instead of
+ * The GP slot (0..APU_GP_SLOTS-1) each send feeds; another value leaves that
+ * send where it is. A voice that is not playing takes it at its next start; a
+ * playing one moves with a volume ramp: the moved outputs are muted from the
+ * next commit, and MOVE_FRAMES (2) GP frames later apu_voice_service() writes
+ * the new bins and the volumes come back.
+ */
+void apu_voice_set_send_slots(uint32_t index, const uint8_t slot[APU_VOICE_SENDS]);
+
+/** The first mixbin send n feeds now (2+2k; the right output feeds the next), and whether a move is under way. */
+uint32_t apu_voice_send_bin(uint32_t index, uint32_t n);
+bool apu_voice_send_moving(uint32_t index);
+
+/**
+ * Each of send n's two outputs carries the whole send gain (true) instead of
  * half (false, the default above). For a stereo voice into a stereo kernel: a
  * send of 1 is then 0 dB on each channel, exactly (the attenuation word 0).
  * Takes effect with the sends.
  */
-void apu_voice_set_send_per_channel(uint32_t index, bool full);
+void apu_voice_set_send_per_channel(uint32_t index, uint32_t n, bool full);
 
 /**
  * AL_XBOX_SEND_PANNED: while the voice is in direct mode (apu_voice_set_direct),
@@ -339,11 +352,11 @@ void apu_voice_set_send_per_channel(uint32_t index, bool full);
 void apu_voice_set_send_panned(uint32_t index, bool on);
 
 /** The attenuation word (1/64 dB, 0xFFF mute) of send n's left output (side 0)
- *  or right output (side 1). */
+ *  or right output (side 1); mute while it moves. */
 uint16_t apu_voice_send_atten_side(uint32_t index, uint32_t n, uint32_t side);
 
 /** The attenuation word (1/64 dB, 0xFFF mute) of each output of send n (its
- *  left one, for a panned send). */
+ *  left one, for a panned send; mute while it moves). */
 uint16_t apu_voice_send_atten(uint32_t index, uint32_t n);
 
 /**

@@ -1044,6 +1044,20 @@ void apu_vp_voice_update(uintptr_t bar0, uint32_t h, int16_t pitch, const uint16
     }
 }
 
+void apu_vp_voice_set_bins(uintptr_t bar0, uint32_t h, const uint8_t bins[APU_VP_OUTPUTS]) {
+    uint32_t vbin, fmt_bins;
+    volatile uint32_t *fmt;
+    (void)bar0;
+    if (!s_ready || h >= APU_VP_MAX_HANDLES || !bins) {
+        return;
+    }
+    apu_vp_pack_bins(bins, &vbin, &fmt_bins);
+    fmt = voice_dw(h, MCPX_VOICE_CFG_FMT);
+    *voice_dw(h, MCPX_VOICE_CFG_VBIN) = vbin;
+    *fmt = (*fmt & ~0x3FFu) | fmt_bins;   /* outputs 6 and 7 */
+    wc_flush();
+}
+
 void apu_vp_voice_set_filter(uintptr_t bar0, uint32_t h, uint32_t fmode, uint32_t fc) {
     (void)bar0;
     if (!s_ready || h >= APU_VP_MAX_HANDLES) {

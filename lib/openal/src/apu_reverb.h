@@ -8,7 +8,7 @@
  * reference of their arithmetic.
  *
  * Topology (the comb/allpass family, with the public-domain Freeverb tuning):
- * mono send (mixbins 2 + 3, the slot's pair) -> gain -> one-pole lowpass -> pre-delay -> 8 damped
+ * mono send (the slot's bin pair) -> gain -> one-pole lowpass -> pre-delay -> 8 damped
  * feedback combs per ear, summed -> 4 series allpasses per ear -> wet gain,
  * added to bins 0/1. 25 delay lines in system RAM, each moved one 32-sample
  * block per frame by DMA. (4 combs and 2 allpasses per ear sounded metallic
@@ -65,15 +65,21 @@ uint32_t apu_reverb_scratch_bytes(void);
 /** Byte offset of line k's circular buffer in the scratch space, and its size. */
 void apu_reverb_line_buffer(uint32_t k, uint32_t *offset, uint32_t *size);
 
-/** Coefficient words only (gains, comb feedback and damping, allpass gain): safe to change while running. */
-uint32_t apu_reverb_coefficients(const apu_reverb_params_t *p, apu_reverb_word_t *out);
+/**
+ * Coefficient words only (gains, comb feedback and damping, allpass gain, the
+ * loop's output lowpass): safe to change while running. `xbase`: the X block
+ * of the reverb's slot (KX; dsp/gp_kfreeverb.asm is relocatable).
+ */
+uint32_t apu_reverb_coefficients(const apu_reverb_params_t *p, uint32_t xbase, apu_reverb_word_t *out);
 
 /**
- * Every word the program reads: descriptors (offsets set for the line lengths), tables,
- * coefficients and zeroed filter states. Write them, zero the line buffers, then set bit 0
- * of X:$11. Returns the number of words.
+ * Every word the kernel reads in its slot's X block at `xbase`: descriptors
+ * (offsets set for the line lengths, the lines from scratch byte `scratch` on,
+ * both chains ending at end of list), chain heads, tables, coefficients and
+ * zeroed filter states (KIN is the loader's). Write them, zero the line
+ * buffers, then switch the slot on. Returns the number of words.
  */
-uint32_t apu_reverb_layout(const apu_reverb_params_t *p, apu_reverb_word_t *out);
+uint32_t apu_reverb_layout(const apu_reverb_params_t *p, uint32_t xbase, uint32_t scratch, apu_reverb_word_t *out);
 
 /** Float to a DSP Q23 word (saturated). */
 uint32_t apu_reverb_q23(float v);

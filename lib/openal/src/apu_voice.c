@@ -1,4 +1,5 @@
 #include "apu_voice.h"
+#include "apu_gp.h"
 #include "apu_vp.h"
 #include "apu_hrtf.h"
 #include <math.h>
@@ -49,17 +50,30 @@ static voice_direct_t s_voice_direct[APU_VOICE_MAX_SLOTS];
 static float s_voice_send[APU_VOICE_MAX_SLOTS][APU_VOICE_SENDS];
 /* apu_voice_set_send_per_channel: each output carries the whole send (a stereo
  * voice into a stereo kernel) instead of half of it */
-static bool s_voice_send_full[APU_VOICE_MAX_SLOTS];
+static bool s_voice_send_full[APU_VOICE_MAX_SLOTS][APU_VOICE_SENDS];
 /* apu_voice_set_send_panned: in direct mode the send's outputs follow the
  * direct gains (AL_XBOX_SEND_PANNED) */
 static bool s_voice_send_panned[APU_VOICE_MAX_SLOTS];
 static float s_voice_lowpass[APU_VOICE_MAX_SLOTS];   /* gain at 5 kHz; 1 = no filter */
 
 /* Console: send n leaves on outputs 4 + 2n (left or mono) and 5 + 2n (right
- * or mono) for the GP kernel's input pair, bins 2/3 (dsp/gp_kfreeverb.asm KIN) */
+ * or mono) for the input pair of the GP slot it feeds, bins 2+2k / 3+2k */
 #define SEND_OUT     4
-#define SEND_BIN_L   2u
-#define SEND_BIN_R   3u
+#define SEND_BIN(k)  (2u + 2u * (k))
+
+/*
+ * Send routing (apu_voice_set_send_slots): the GP slot each send's outputs
+ * feed in the VP now (live) and the one it should (want). A playing voice
+ * moves with a ramp: the moved outputs' targets go to mute, the VP ramps the
+ * current volumes down, and after MOVE_FRAMES frames the bins change and the
+ * targets come back (EFX_PLAN.md 2.1: a move without it clicks).
+ */
+#define MOVE_FRAMES  2u
+static uint8_t s_send_live[APU_VOICE_MAX_SLOTS][APU_VOICE_SENDS];
+static uint8_t s_send_want[APU_VOICE_MAX_SLOTS][APU_VOICE_SENDS];
+static bool s_send_moving[APU_VOICE_MAX_SLOTS];
+static uint32_t s_send_move_at[APU_VOICE_MAX_SLOTS];   /* the frame the ramp started */
+static uint32_t s_model_frames;                        /* without a GP: one frame per apu_voice_service() */
 
 /* HRTF: the slot plays as an HRTF voice (its last start); AL_XBOX_HRTF (on by default) */
 static bool s_slot_hrtf[APU_VOICE_MAX_SLOTS];
@@ -161,7 +175,7 @@ static void vp_params_core(uint32_t index, const NVAPU_VOICE_CONTEXT_3D *ctx, bo
     }
 }
 
-/* The volume of send n's left (side 0) or right (side 1) output */
+/* The volume of send n's left (side 0) or right (side 1) output: muted while it moves */
 uint16_t apu_voice_send_atten_side(uint32_t index, uint32_t n, uint32_t side) {
     float g;
     if (index >= APU_VOICE_MAX_SLOTS || n >= APU_VOICE_SENDS) {
@@ -170,10 +184,10 @@ uint16_t apu_voice_send_atten_side(uint32_t index, uint32_t n, uint32_t side) {
     g = s_voice_send[index][n];
     if (s_voice_send_panned[index] && s_voice_direct[index].on) {
         g *= side ? s_voice_direct[index].right : s_voice_direct[index].left;
-    } else if (!s_voice_send_full[index]) {
+    } else if (!s_voice_send_full[index][n]) {
         g *= 0.5f;
     }
-    if (!(g > 0.0f)) {
+    if (!(g > 0.0f) || (s_send_moving[index] && s_send_live[index][n] != s_send_want[index][n])) {
         return 0xFFFu;
     }
     return apu_vp_atten_from_gain(g);
@@ -184,19 +198,27 @@ uint16_t apu_voice_send_atten(uint32_t index, uint32_t n) {
     return apu_voice_send_atten_side(index, n, 0u);
 }
 
+uint32_t apu_voice_send_bin(uint32_t index, uint32_t n) {
+    return (index < APU_VOICE_MAX_SLOTS && n < APU_VOICE_SENDS) ? SEND_BIN(s_send_live[index][n]) : SEND_BIN(0u);
+}
+
+bool apu_voice_send_moving(uint32_t index) {
+    return index < APU_VOICE_MAX_SLOTS && s_send_moving[index];
+}
+
 /* The voice's pitch, bins and volumes; on a console also its effect sends:
- * send n on outputs 4 + 2n / 5 + 2n to bins 2 / 3, each at half the send's
- * gain (a stereo voice's left and right, or the mono sound twice: their sum,
- * which a mono-input kernel reads, is the send), or at the whole gain when the
- * source asked for it per channel */
+ * send n on outputs 4 + 2n / 5 + 2n to its slot's bins 2+2k / 3+2k, each at
+ * half the send's gain (a stereo voice's left and right, or the mono sound
+ * twice: their sum, which a mono-input kernel reads, is the send), or at the
+ * whole gain when the source asked for it per channel */
 static void vp_params_from_context(uint32_t index, const NVAPU_VOICE_CONTEXT_3D *ctx, bool hrtf, int16_t *pitch,
                                    uint8_t bins[APU_VP_OUTPUTS], uint16_t vols[APU_VP_OUTPUTS]) {
     uint32_t n;
     vp_params_core(index, ctx, hrtf, pitch, bins, vols);
     if (!apu_vp_front_end_ok()) {
         for (n = 0; n < APU_VOICE_SENDS; n++) {
-            bins[SEND_OUT + 2u * n] = (uint8_t)SEND_BIN_L;
-            bins[SEND_OUT + 2u * n + 1u] = (uint8_t)SEND_BIN_R;
+            bins[SEND_OUT + 2u * n] = (uint8_t)SEND_BIN(s_send_live[index][n]);
+            bins[SEND_OUT + 2u * n + 1u] = (uint8_t)(SEND_BIN(s_send_live[index][n]) + 1u);
             vols[SEND_OUT + 2u * n] = apu_voice_send_atten_side(index, n, 0u);
             vols[SEND_OUT + 2u * n + 1u] = apu_voice_send_atten_side(index, n, 1u);
         }
@@ -230,6 +252,9 @@ int apu_voice_subsystem_init(uintptr_t apu_base, void *context_array_virt, uint3
     memset(s_voice_buffer, 0, sizeof(s_voice_buffer));
     memset(s_voice_local, 0, sizeof(s_voice_local));
     memset(s_voice_direct, 0, sizeof(s_voice_direct));
+    memset(s_send_live, 0, sizeof(s_send_live));
+    memset(s_send_want, 0, sizeof(s_send_want));
+    memset(s_send_moving, 0, sizeof(s_send_moving));
     for (i = 0; i < APU_VOICE_MAX_SLOTS; ++i) {
         s_voice_handle[i] = 0xFFFFu;   /* none yet: never turn off a handle another slot may hold */
         s_voice_lowpass[i] = 1.0f;
@@ -599,10 +624,71 @@ void apu_voice_set_sends(uint32_t index, const float sends[APU_VOICE_SENDS])
     }
 }
 
-void apu_voice_set_send_per_channel(uint32_t index, bool full)
+void apu_voice_set_send_per_channel(uint32_t index, uint32_t n, bool full)
 {
-    if (index < APU_VOICE_MAX_SLOTS) {
-        s_voice_send_full[index] = full;
+    if (index < APU_VOICE_MAX_SLOTS && n < APU_VOICE_SENDS) {
+        s_voice_send_full[index][n] = full;
+    }
+}
+
+/* The frame counter the send ramp waits on: the GP's, or the model's */
+static uint32_t route_frames(void)
+{
+    return apu_gp_ready() ? apu_gp_frames(s_apu_base) : s_model_frames;
+}
+
+static bool sends_differ(uint32_t index)
+{
+    uint32_t n;
+    for (n = 0; n < APU_VOICE_SENDS; n++) {
+        if (s_send_live[index][n] != s_send_want[index][n]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void apu_voice_set_send_slots(uint32_t index, const uint8_t slot[APU_VOICE_SENDS])
+{
+    uint32_t n;
+    if (index >= APU_VOICE_MAX_SLOTS || slot == NULL) {
+        return;
+    }
+    for (n = 0; n < APU_VOICE_SENDS; n++) {
+        if (slot[n] < APU_GP_SLOTS) {
+            s_send_want[index][n] = slot[n];   /* an unused send stays where it is */
+        }
+    }
+    if (!sends_differ(index)) {
+        s_send_moving[index] = false;          /* back where it was: the next commit restores the volumes */
+    } else if (s_voice_contexts == NULL || !s_voice_contexts[index].active) {
+        memcpy(s_send_live[index], s_send_want[index], sizeof(s_send_live[index]));   /* starts there */
+        s_send_moving[index] = false;
+    } else if (!s_send_moving[index]) {
+        s_send_moving[index] = true;           /* the next commit mutes the moved outputs */
+        s_send_move_at[index] = route_frames();
+    }
+}
+
+/* Moves whose ramp has run: the new bins, then the volumes back (apu_voice_service) */
+static void sends_progress(uintptr_t base)
+{
+    uint32_t i, now = route_frames();
+    for (i = 0; i < APU_VOICE_MAX_SLOTS; i++) {
+        if (!s_send_moving[i] || ((now - s_send_move_at[i]) & 0xFFFFFFu) < MOVE_FRAMES) {
+            continue;
+        }
+        memcpy(s_send_live[i], s_send_want[i], sizeof(s_send_live[i]));
+        s_send_moving[i] = false;
+        if (s_vp_hw && s_voice_contexts != NULL && s_voice_contexts[i].active && owns_handle(i) &&
+            !apu_vp_front_end_ok()) {
+            uint8_t bins[APU_VP_OUTPUTS];
+            uint16_t vols[APU_VP_OUTPUTS];
+            int16_t pitch;
+            vp_params_from_context(i, &s_voice_contexts[i], s_slot_hrtf[i], &pitch, bins, vols);
+            apu_vp_voice_set_bins(base, vp_handle(i), bins);
+            apu_voice_commit(base, i);
+        }
     }
 }
 
@@ -657,9 +743,12 @@ void apu_voice_commit(uintptr_t apu_base, uint32_t index)
 
 void apu_voice_service(uintptr_t apu_base)
 {
+    uintptr_t base = (apu_base != 0) ? apu_base : s_apu_base;
     if (s_vp_hw) {
-        apu_vp_service((apu_base != 0) ? apu_base : s_apu_base);
+        apu_vp_service(base);
     }
+    s_model_frames++;
+    sends_progress(base);
 }
 
 uint32_t apu_voice_hw_handle(uint32_t index)

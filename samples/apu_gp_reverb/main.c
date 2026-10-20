@@ -78,23 +78,20 @@ static uint32_t frame_rate(uint32_t ms) {
 
 /* ---------------------------------------------------------------- reverb control */
 
-static uint8_t *s_scr;
-
+/* The reverb in GP slot 0 (its input: bins 2/3) */
 static void reverb_off(void) {
-    XW(GP_LOOP_FLAGS) = 0;
+    apu_reverb_params_t p;
+    apu_reverb_default_params(&p);
+    apu_gp_reverb_set(BAR0, 0, &p, false);
     Sleep(3);
 }
 
+/* Loaded and laid out afresh: the lines start empty */
 static void reverb_on(const apu_reverb_params_t *p) {
-    static apu_reverb_word_t w[APU_REVERB_MAX_WORDS];
-    uint32_t n, i;
     reverb_off();
-    n = apu_reverb_layout(p, w);
-    for (i = 0; i < n; i++) XW(w[i].addr) = w[i].value;
-    memset(s_scr + APU_REVERB_SCRATCH_BASE, 0, apu_reverb_scratch_bytes());
+    apu_gp_reverb_set(BAR0, 0, p, true);
     XW(GP_LOOP_SPMAX) = 0;
     XW(GP_LOOP_TMOUT) = 0;
-    XW(GP_LOOP_FLAGS) = 1;
 }
 
 /* ---------------------------------------------------------------- sounds */
@@ -216,7 +213,7 @@ int main(void) {
     XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
     logf_("\n=== apu_gp_reverb round 2 (8 combs and 4 allpasses per ear)\n");
     save_log();
-    apu_gp_debug_set_program(NULL, 0);   /* the default image: the frame loop and the reverb kernel */
+    apu_gp_debug_set_program(NULL, 0);   /* the default image: the frame loop; the reverb kernel goes into slot 0 */
     apu_gp_debug_set_scratch_bytes(APU_REVERB_SCRATCH_BASE + apu_reverb_scratch_bytes());
     apu_vp_debug_set_flags(APU_VP_DBG_NO_AC97 | APU_VP_DBG_AC97_COPY);   /* the 64 KiB ring, copy output */
     if (apu_vp_init(BAR0) != 0) {
@@ -224,7 +221,6 @@ int main(void) {
         save_log();
         for (;;) Sleep(1000);
     }
-    s_scr = (uint8_t *)apu_gp_debug_scratch();
     {
         int16_t *c = (int16_t *)apu_mem_alloc_table(CLICK_FRAMES * 2u + APU_VP_SILENT_TAIL_BYTES, &s_click_phys);
         int16_t *b = (int16_t *)apu_mem_alloc_table(BURST_FRAMES * 2u + APU_VP_SILENT_TAIL_BYTES, &s_burst_phys);

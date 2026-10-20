@@ -69,6 +69,10 @@ typedef struct ALsource {
     uint8_t timed_op;                /* alXboxSource*AtSample waiting: 0 none, 1 play, 2 stop */
     ALuint timed_stream;             /* the stream it waits for */
     uint32_t timed_sample;           /* the stream position it acts at */
+    ALenum spatialize;               /* AL_SOURCE_SPATIALIZE_SOFT: AL_FALSE, AL_TRUE, AL_AUTO_SOFT */
+    ALboolean direct_channels;       /* AL_DIRECT_CHANNELS_SOFT (stored) */
+    ALenum distance_model;           /* AL_DISTANCE_MODEL with AL_SOURCE_DISTANCE_MODEL enabled */
+    unsigned hw_pending;             /* AL_SOFT_deferred_updates: SRC_HW_* fields held back */
     ALfloat reverb_send;             /* AL_XBOX_REVERB_SEND: 0..1 */
     ALfloat xbox_priority;           /* AL_XBOX_PRIORITY: >= 0 engine priority, < 0 the library's */
     ALboolean virtualize;            /* AL_XBOX_VIRTUALIZE */
@@ -143,6 +147,12 @@ void al_source_update_all_gains(void);
  * Called immediately when listener position/velocity/orientation or global models change.
  */
 void al_source_update_all_spatial(void);
+
+/**
+ * ALC_SOFT_pause_device: pause (true) or resume every playing source's voice,
+ * leaving the sources AL_PLAYING. While paused, voices that start stay paused.
+ */
+void al_source_set_device_paused(bool paused);
 
 /**
  * Perform complete 3D spatial calculation for a given source object.
@@ -264,8 +274,8 @@ typedef enum {
 al_source_clock_t al_source_stream_clock(ALuint source, uint32_t *pos, uint32_t *gp_frame, float *per_frame);
 /* A mailbox post has not reached the GP yet */
 bool al_source_gp_timed_busy(void);
-/* The active slot's kernel parameters (as its props now are) at GP frame `frame` */
-void al_source_gp_params_at(uint32_t frame);
+/* EFX slot `slot`'s kernel parameters (as its props now are) at GP frame `frame` */
+void al_source_gp_params_at(ALuint slot, uint32_t frame);
 /* Host tests: every streaming source's clock reads pos / gp_frame (on), the GP
  * is busy with a timed post (busy; a post sets it), and the frame last posted */
 void al_source_debug_clock(bool on, uint32_t pos, uint32_t gp_frame, bool busy);
@@ -273,12 +283,19 @@ uint32_t al_source_debug_timed_frame(void);
 /* alXboxSource*AtSample: the operation a source waits with (0 none, 1 play, 2 stop) */
 uint32_t al_source_debug_timed_pending(ALuint source);
 
-/** Tests: the custom kernel the GP should run (an active AL_EFFECT_XBOX_GP_PROGRAM slot with an image). */
+
+/** Tests: what GP slot `slot` should run (AL_GP_NONE, AL_GP_REVERB with `p`, AL_GP_KERNEL with `k` and `params`). */
+enum { AL_GP_NONE, AL_GP_REVERB, AL_GP_KERNEL };
+int al_source_debug_gp_slot(uint32_t slot, apu_reverb_params_t *p, apu_gp_kernel_t *k, const uint32_t **params);
+
+/** Tests: the first slot's custom kernel (an AL_EFFECT_XBOX_GP_PROGRAM slot with an image, or a built-in kernel effect). */
 bool al_source_debug_gp_kernel(apu_gp_kernel_t *k, const uint32_t **params);
 
-/** Host tests: the GP effect's parameters (false: none runs), and a source's send gains as they would reach its voice. */
+/** Host tests: the first reverb's parameters (false: none runs), and a source's send gains (and their GP slots,
+ * 0xFF unused) as they would reach its voice. */
 bool al_source_debug_gp_effect(apu_reverb_params_t *p);
 bool al_source_debug_sends(ALuint source, float out[APU_VOICE_SENDS]);
+bool al_source_debug_send_route(ALuint source, float out[APU_VOICE_SENDS], uint8_t gp_slot[APU_VOICE_SENDS]);
 
 #ifdef __cplusplus
 }
