@@ -410,6 +410,16 @@ alAuxiliaryEffectSloti(slot, AL_EFFECTSLOT_EFFECT, (ALint)fx);       /* loads an
 - **`AL_EFFECTSLOT_GAIN`** scales the sends into the kernel, live (for a linear kernel, the same as its output).
 - **Input levels:** a stereo source sends its left and right each at the whole send gain, so at send 1 the
   kernel reads the samples unscaled (0 dB exactly). A mono source puts half the send on each bin.
+- **Panned input (`AL_XBOX_SEND_PANNED`):** an engine that pans its own sounds and runs its whole mix through
+  the kernel (Half-Life: every channel goes through the room) plays each sound on a direct-mode source with
+  `AL_XBOX_SEND_PANNED` on: the kernel's left input gets the send times the left direct gain and its right
+  input the send times the right gain, as the engine's software mix would have weighted them. Mute the direct
+  path with a lowpass at `AL_LOWPASS_GAIN` 0 (`AL_DIRECT_FILTER`): the sends are not affected, so the sound is
+  heard only through the kernel.
+- **Sounds on their own sources, in time with the stream:** a sound the engine would have mixed into the
+  stream at frame `f` starts with `alXboxSourcePlayAtSample(src, room_stream, f)` and, if cut short, stops
+  with `alXboxSourceStopAtSample(src, room_stream, f_end)`, so it is heard when the mix would have played it
+  (~0.12 s after the call for Half-Life), not at once. Within half an update of the frame (API_REFERENCE 6.4).
 - **Cost:** `alXboxGetHardwareStatus(AL_XBOX_GP_LOAD / AL_XBOX_GP_LOAD_PEAK)` is how much of the GP's frame
   the effect takes, in percent.
 - **Example:** `dsp/gp_kecho.asm` is a stereo echo with delay (32-16384 samples), feedback and wet parameters.

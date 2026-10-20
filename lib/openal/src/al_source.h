@@ -65,6 +65,10 @@ typedef struct ALsource {
     uint32_t offset_frames;          /* AL_*_OFFSET set while not playing, or a preempted voice's position */
     bool direct;                     /* AL_XBOX_DIRECT_MODE: engine gains, no 3D model */
     ALfloat direct_gain[2];          /* AL_XBOX_DIRECT_GAINS: left, right */
+    bool send_panned;                /* AL_XBOX_SEND_PANNED: sends into a kernel panned by direct_gain */
+    uint8_t timed_op;                /* alXboxSource*AtSample waiting: 0 none, 1 play, 2 stop */
+    ALuint timed_stream;             /* the stream it waits for */
+    uint32_t timed_sample;           /* the stream position it acts at */
     ALenum spatialize;               /* AL_SOURCE_SPATIALIZE_SOFT: AL_FALSE, AL_TRUE, AL_AUTO_SOFT */
     ALboolean direct_channels;       /* AL_DIRECT_CHANNELS_SOFT (stored) */
     ALenum distance_model;           /* AL_DISTANCE_MODEL with AL_SOURCE_DISTANCE_MODEL enabled */
@@ -276,6 +280,8 @@ void al_source_gp_params_at(ALuint slot, uint32_t frame);
  * is busy with a timed post (busy; a post sets it), and the frame last posted */
 void al_source_debug_clock(bool on, uint32_t pos, uint32_t gp_frame, bool busy);
 uint32_t al_source_debug_timed_frame(void);
+/* alXboxSource*AtSample: the operation a source waits with (0 none, 1 play, 2 stop) */
+uint32_t al_source_debug_timed_pending(ALuint source);
 
 
 /** Tests: what GP slot `slot` should run (AL_GP_NONE, AL_GP_REVERB with `p`, AL_GP_KERNEL with `k` and `params`). */

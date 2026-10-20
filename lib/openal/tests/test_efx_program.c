@@ -150,6 +150,58 @@ static void test_slot(ALuint e) {
         as = al_source_get(mo);
         assert(as && as->hw_voice_idx >= 0);
         assert(apu_voice_send_atten((uint32_t)as->hw_voice_idx, 0) == apu_vp_atten_from_gain(0.5f));
+
+        /* AL_XBOX_SEND_PANNED: in direct mode each output carries the send
+         * times its direct gain (mono: the sample on both; stereo: its own
+         * channel); outside direct mode, or off, the sends are as above */
+        {
+            const ALfloat lr[2] = { 0.75f, 0.25f };
+            ALint v = -1;
+            uint32_t hm = (uint32_t)al_source_get(mo)->hw_voice_idx, hs = (uint32_t)al_source_get(st)->hw_voice_idx;
+            alGetSourcei(mo, AL_XBOX_SEND_PANNED, &v);
+            assert(v == AL_FALSE);
+            alSourcei(mo, AL_XBOX_SEND_PANNED, AL_TRUE);
+            alSourcei(st, AL_XBOX_SEND_PANNED, AL_TRUE);
+            alGetSourcei(mo, AL_XBOX_SEND_PANNED, &v);
+            assert(v == AL_TRUE && alGetError() == AL_NO_ERROR);
+            assert(apu_voice_send_atten_side(hm, 0, 0) == apu_vp_atten_from_gain(0.5f));   /* not direct yet */
+            alSourcefv(mo, AL_XBOX_DIRECT_GAINS, lr);
+            alSourcefv(st, AL_XBOX_DIRECT_GAINS, lr);
+            alSourcei(mo, AL_XBOX_DIRECT_MODE, AL_TRUE);
+            alSourcei(st, AL_XBOX_DIRECT_MODE, AL_TRUE);
+            assert(alGetError() == AL_NO_ERROR);
+            assert(apu_voice_send_atten_side(hm, 0, 0) == apu_vp_atten_from_gain(0.75f));
+            assert(apu_voice_send_atten_side(hm, 0, 1) == apu_vp_atten_from_gain(0.25f));
+            assert(apu_voice_send_atten_side(hs, 0, 0) == apu_vp_atten_from_gain(0.75f));
+            assert(apu_voice_send_atten_side(hs, 0, 1) == apu_vp_atten_from_gain(0.25f));
+            assert(apu_voice_send_atten_side(hm, 1, 0) == 0xFFFu);                       /* send 1 unused */
+            /* a direct path muted by a lowpass at gain 0 leaves the panned send */
+            {
+                ALuint f = 0;
+                alGenFilters(1, &f);
+                alFilteri(f, AL_FILTER_TYPE, AL_FILTER_LOWPASS);
+                alFilterf(f, AL_LOWPASS_GAIN, 0.0f);
+                alSourcei(mo, AL_DIRECT_FILTER, (ALint)f);
+                assert(alGetError() == AL_NO_ERROR);
+                assert(apu_voice_send_atten_side(hm, 0, 0) == apu_vp_atten_from_gain(0.75f));
+                assert(apu_voice_send_atten_side(hm, 0, 1) == apu_vp_atten_from_gain(0.25f));
+                alSourcei(mo, AL_DIRECT_FILTER, AL_FILTER_NULL);
+                alDeleteFilters(1, &f);
+            }
+            /* a gain of 0 on one side mutes that output only */
+            {
+                const ALfloat left_only[2] = { 1.0f, 0.0f };
+                alSourcefv(mo, AL_XBOX_DIRECT_GAINS, left_only);
+                assert(apu_voice_send_atten_side(hm, 0, 0) == 0u && apu_voice_send_atten_side(hm, 0, 1) == 0xFFFu);
+            }
+            alSourcei(mo, AL_XBOX_SEND_PANNED, AL_FALSE);
+            assert(apu_voice_send_atten_side(hm, 0, 0) == apu_vp_atten_from_gain(0.5f) &&
+                   apu_voice_send_atten_side(hm, 0, 1) == apu_vp_atten_from_gain(0.5f));
+            alSourcei(st, AL_XBOX_DIRECT_MODE, AL_FALSE);
+            assert(apu_voice_send_atten_side(hs, 0, 0) == 0u && apu_voice_send_atten_side(hs, 0, 1) == 0u);
+            alSourcei(mo, AL_XBOX_SEND_PANNED, 2);
+            assert(alGetError() == AL_INVALID_VALUE);
+        }
         alSourceStop(st);
         alSourceStop(mo);
         alDeleteSources(1, &st);

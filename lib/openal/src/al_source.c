@@ -107,6 +107,10 @@ static void source_reset_defaults(ALsource *src, ALuint id) {
     src->direct = false;
     src->direct_gain[0] = src->direct_gain[1] = 1.0f;
     src->reverb_send = 0.0f;
+    src->send_panned = false;
+    src->timed_op = 0;
+    src->timed_stream = 0;
+    src->timed_sample = 0;
     src->xbox_priority = -1.0f;
     src->virtualize = AL_TRUE;
 }
@@ -566,6 +570,7 @@ static void source_apply_sends(const ALsource *src, const AL_SPATIAL_CALC *calc,
     for (n = 0; n < APU_VOICE_SENDS; n++) {
         apu_voice_set_send_per_channel(voice, n, source_send_per_channel(src, n));
     }
+    apu_voice_set_send_panned(voice, src->send_panned);   /* AL_XBOX_SEND_PANNED */
     apu_voice_set_send_slots(voice, gp_slot);
     apu_voice_set_sends(voice, sends);
 }
@@ -887,6 +892,11 @@ void al_source_tick_cycles(uint64_t *stream, uint64_t *voices) {
     *voices = s_tick_voice_cycles;
 }
 
+/* alXboxSourcePlayAtSample / StopAtSample (the end of this file) */
+static void timed_cancel(ALsource *src);
+static void timed_lead_update(void);
+static void timed_ops(void);
+
 void al_source_update_frame(void) {
     uint64_t t0, t1;
     ensure_subsystem_initialized();
@@ -896,6 +906,8 @@ void al_source_update_frame(void) {
             source_update_stream(&g_sources[i]);
         }
     }
+    timed_lead_update();
+    timed_ops();
     t1 = apu_platform_cycles();
     s_tick_stream_cycles += t1 - t0;
     apu_voice_mgr_update(al_source_get_apu_base());
@@ -1386,6 +1398,15 @@ AL_API void AL_APIENTRY alSourcei(ALuint source, ALenum param, ALint value) {
             source_update_hw(src, SRC_HW_SPATIAL);
             break;
 
+        case AL_XBOX_SEND_PANNED:
+            if (value != AL_TRUE && value != AL_FALSE) {
+                alSetError(AL_INVALID_VALUE);
+                return;
+            }
+            src->send_panned = (value == AL_TRUE);
+            source_update_hw(src, SRC_HW_SPATIAL);
+            break;
+
         case AL_XBOX_VIRTUALIZE:
             if (value != AL_TRUE && value != AL_FALSE) {
                 alSetError(AL_INVALID_VALUE);
@@ -1451,6 +1472,7 @@ AL_API void AL_APIENTRY alSourceiv(ALuint source, ALenum param, const ALint *val
         case AL_SAMPLE_OFFSET:
         case AL_BYTE_OFFSET:
         case AL_XBOX_DIRECT_MODE:
+        case AL_XBOX_SEND_PANNED:
         case AL_XBOX_VIRTUALIZE:
             alSourcei(source, param, values[0]);
             break;
@@ -1706,6 +1728,10 @@ AL_API void AL_APIENTRY alGetSourcei(ALuint source, ALenum param, ALint *value) 
             *value = src->direct ? AL_TRUE : AL_FALSE;
             break;
 
+        case AL_XBOX_SEND_PANNED:
+            *value = src->send_panned ? AL_TRUE : AL_FALSE;
+            break;
+
         case AL_XBOX_VIRTUALIZE:
             *value = src->virtualize;
             break;
@@ -1793,6 +1819,7 @@ AL_API void AL_APIENTRY alSourcePlay(ALuint source) {
         alSetError(AL_INVALID_NAME);
         return;
     }
+    timed_cancel(src);
 
     /* If no buffer is attached (or the queue holds no data), transition to
      * AL_STOPPED without error */
@@ -1884,6 +1911,7 @@ AL_API void AL_APIENTRY alSourceStop(ALuint source) {
         alSetError(AL_INVALID_NAME);
         return;
     }
+    timed_cancel(src);
 
     if (src->state == AL_PLAYING || src->state == AL_PAUSED) {
         apu_voice_mgr_release(src);
@@ -1905,6 +1933,7 @@ AL_API void AL_APIENTRY alSourceRewind(ALuint source) {
         alSetError(AL_INVALID_NAME);
         return;
     }
+    timed_cancel(src);
 
     if (src->state == AL_PLAYING || src->state == AL_PAUSED || src->state == AL_STOPPED) {
         apu_voice_mgr_release(src);
@@ -2416,7 +2445,7 @@ al_source_clock_t al_source_stream_clock(ALuint source, uint32_t *pos, uint32_t 
     if (src->state != AL_PLAYING) {
         return AL_SOURCE_CLOCK_STOPPED;
     }
-    *pos = s_dbg_clock ? s_dbg_pos : al_stream_read_pos(src->stream);
+    *pos = s_dbg_clock ? s_dbg_pos : al_stream_clock(src->stream);   /* not read_pos: an unqueue moves it back */
     *gp_frame = s_dbg_clock ? s_dbg_frame : apu_gp_frames(al_source_get_apu_base());
     *per_frame = 32.0f * (float)ring->frequency * src->pitch / 48000.0f;
     return AL_SOURCE_CLOCK_RUN;
@@ -2561,6 +2590,183 @@ AL_API ALboolean AL_APIENTRY alIsEnabled(ALenum capability) {
     }
     alSetError(AL_INVALID_ENUM);
     return AL_FALSE;
+}
+
+/*
+ * ============================================================================
+ * Starts and stops timed to a stream (alXboxSourcePlayAtSample / StopAtSample)
+ * ============================================================================
+ * The voice tick acts on them (al_source_update_frame): at the first update
+ * where the stream is at most half an update from the frame asked for, half
+ * an update being half the frames the stream played between the last two
+ * updates. A start found late begins as far into the sound as the stream has
+ * gone past it, at the sound's own rate.
+ */
+enum { TIMED_NONE = 0, TIMED_PLAY = 1, TIMED_STOP = 2 };
+
+static uint32_t s_timed_src_n;     /* sources with an operation waiting */
+static ALuint s_lead_stream;       /* the stream the update interval is measured on */
+static uint32_t s_lead_pos, s_lead_half;
+static bool s_lead_have;
+
+static void timed_cancel(ALsource *src) {
+    if (src->timed_op != TIMED_NONE) {
+        src->timed_op = TIMED_NONE;
+        s_timed_src_n--;
+    }
+}
+
+/* The stream's position: RUN (pos set), WAIT (paused, not started), STOPPED,
+ * or NONE (no such streaming source any more) */
+static al_source_clock_t timed_clock(ALuint stream, uint32_t *pos) {
+    ALsource *st = al_source_get(stream);
+    if (!st || !st->stream) {
+        return AL_SOURCE_CLOCK_NONE;
+    }
+    if (st->state == AL_STOPPED) {
+        return AL_SOURCE_CLOCK_STOPPED;
+    }
+    if (st->state != AL_PLAYING || st->hw_voice_idx < 0) {
+        return AL_SOURCE_CLOCK_WAIT;
+    }
+    source_update_stream(st);
+    if (st->state != AL_PLAYING) {
+        return AL_SOURCE_CLOCK_STOPPED;
+    }
+    *pos = s_dbg_clock ? s_dbg_pos : al_stream_clock(st->stream);   /* not read_pos: an unqueue moves it back */
+    return AL_SOURCE_CLOCK_RUN;
+}
+
+/* Half the frames the stream played since the last update (once per update) */
+static void timed_lead_update(void) {
+    uint32_t pos = 0;
+    if (s_lead_stream == 0u) {
+        return;
+    }
+    if (timed_clock(s_lead_stream, &pos) != AL_SOURCE_CLOCK_RUN) {
+        s_lead_have = false;
+        return;
+    }
+    if (s_lead_have) {
+        uint32_t d = pos - s_lead_pos;
+        s_lead_half = (d < 48000u) ? d / 2u : 0u;   /* more than a second: a stall, not an interval */
+    }
+    s_lead_pos = pos;
+    s_lead_have = true;
+}
+
+/* Starts src `late` stream frames after its frame: that far into the sound */
+static void timed_play(ALsource *src, ALuint stream, uint32_t late) {
+    const ALbuffer *pb = al_source_play_buffer(src);
+    ALsource *st = al_source_get(stream);
+    if (late > 0u && pb && !src->stream && st && st->stream && src->state != AL_PLAYING) {
+        const ALbuffer *rb = al_stream_ring_buffer(st->stream);
+        uint32_t len = source_length_frames(src), off;
+        float ratio = 1.0f;
+        if (rb && rb->frequency > 0 && st->pitch > 0.0f) {
+            ratio = (float)pb->frequency * src->pitch / ((float)rb->frequency * st->pitch);
+        }
+        off = (src->has_offset ? src->offset_frames : 0u) + (uint32_t)((float)late * ratio);
+        if (len > 0u && off >= len) {
+            if (!src->looping) {
+                src->has_offset = false;   /* already over */
+                if (src->state == AL_PAUSED) {
+                    apu_voice_mgr_release(src);
+                }
+                src->state = AL_STOPPED;
+                return;
+            } else {
+                uint32_t ls = (pb->loop_start > 0) ? (uint32_t)pb->loop_start : 0u;
+                uint32_t le = (pb->loop_end > pb->loop_start) ? (uint32_t)pb->loop_end : len;
+                if (le > len) le = len;
+                if (le > ls) {
+                    off = ls + (off - ls) % (le - ls);
+                } else {
+                    off = 0u;
+                }
+            }
+        }
+        src->offset_frames = off;
+        src->has_offset = true;
+    }
+    alSourcePlay(src->id);
+}
+
+static void timed_ops(void) {
+    if (s_timed_src_n == 0u) {
+        return;
+    }
+    apu_voice_batch(al_source_get_apu_base(), true);   /* the ones due together start on one APU frame */
+    for (size_t i = 0; i < s_source_end && s_timed_src_n > 0u; i++) {
+        ALsource *src = &g_sources[i];
+        uint32_t pos = 0, late = 0;
+        uint8_t op;
+        ALuint stream;
+        al_source_clock_t c;
+        if (!src->in_use || src->timed_op == TIMED_NONE) {
+            continue;
+        }
+        c = timed_clock(src->timed_stream, &pos);
+        if (c == AL_SOURCE_CLOCK_WAIT) {
+            continue;
+        }
+        if (c == AL_SOURCE_CLOCK_RUN) {
+            int32_t ahead = (int32_t)(src->timed_sample - pos);   /* the position wraps at 2^32 */
+            uint32_t half = (src->timed_stream == s_lead_stream) ? s_lead_half : 0u;
+            if (ahead > (int32_t)half) {
+                continue;
+            }
+            late = (ahead < 0) ? (uint32_t)(-(int64_t)ahead) : 0u;
+        }
+        op = src->timed_op;
+        stream = src->timed_stream;
+        timed_cancel(src);
+        if (op == TIMED_PLAY) {
+            timed_play(src, stream, late);
+        } else {
+            alSourceStop(src->id);
+        }
+    }
+    apu_voice_batch(al_source_get_apu_base(), false);
+}
+
+static void timed_queue(ALuint source, ALuint stream, ALuint sample, uint8_t op) {
+    ALsource *src, *st;
+    ensure_subsystem_initialized();
+    src = al_source_get(source);
+    st = al_source_get(stream);
+    if (!src || !st) {
+        alSetError(AL_INVALID_NAME);
+        return;
+    }
+    if (!st->stream || src == st) {
+        alSetError(AL_INVALID_OPERATION);
+        return;
+    }
+    timed_cancel(src);
+    src->timed_op = op;
+    src->timed_stream = stream;
+    src->timed_sample = sample;
+    s_timed_src_n++;
+    if (s_lead_stream != stream) {
+        s_lead_stream = stream;
+        s_lead_have = false;
+        s_lead_half = 0u;
+    }
+    timed_ops();   /* one already due, or a stopped stream: now */
+}
+
+AL_API void AL_APIENTRY alXboxSourcePlayAtSample(ALuint source, ALuint stream, ALuint sample) {
+    timed_queue(source, stream, sample, TIMED_PLAY);
+}
+
+AL_API void AL_APIENTRY alXboxSourceStopAtSample(ALuint source, ALuint stream, ALuint sample) {
+    timed_queue(source, stream, sample, TIMED_STOP);
+}
+
+uint32_t al_source_debug_timed_pending(ALuint source) {
+    ALsource *src = al_source_get(source);
+    return src ? src->timed_op : 0u;
 }
 
 /*

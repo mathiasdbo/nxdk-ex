@@ -143,6 +143,7 @@ on a console (64 on xemu). The others wait in virtual standby, or stop if `AL_XB
 | `AL_XBOX_PRIORITY` | `alSourcef` | ≥ 0, or −1 (default) | your priority for voice allocation and stealing; −1 uses the library's score from gain and distance |
 | `AL_XBOX_VIRTUALIZE` | `alSourcei` | `AL_TRUE` (default) / `AL_FALSE` | without a voice: wait in standby, or stop (`AL_STOPPED`) so you can mix it yourself |
 | `AL_XBOX_HAS_VOICE` | `alGetSourcei` | `AL_TRUE` / `AL_FALSE` | whether the source holds a hardware voice now |
+| `AL_XBOX_SEND_PANNED` | `alSourcei` / get | `AL_TRUE` / `AL_FALSE` (default) | in direct mode, the sends into a custom GP kernel follow the direct gains: left input = send × left, right input = send × right (mono: the sample on both; stereo: each channel on its own); the direct path's gain and filter do not touch them, so a source muted by a lowpass at gain 0 is heard only through the kernel (ENGINE_INTEGRATION 3.13) |
 | `AL_XBOX_REVERB_SEND` | `alSourcef` | 0..1, default 0 | how much goes to the `AL_XBOX_reverb` room (7.1) |
 
 ### 5.1b OpenAL Soft source attributes
@@ -262,8 +263,10 @@ void alXboxEffectSlotAtSample(ALuint slot, ALuint effect, ALuint source, ALuint 
 ```
 
 - Attaches `effect` to `slot` (a copy, taken now) at the GP frame that mixes frame `sample` of the streaming
-  source `source`. `sample` is the source's stream position: frames played since its queue started, 32 bits,
-  wrapping.
+  source `source`. `sample` is the source's stream clock: frames played since it last started from the start of
+  its queue (`alSourcePlay` from `AL_INITIAL` or `AL_STOPPED`, or `alSourceRewind`), 32 bits, wrapping.
+  Unqueueing played buffers does not move it back, unlike `AL_SAMPLE_OFFSET`, which counts from the queue's
+  current start.
 - The effect must run the kernel the slot already runs (the same image), and the slot must be the active one.
   Otherwise, a source that is not streaming, or 16 changes already queued: `AL_INVALID_OPERATION`. A name that
   is no slot, effect or source: `AL_INVALID_NAME`.
@@ -272,6 +275,24 @@ void alXboxEffectSlotAtSample(ALuint slot, ALuint effect, ALuint source, ALuint 
   change without a GP (the host).
 - The GP holds one change at a time; the next goes out at the first `alXboxUpdateVoices()` after it. Changes
   closer together than that are late by up to one update.
+
+**Sources started and stopped on a stream's clock (`AL_XBOX_timed_source`):**
+
+```c
+void alXboxSourcePlayAtSample(ALuint source, ALuint stream, ALuint sample);
+void alXboxSourceStopAtSample(ALuint source, ALuint stream, ALuint sample);
+```
+
+- `source` starts (stops) when the streaming source `stream` plays frame `sample` (its stream clock, as
+  above): a sound an engine plays on a source of its own lines up with what it mixed ahead into the stream.
+- Acted on by `alXboxUpdateVoices()`, at the first update where the stream is at most half an update from
+  `sample` (half the frames it played between the last two updates): up to half an update early or late. A
+  start found late begins that far into the sound, at the sound's rate; a non-looping sound already over then
+  just stops, a looping one wraps in its loop.
+- One per source: a new one replaces it; `alSourcePlay`, `alSourceStop`, `alSourceRewind` or deleting the
+  source drops it. Until it acts the source keeps its state.
+- While `stream` is paused or not started they wait; with it stopped they act at once. `stream` not a streaming
+  source, or `source` itself: `AL_INVALID_OPERATION`; a name that is no source: `AL_INVALID_NAME`.
 - `AL_EFFECTSLOT_EFFECT`, or deleting the slot, drops the changes still queued for it.
 
 How to write a kernel: [`GP_KERNELS.md`](GP_KERNELS.md).
