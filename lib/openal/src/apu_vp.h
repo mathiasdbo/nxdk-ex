@@ -248,6 +248,70 @@ void apu_vp_batch_end(uintptr_t bar0);
 void apu_vp_voice_off(uintptr_t bar0, uint32_t handle);
 
 /**
+ * Held voices: a start or a stop made exact by the output thread.
+ *
+ * The game thread acts on a timed start or stop only at its updates, once a
+ * frame; at 30 fps that is up to 17 ms either side of the frame asked for,
+ * which a weapon fired every 100 ms makes audible. With a hold, the game
+ * thread starts the voice at the update before its frame, muted (current and
+ * target volumes at full attenuation) and at the lowest pitch (1/256: 0.19
+ * frames of the sound per ms), and the output thread, every 4 ms, gives it its
+ * volumes and pitch at XGSCNT `due` (the VP ramps the volumes up over one
+ * 32-sample frame). A mute does the opposite at `due`: the target volumes go to
+ * full attenuation, and the game stops the voice at its next update.
+ *
+ * Volumes and pitch set while a start is held (apu_vp_voice_update) are kept
+ * for its release; volumes set once a mute is done are kept and not written.
+ * Restarting, pausing or switching off the voice drops its hold, giving it
+ * back its volumes and pitch. The thread writes only the target volumes and
+ * the pitch half of TAR_PITCH_LINK (16-bit stores: the link half is the game
+ * thread's); the two sides take turns on the table (apu_vp_hold_tick).
+ *
+ * apu_vp_voice_hold() must come right after apu_vp_voice_start(), before
+ * apu_vp_batch_end() makes the voice visible to the VP.
+ * @return 0, or negative (the table is full, the handle has a hold already, or
+ *         the VP is not ready): the caller acts at once instead.
+ */
+#define APU_VP_HOLD_MAX 64u
+int apu_vp_voice_hold(uintptr_t bar0, uint32_t handle, uint32_t due);
+int apu_vp_voice_mute_at(uintptr_t bar0, uint32_t handle, uint32_t due);
+/** Drop a handle's hold (a stop cancelled): its volumes and pitch back. */
+void apu_vp_voice_unhold(uintptr_t bar0, uint32_t handle);
+/** A hold or a mute waiting on the handle (not yet released / done). */
+bool apu_vp_voice_held(uint32_t handle);
+
+/**
+ * The output thread's pass: releases the starts and makes the mutes whose
+ * XGSCNT `due` is at most `window` samples away. Skips the pass if the game
+ * thread is changing the table. Cheap when nothing is held.
+ */
+void apu_vp_hold_tick(uintptr_t bar0, uint32_t window);
+
+/** The game thread: releases or makes, at once, holds `late` samples past their due (the thread stalled). */
+void apu_vp_hold_overdue(uintptr_t bar0, uint32_t late);
+
+/** A hold or mute can be added (the table is not full). */
+bool apu_vp_hold_room(void);
+
+/** XGSCNT: the VP's sample counter (48 kHz). */
+uint32_t apu_vp_now(uintptr_t bar0);
+
+typedef struct {
+    uint32_t holds;         /* starts held */
+    uint32_t mutes;         /* mutes armed */
+    uint32_t refused;       /* holds or mutes refused (table full, handle busy) */
+    uint32_t done;          /* released or muted by the output thread */
+    uint32_t overdue;       /* released or muted by the game thread (apu_vp_hold_overdue) */
+    uint32_t skipped;       /* thread passes skipped while the game thread had the table */
+    int32_t err_min;        /* XGSCNT - due when done, least and most (samples) */
+    int32_t err_max;
+    uint64_t err_abs_sum;   /* sum of |XGSCNT - due| over `done` */
+    uint32_t now;           /* held or armed at this moment */
+} apu_vp_hold_stats_t;
+
+void apu_vp_hold_get_stats(apu_vp_hold_stats_t *out);
+
+/**
  * A plain-voice handle (64..255 on xemu, 64..127 on a real console:
  * APU_VP_HW_HANDLES) that is not playing and has been off its
  * list for more than one APU frame. On a real console the VP must never meet

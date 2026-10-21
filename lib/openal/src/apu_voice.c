@@ -1,6 +1,7 @@
 #include "apu_voice.h"
 #include "apu_gp.h"
 #include "apu_vp.h"
+#include "apu_ac97.h"
 #include "apu_hrtf.h"
 #include <math.h>
 #include <string.h>
@@ -480,6 +481,39 @@ int apu_voice_stop(uintptr_t apu_base, uint32_t index)
     }
 
     return 0;
+}
+
+/* Held starts and stops (apu_vp_voice_hold): a slot's voice released, or
+ * muted, by the output thread at XGSCNT `due` */
+int apu_voice_hold(uintptr_t apu_base, uint32_t index, uint32_t due)
+{
+    uintptr_t base = (apu_base != 0) ? apu_base : s_apu_base;
+    if (!s_vp_hw || index >= APU_VOICE_MAX_SLOTS || !owns_handle(index)) {
+        return -1;
+    }
+    return apu_vp_voice_hold(base, vp_handle(index), due);
+}
+
+int apu_voice_mute_at(uintptr_t apu_base, uint32_t index, uint32_t due)
+{
+    uintptr_t base = (apu_base != 0) ? apu_base : s_apu_base;
+    if (!s_vp_hw || index >= APU_VOICE_MAX_SLOTS || !owns_handle(index)) {
+        return -1;
+    }
+    return apu_vp_voice_mute_at(base, vp_handle(index), due);
+}
+
+void apu_voice_unhold(uintptr_t apu_base, uint32_t index)
+{
+    uintptr_t base = (apu_base != 0) ? apu_base : s_apu_base;
+    if (s_vp_hw && index < APU_VOICE_MAX_SLOTS && owns_handle(index)) {
+        apu_vp_voice_unhold(base, vp_handle(index));
+    }
+}
+
+bool apu_voice_hold_possible(void)
+{
+    return s_vp_hw && apu_ac97_threaded();
 }
 
 void apu_voice_batch(uintptr_t apu_base, bool begin)

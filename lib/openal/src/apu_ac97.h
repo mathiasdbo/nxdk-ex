@@ -47,6 +47,7 @@ extern "C" {
 #define APU_AC97_PRIME        4u     /* copy mode: silent buffers queued at start, the GP-to-codec lead (~43 ms) */
 #define APU_AC97_AHEAD        8u     /* copy mode: most buffers queued ahead of the one playing (~85 ms) */
 #define APU_AC97_PUMP_MS      4u     /* pump thread period */
+#define APU_AC97_HOLD_WINDOW  96u    /* samples: a held voice is released half a pass (2 ms) before its frame at most */
 #define APU_AC97_ZC_PIECE_BYTES 512u /* zero-copy: one buffer-list entry, 128 frames (2.67 ms) */
 
 typedef struct {
@@ -116,6 +117,9 @@ bool apu_ac97_active(void);
 
 /** The output runs in zero-copy mode. */
 bool apu_ac97_zero_copy(void);
+
+/** The output thread runs (a console): it releases held voices (apu_vp_voice_hold). */
+bool apu_ac97_threaded(void);
 void apu_ac97_get_stats(apu_ac97_stats_t *out);
 
 /*
