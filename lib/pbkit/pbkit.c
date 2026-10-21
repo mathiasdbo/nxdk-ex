@@ -120,7 +120,10 @@ static  DWORD           pb_FreeInst;        //next free space in PRAMIN area (ad
 
 static  int         pb_BackBufferNxt=0;
 static  int         pb_BackBufferNxtVBL=0;
-static  int         pb_BackBufferbReady[3]={0,0,0};
+static  int         pb_BackBufferbReady[5]={0,0,0,0,0}; //5: pb_init clears five
+static  int         pb_BackBuffersWanted=2;     //pb_back_buffers(): 2 triple buffering, 1 double
+static  volatile DWORD  pb_FramesFinished;      //pb_finished() calls since pb_init
+static  volatile DWORD  pb_FramesShown;         //frames the VBlank handler has put on screen
 static  int         pb_BackBufferIndex[3];
 
 static  DWORD           pb_FifoChannelsReady=0;
@@ -238,8 +241,10 @@ static void pb_vbl_handler(void)
 
         VIDEOREG(NV_PGRAPH_INCREMENT)|=NV_PGRAPH_INCREMENT_READ_3D_TRIGGER;
 
+        pb_FramesShown++;
+
         //rotate next back buffer
-        next=(next+1)%3;
+        next=(next+1)%pb_FrameBuffersCount;
         pb_BackBufferNxtVBL=next;
     }
 
@@ -304,7 +309,7 @@ static void pb_subprog(DWORD subprogID, DWORD paramA, DWORD paramB)
             next=pb_BackBufferNxt;
             pb_BackBufferIndex[next]=paramA;
             pb_BackBufferbReady[next]=1;
-            next=(next+1)%3;
+            next=(next+1)%pb_FrameBuffersCount;
             pb_BackBufferNxt=next;
             break;
 
@@ -1743,6 +1748,29 @@ DWORD pb_get_vbl_counter(void)
 }
 
 
+void pb_back_buffers(int n)
+{
+    pb_BackBuffersWanted=(n==1)?1:2;
+}
+
+/*
+ * Double buffering (pb_back_buffers(1)): after pb_finished() the next back
+ * buffer is the one on screen until the VBlank handler shows the frame just
+ * finished. Nothing makes the GPU wait for that, so the caller waits here,
+ * on the CPU, before it pushes the next frame's drawing: until every frame
+ * pb_finished() queued is on screen. A no-op with triple buffering, where
+ * the next back buffer is never the one shown.
+ */
+void pb_wait_for_flip(void)
+{
+    LARGE_INTEGER timeout;
+
+    if (pb_FrameBuffersCount>2) return;
+    timeout.QuadPart=-10000;    //1 ms: the VBlank event is pulsed, a pulse between the test and the wait is not lost for a whole frame
+    while (pb_FramesShown!=pb_FramesFinished)
+        NtWaitForSingleObject(pb_VBlankEvent, FALSE, &timeout);
+}
+
 DWORD pb_wait_for_vbl(void)
 {
     NtWaitForSingleObject(pb_VBlankEvent, FALSE, NULL);
@@ -2025,7 +2053,8 @@ int pb_finished(void)
 
     //insert in push buffer the commands to trigger selection of next back buffer
     //(because previous ones may not have finished yet, so need to use 0x0100 call)
-    pb_back_index=(pb_back_index+1)%3;
+    pb_FramesFinished++;
+    pb_back_index=(pb_back_index+1)%pb_FrameBuffersCount;
     pb_target_back_buffer();
 
     return 0;
@@ -2927,8 +2956,11 @@ int pb_init(void)
     Width=vm.width;
     Height=vm.height;
 
-    BackBufferCount=2;          //triple buffering technic!
+    BackBufferCount=pb_BackBuffersWanted;   //2: triple buffering technic!
                         //allows dynamic details adjustment
+                        //1: double buffering, pb_wait_for_flip() before each frame
+    pb_FramesFinished=0;
+    pb_FramesShown=0;
 
     pb_FrameBuffersCount=BackBufferCount+1; //front buffer + back buffers
     pb_FrameBuffersWidth=Width;

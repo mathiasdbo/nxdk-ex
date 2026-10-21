@@ -57,6 +57,8 @@ void pb_wait_until_gr_not_busy(void);
 DWORD pb_wait_until_tiles_not_busy(void);
 
 void    pb_extra_buffers(int n);//requests additional back buffers (default is 0) (call it before pb_init)
+void    pb_back_buffers(int n); //2 (default): triple buffering; 1: double buffering, one frame buffer less (call it before pb_init)
+void    pb_wait_for_flip(void); //double buffering: waits until the frames pb_finished queued are on screen (call it before drawing the next frame; no-op with triple buffering)
 void    pb_size(DWORD size);    //sets push buffer size (default is 512Kb) (call it before pb_init)
 int     pb_init(void);      //returns 0 if everything went well (starts Dma engine)
 void    pb_kill(void);      //stops Dma engine and releases push buffer
