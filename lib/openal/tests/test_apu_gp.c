@@ -308,6 +308,21 @@ int main(void) {
         assert(XR(GP_LOOP_KX_BASE + 3u) == GP_LOOP_KX_BASE + GP_KFREEVERB_RCHAIN);   /* the reverb untouched */
         assert(apu_gp_slot_holds(2, &k) && !apu_gp_slot_holds(2, &e) && apu_gp_slot_holds(0, apu_gp_reverb_kernel()));
         assert(apu_gp_slot_holds(1, NULL) && !apu_gp_slot_holds(1, &k));
+        {   /* the same placement, one code word or one reloc different: not the kernel loaded */
+            static uint32_t code2[GP_KECHO_WORDS], relocs2[64];
+            apu_gp_kernel_t k2 = k;
+            assert(k.reloc_count <= 64u && k.reloc_count > 0u);
+            memcpy(code2, k.code, sizeof(uint32_t) * k.words);
+            k2.code = code2;
+            assert(apu_gp_slot_holds(2, &k2));                       /* a copy of it: the same kernel */
+            code2[k.words - 1u] ^= 1u;
+            assert(!apu_gp_slot_holds(2, &k2));
+            code2[k.words - 1u] ^= 1u;
+            memcpy(relocs2, k.relocs, sizeof(uint32_t) * k.reloc_count);
+            k2.relocs = relocs2;
+            relocs2[0] ^= 0x1000u;                                   /* another reloc kind at the same offset */
+            assert(!apu_gp_slot_holds(2, &k2));
+        }
         /* new parameters, same code: the changed ones through the mailbox, at the slot's KPARAM */
         set_reg(MCPX_APU_GP_XMEM + 4u * (xx + 3u), xx + 0x30u);       /* as the kernel would */
         params[0] = 200u;
