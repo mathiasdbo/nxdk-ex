@@ -1208,8 +1208,8 @@ void apu_vp_voice_off(uintptr_t bar0, uint32_t h) {
 
 /*
  * ============================================================================
- * Held voices (apu_vp.h, apu_vp_voice_hold): starts and stops made exact by
- * the output thread
+ * Held voices (apu_vp.h, apu_vp_voice_hold): starts and stops made by the
+ * output thread, within about 2 ms
  * ============================================================================
  * The table is shared with the output thread. The two sides take turns as
  * the stream scrub does (al_stream.c): the thread raises s_hold_busy and backs

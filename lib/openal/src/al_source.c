@@ -2622,7 +2622,8 @@ AL_API ALboolean AL_APIENTRY alIsEnabled(ALenum capability) {
  * made before its start or stop.
  *
  * On a console, where the output thread runs, a buffer source's start or stop
- * up to TIMED_HOLD_LEAD frames ahead is made exact instead (apu_vp.h,
+ * up to TIMED_HOLD_LEAD frames ahead is made by the output thread
+ * instead, within about 2 ms of its frame (apu_vp.h,
  * apu_vp_voice_hold): the start at once, its voice held silent until the
  * output thread releases it at the frame; the stop's voice muted by the thread
  * at the frame, and stopped here at the first update past it. Half an update
