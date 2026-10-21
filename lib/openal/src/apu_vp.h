@@ -248,7 +248,7 @@ void apu_vp_batch_end(uintptr_t bar0);
 void apu_vp_voice_off(uintptr_t bar0, uint32_t handle);
 
 /**
- * Held voices: a start or a stop made exact by the output thread.
+ * Held voices: a start or a stop made by the output thread, within about 2 ms.
  *
  * The game thread acts on a timed start or stop only at its updates, once a
  * frame; at 30 fps that is up to 17 ms either side of the frame asked for,
@@ -259,6 +259,13 @@ void apu_vp_voice_off(uintptr_t bar0, uint32_t handle);
  * volumes and pitch at XGSCNT `due` (the VP ramps the volumes up over one
  * 32-sample frame). A mute does the opposite at `due`: the target volumes go to
  * full attenuation, and the game stops the voice at its next update.
+ *
+ * Not sample-exact: the thread looks every 4 ms (192 samples) and fires an
+ * entry within `window` (APU_AC97_HOLD_WINDOW, 96 samples) either side of
+ * `due`, so that the error is centred on 0 rather than always late; the VP
+ * applies it at its next 32-sample frame. A console measured -2.0..+6.2 ms,
+ * mean |1.3| ms (the stats' err fields), against up to half a game update
+ * (8-17 ms) at the update.
  *
  * Volumes and pitch set while a start is held (apu_vp_voice_update) are kept
  * for its release; volumes set once a mute is done are kept and not written.

@@ -633,7 +633,7 @@ typedef struct ALXBOXSTATS {
     ALuint output_lead_min;              /* zero-copy: frames the APU's mix is ahead of the codec, least / most / last */
     ALuint output_lead_max;
     ALuint output_lead_last;
-    /* Timed starts and stops made exact by the output thread (alXboxSourcePlayAtSample /
+    /* Timed starts and stops made by the output thread, within about 2 ms (alXboxSourcePlayAtSample /
      * StopAtSample on a console): held starts, armed mutes, those refused (acted on
      * at the update instead), those the thread made and those the game thread made
      * late (the thread stalled), the thread's passes skipped while the game thread
