@@ -556,12 +556,12 @@ typedef struct {
     uint32_t descriptors;
     uint32_t params[APU_GP_KERNEL_PARAMS];
     uint32_t reverb_pre;            /* SLOT_REVERB: the pre-delay laid out */
-    uint32_t sum;                   /* kernel_sum() of the kernel loaded */
 } gp_slot_t;
 
 static gp_slot_t s_slot[APU_GP_SLOTS];
 static uint32_t s_flags;            /* X:FLAGS as last written */
 static uint32_t s_reloc_buf[APU_GP_KERNEL_MAX_WORDS];
+static uint32_t s_p_code[GP_P_END];   /* the kernels' P words as loaded, in cached memory (apu_gp_slot_holds) */
 
 typedef struct {
     uint32_t base, size;
@@ -635,27 +635,15 @@ static bool place(gp_slot_t *slots, uint32_t slot, const apu_gp_kernel_t *k) {
 }
 
 /*
- * A slot's kernel is known by the sum of its code and relocs, taken at the
- * load: apu_gp_slot_holds runs every update (al_source.c reverb_sync), and
- * comparing the relocated code with the image read P back from uncached
- * memory, a word at a time - 0.3 ms a call for the room kernel on a console
- * (bmi-hw-play-a, 2026-10-21). The sum reads only the kernel's own (cached)
- * words; the placement is compared as before, and a GP restart empties the
- * slots.
+ * apu_gp_slot_holds runs every update (al_source.c reverb_sync). It compares
+ * the relocated code with s_p_code, the copy load_code keeps in cached memory,
+ * not with the bootstrap image: reading that back from uncached memory a word
+ * at a time cost 0.3 ms a call for the room kernel on a console
+ * (bmi-hw-play-a, 2026-10-21).
  */
-static uint32_t kernel_sum(const apu_gp_kernel_t *k) {
-    uint32_t h = 2166136261u, i;
-    for (i = 0; i < k->words; i++) {
-        h = (h ^ (k->code[i] & 0xFFFFFFu)) * 16777619u;
-    }
-    for (i = 0; k->abi == 2u && i < k->reloc_count; i++) {
-        h = (h ^ k->relocs[i]) * 16777619u;
-    }
-    return h;
-}
-
 bool apu_gp_slot_holds(uint32_t slot, const apu_gp_kernel_t *k) {
     const gp_slot_t *s;
+    uint32_t i;
     if (slot >= APU_GP_SLOTS) {
         return false;
     }
@@ -668,7 +656,13 @@ bool apu_gp_slot_holds(uint32_t slot, const apu_gp_kernel_t *k) {
         (k->abi == 2u && (s->xwords != k->x_words || s->ywords != k->y_words))) {
         return false;
     }
-    return s->sum == kernel_sum(k);
+    apu_gp_kernel_relocate(k, s->p, s->x, s->y, s_reloc_buf);
+    for (i = 0; i < k->words; i++) {
+        if (s_p_code[s->p + i] != s_reloc_buf[i]) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool apu_gp_kernels_fit(const apu_gp_kernel_t *const set[APU_GP_SLOTS]) {
@@ -767,7 +761,7 @@ static int load_code(uintptr_t bar0, uint32_t slot, const gp_slot_t *s, const ui
     uint32_t i, tramp = GP_LOOP_TRAMP0 + slot;
     bool ok = true;
     for (i = 0; i < s->words; i++) {
-        s_scratch[s->p + i] = code[i];
+        s_scratch[s->p + i] = s_p_code[s->p + i] = code[i];
         reg_wr(bar0, PREG(s->p + i), code[i]);
     }
     if (s->abi == 2u) {
@@ -845,7 +839,6 @@ static int slot_load(uintptr_t bar0, uint32_t slot, const apu_gp_kernel_t *k, co
         reg_wr(bar0, XREG(kparam + i), s->params[i]);
     }
     memset((uint8_t *)s_scratch + s->scr, 0, k->scratch_bytes);
-    s->sum = kernel_sum(k);
     s->kind = kind;
     return 0;
 }
