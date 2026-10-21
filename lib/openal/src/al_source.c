@@ -2631,6 +2631,18 @@ AL_API ALboolean AL_APIENTRY alIsEnabled(ALenum capability) {
  * early (the console, 2026-10-21).
  */
 #define TIMED_HOLD_LEAD 12000u   /* stream frames: 250 ms at 48 kHz */
+
+static uint32_t timed_half(ALuint stream);
+
+/* A start is held from about two updates ahead (or TIMED_HOLD_LEAD before an
+ * interval is measured): the held voice creeps at 1/256 of 48 kHz, so it is
+ * that lead / 256 frames into the sound at its release - 7 at 60 updates a
+ * second. A stop's mute does not move the voice and is queued from
+ * TIMED_HOLD_LEAD. */
+static uint32_t timed_hold_lead(ALuint stream) {
+    uint32_t half = timed_half(stream);
+    return (half != 0u && half * 4u < TIMED_HOLD_LEAD) ? half * 4u : TIMED_HOLD_LEAD;
+}
 enum { TIMED_NONE = 0, TIMED_PLAY = 1, TIMED_STOP = 2 };
 
 static uint32_t s_timed_src_n;     /* sources with an operation waiting */
@@ -2825,7 +2837,7 @@ static void timed_ops(void) {
             uint32_t half = timed_half(src->timed_stream);
             if (ahead > 0 && ahead <= (int32_t)TIMED_HOLD_LEAD) {
                 if (src->timed_op == TIMED_PLAY && src->state != AL_PLAYING && !src->timed_nohold &&
-                    timed_hold_ok(src)) {
+                    ahead <= (int32_t)timed_hold_lead(src->timed_stream) && timed_hold_ok(src)) {
                     uint32_t due = timed_due(src->timed_stream, (uint32_t)ahead), sample = src->timed_sample;
                     ALuint st = src->timed_stream;
                     timed_cancel(src);

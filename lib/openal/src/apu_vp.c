@@ -1348,14 +1348,28 @@ static bool hold_update(uint32_t h, uint32_t vola, uint32_t volb, uint32_t volc,
     return kept;
 }
 
-static int hold_add(uint32_t h, uint32_t due, uint8_t kind) {
+/* A held voice still moves, at 1/256 of 48 kHz: by its release it is
+ * (due - now) / 256 frames into the sound. A start is held only with that much
+ * and HOLD_MIN_LEFT more of its data still ahead, so a short one-shot is never
+ * played out (and reaped) silent before its frame; al_source.c keeps the lead
+ * to about two game updates, a few frames. */
+#define HOLD_MIN_LEFT 64u
+
+static bool hold_fits(uint32_t h, uint32_t due, uint32_t now) {
+    int32_t ahead = (int32_t)(due - now);
+    uint32_t cbo = *voice_dw(h, MCPX_VOICE_PAR_OFFSET) & 0xFFFFFFu;
+    uint32_t adv = (ahead > 0 ? (uint32_t)ahead / 256u : 0u) + 1u;
+    return cbo < s_frames[h] && s_frames[h] - cbo >= adv + HOLD_MIN_LEFT;
+}
+
+static int hold_add(uint32_t h, uint32_t due, uint32_t now, uint8_t kind) {
     hold_t *e;
     volatile uint32_t *pl;
     if (!s_ready || h >= APU_VP_MAX_HANDLES) {
         return -1;
     }
     hold_lock();
-    if (s_hold_n >= APU_VP_HOLD_MAX || hold_find(h) >= 0) {
+    if (s_hold_n >= APU_VP_HOLD_MAX || hold_find(h) >= 0 || (kind == HOLD_START && !hold_fits(h, due, now))) {
         hold_unlock();
         s_hold_stats.refused++;
         return -1;
@@ -1391,13 +1405,11 @@ static int hold_add(uint32_t h, uint32_t due, uint8_t kind) {
 }
 
 int apu_vp_voice_hold(uintptr_t bar0, uint32_t h, uint32_t due) {
-    (void)bar0;
-    return hold_add(h, due, HOLD_START);
+    return hold_add(h, due, apu_vp_now(bar0), HOLD_START);
 }
 
 int apu_vp_voice_mute_at(uintptr_t bar0, uint32_t h, uint32_t due) {
-    (void)bar0;
-    return hold_add(h, due, HOLD_MUTE);
+    return hold_add(h, due, apu_vp_now(bar0), HOLD_MUTE);
 }
 
 void apu_vp_voice_unhold(uintptr_t bar0, uint32_t h) {
