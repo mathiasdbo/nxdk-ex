@@ -47,6 +47,11 @@ static uint32_t s_frames[APU_VP_MAX_HANDLES];      /* data frames of the buffer 
 static uint32_t s_tail[APU_VP_MAX_HANDLES];        /* silent-tail frames after them (0: none) */
 static uint32_t s_pending_ebo[APU_VP_MAX_HANDLES];  /* loop end - 1 to set once the voice is before it, 0 = none */
 static uint32_t s_loop_start[APU_VP_MAX_HANDLES];   /* with s_pending_ebo */
+/* Held voices (the section at the end of the file) */
+static void hold_drop(uint32_t h);
+static bool hold_update(uint32_t h, uint32_t vola, uint32_t volb, uint32_t volc, int16_t pitch);
+static void hold_reset(void);
+
 #define LOOP_MARGIN_FRAMES 1024u   /* frames a voice may advance between a read of CBO and an EBO write */
 
 /* XGSCNT samples a handle stays unused after leaving its list: more than one
@@ -449,10 +454,20 @@ void apu_vp_batch_end(uintptr_t bar0) {
     }
 }
 
+/* TAR_PITCH_LINK's halves, each with a 16-bit store: the output thread writes
+ * the pitch of a held voice (apu_vp_hold_tick) while this thread may be
+ * relinking its neighbour, so neither half is ever written back stale */
+static inline void set_link(uint32_t h, uint32_t next) {
+    *(volatile uint16_t *)(s_voices + h * MCPX_VOICE_SIZE + MCPX_VOICE_TAR_PITCH_LINK) = (uint16_t)next;
+}
+
+static inline void set_pitch(uint32_t h, int16_t pitch) {
+    *(volatile uint16_t *)(s_voices + h * MCPX_VOICE_SIZE + MCPX_VOICE_TAR_PITCH_LINK + 2u) = (uint16_t)pitch;
+}
+
 static void link_voice(uintptr_t bar0, uint32_t h, uint8_t list) {
-    volatile uint32_t *pl = voice_dw(h, MCPX_VOICE_TAR_PITCH_LINK);
     uint32_t head = list_head(bar0, list);
-    *pl = (*pl & 0xFFFF0000u) | head;
+    set_link(h, head);
     wc_flush();
     set_list_head(bar0, list, h);
     s_list[h] = list;
@@ -485,7 +500,7 @@ static void unlink_voice(uintptr_t bar0, uint32_t h) {
         volatile uint32_t *link = voice_dw(cur, MCPX_VOICE_TAR_PITCH_LINK);
         uint32_t n = *link & 0xFFFFu;
         if (n == h) {
-            *link = (*link & 0xFFFF0000u) | next;
+            set_link(cur, next);
             wc_flush();
             trace(bar0, 'U', h, (cur << 16) | next);   /* a = predecessor << 16 | next */
             return;
@@ -754,6 +769,7 @@ int apu_vp_init(uintptr_t bar0) {
     memset(s_listed, 0, sizeof(s_listed));
     memset(s_paused, 0, sizeof(s_paused));
     s_map_count = 0;
+    hold_reset();
 
     /* Quiesce (bring-up step 6) */
     reg_wr(bar0, MCPX_APU_SECTL, 0);
@@ -955,6 +971,7 @@ int apu_vp_voice_start(uintptr_t bar0, uint32_t h, const apu_vp_voice_params_t *
 
     /* Restarting a handle: take it out of its list first, the VP must never
      * see a half-written record */
+    hold_drop(h);
     unlink_voice(bar0, h);
     s_paused[h] = 0;
     *voice_dw(h, MCPX_VOICE_PAR_STATE) = 0;
@@ -1017,7 +1034,6 @@ int apu_vp_voice_start(uintptr_t bar0, uint32_t h, const apu_vp_voice_params_t *
 
 void apu_vp_voice_update(uintptr_t bar0, uint32_t h, int16_t pitch, const uint16_t vols[APU_VP_OUTPUTS],
                          int hrtf_entry) {
-    volatile uint32_t *pl;
     uint32_t vola, volb, volc;
 
     if (!s_ready || h >= APU_VP_MAX_HANDLES) {
@@ -1025,12 +1041,14 @@ void apu_vp_voice_update(uintptr_t bar0, uint32_t h, int16_t pitch, const uint16
     }
     apu_vp_pack_volumes(vols, &vola, &volb, &volc);
     /* Targets only: the VP ramps the current values toward them and never
-     * writes these fields back. The next field is the library's. */
-    *voice_dw(h, MCPX_VOICE_TAR_VOLA) = vola;
-    *voice_dw(h, MCPX_VOICE_TAR_VOLB) = volb;
-    *voice_dw(h, MCPX_VOICE_TAR_VOLC) = volc;
-    pl = voice_dw(h, MCPX_VOICE_TAR_PITCH_LINK);
-    *pl = ((uint32_t)(uint16_t)pitch << 16) | (*pl & 0xFFFFu);
+     * writes these fields back. The next field is the library's. A held
+     * voice keeps them for its release (hold_update). */
+    if (!hold_update(h, vola, volb, volc, pitch)) {
+        *voice_dw(h, MCPX_VOICE_TAR_VOLA) = vola;
+        *voice_dw(h, MCPX_VOICE_TAR_VOLB) = volb;
+        *voice_dw(h, MCPX_VOICE_TAR_VOLC) = volc;
+        set_pitch(h, pitch);
+    }
     wc_flush();
     if (h < 64u && s_fe_ok && hrtf_entry >= 0 && hrtf_entry < APU_HRTF_ENTRIES) {
         *voice_dw(h, MCPX_VOICE_CFG_HRTF_TARGET) = (uint32_t)hrtf_entry;
@@ -1160,6 +1178,7 @@ void apu_vp_voice_pause(uintptr_t bar0, uint32_t h, bool pause) {
         return;
     }
     if (pause) {
+        apu_vp_voice_unhold(bar0, h);   /* resumed, it plays as it was asked to */
         if (s_list[h] != LIST_NONE) {
             unlink_voice(bar0, h);
             s_paused[h] = 1;
@@ -1176,6 +1195,7 @@ void apu_vp_voice_off(uintptr_t bar0, uint32_t h) {
     if (!s_ready || h >= APU_VP_MAX_HANDLES) {
         return;
     }
+    hold_drop(h);   /* off its list first: nothing is restored on a voice that stops */
     unlink_voice(bar0, h);
     s_paused[h] = 0;
     if (s_fe_ok) {
@@ -1184,6 +1204,299 @@ void apu_vp_voice_off(uintptr_t bar0, uint32_t h) {
         *voice_dw(h, MCPX_VOICE_PAR_STATE) = 0;
     }
     apu_vp_service(bar0);
+}
+
+/*
+ * ============================================================================
+ * Held voices (apu_vp.h, apu_vp_voice_hold): starts and stops made exact by
+ * the output thread
+ * ============================================================================
+ * The table is shared with the output thread. The two sides take turns as
+ * the stream scrub does (al_stream.c): the thread raises s_hold_busy and backs
+ * off for the pass if s_hold_game is up; the game thread raises s_hold_game and
+ * waits out a pass in progress. Each stores its flag then loads the other's,
+ * with a full barrier between.
+ */
+enum { HOLD_START = 1, HOLD_MUTE = 2, HOLD_MUTED = 3 };
+
+typedef struct {
+    uint32_t due;                /* XGSCNT */
+    uint32_t vola, volb, volc;   /* the voice's own targets: for the release, or kept through a mute */
+    int16_t pitch;
+    uint16_t h;
+    uint8_t kind;
+} hold_t;
+
+static hold_t s_hold[APU_VP_HOLD_MAX];
+static volatile uint32_t s_hold_n;
+static volatile int32_t s_hold_busy, s_hold_game;
+static apu_vp_hold_stats_t s_hold_stats;
+
+static void hold_lock(void) {
+    s_hold_game = 1;
+    __sync_synchronize();
+    while (s_hold_busy) {
+        __sync_synchronize();
+    }
+}
+
+static void hold_unlock(void) {
+    __sync_synchronize();
+    s_hold_game = 0;
+}
+
+static int hold_find(uint32_t h) {
+    uint32_t i;
+    for (i = 0; i < s_hold_n; i++) {
+        if (s_hold[i].h == h) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static void hold_remove(uint32_t i) {
+    s_hold[i] = s_hold[s_hold_n - 1u];
+    s_hold_n--;
+}
+
+static void muted_vols(uint32_t *a, uint32_t *b, uint32_t *c) {
+    uint16_t v[APU_VP_OUTPUTS];
+    uint32_t i;
+    for (i = 0; i < APU_VP_OUTPUTS; i++) {
+        v[i] = 0xFFFu;
+    }
+    apu_vp_pack_volumes(v, a, b, c);
+}
+
+/* The voice's own targets back (a start released, a mute undone) */
+static void hold_restore(const hold_t *e) {
+    *voice_dw(e->h, MCPX_VOICE_TAR_VOLA) = e->vola;
+    *voice_dw(e->h, MCPX_VOICE_TAR_VOLB) = e->volb;
+    *voice_dw(e->h, MCPX_VOICE_TAR_VOLC) = e->volc;
+    set_pitch(e->h, e->pitch);
+    wc_flush();
+}
+
+/* Entry i is due: a start gets its volumes and pitch, a mute its silence */
+static void hold_fire(uint32_t i, int32_t err, bool thread) {
+    hold_t *e = &s_hold[i];
+    if (thread) {
+        uint32_t a = (uint32_t)(err < 0 ? -err : err);
+        s_hold_stats.done++;
+        s_hold_stats.err_abs_sum += a;
+        if (s_hold_stats.done == 1u || err < s_hold_stats.err_min) s_hold_stats.err_min = err;
+        if (s_hold_stats.done == 1u || err > s_hold_stats.err_max) s_hold_stats.err_max = err;
+    } else {
+        s_hold_stats.overdue++;
+    }
+    if (e->kind == HOLD_START) {
+        hold_restore(e);
+        hold_remove(i);
+    } else {
+        uint32_t a, b, c;
+        muted_vols(&a, &b, &c);
+        *voice_dw(e->h, MCPX_VOICE_TAR_VOLA) = a;
+        *voice_dw(e->h, MCPX_VOICE_TAR_VOLB) = b;
+        *voice_dw(e->h, MCPX_VOICE_TAR_VOLC) = c;
+        wc_flush();
+        e->kind = HOLD_MUTED;   /* kept until the voice stops: later volumes are not written */
+    }
+}
+
+static void hold_reset(void) {
+    s_hold_n = 0;
+    s_hold_busy = 0;
+    s_hold_game = 0;
+    memset(&s_hold_stats, 0, sizeof(s_hold_stats));
+}
+
+static void hold_drop(uint32_t h) {
+    int i;
+    if (s_hold_n == 0u) {
+        return;
+    }
+    hold_lock();
+    i = hold_find(h);
+    if (i >= 0) {
+        hold_remove((uint32_t)i);
+    }
+    hold_unlock();
+}
+
+/* apu_vp_voice_update on a held voice: true if the values were kept, not written */
+static bool hold_update(uint32_t h, uint32_t vola, uint32_t volb, uint32_t volc, int16_t pitch) {
+    bool kept = false;
+    int i;
+    if (s_hold_n == 0u) {
+        return false;
+    }
+    hold_lock();
+    i = hold_find(h);
+    if (i >= 0 && s_hold[i].kind != HOLD_MUTE) {
+        hold_t *e = &s_hold[i];
+        e->vola = vola;
+        e->volb = volb;
+        e->volc = volc;
+        e->pitch = pitch;
+        if (e->kind == HOLD_MUTED) {
+            set_pitch(h, pitch);   /* silent either way; the pitch may as well follow */
+        }
+        kept = true;
+    }
+    hold_unlock();
+    return kept;
+}
+
+static int hold_add(uint32_t h, uint32_t due, uint8_t kind) {
+    hold_t *e;
+    volatile uint32_t *pl;
+    if (!s_ready || h >= APU_VP_MAX_HANDLES) {
+        return -1;
+    }
+    hold_lock();
+    if (s_hold_n >= APU_VP_HOLD_MAX || hold_find(h) >= 0) {
+        hold_unlock();
+        s_hold_stats.refused++;
+        return -1;
+    }
+    e = &s_hold[s_hold_n];
+    e->h = (uint16_t)h;
+    e->due = due;
+    e->kind = kind;
+    e->vola = *voice_dw(h, MCPX_VOICE_TAR_VOLA);
+    e->volb = *voice_dw(h, MCPX_VOICE_TAR_VOLB);
+    e->volc = *voice_dw(h, MCPX_VOICE_TAR_VOLC);
+    pl = voice_dw(h, MCPX_VOICE_TAR_PITCH_LINK);
+    e->pitch = (int16_t)(*pl >> 16);
+    if (kind == HOLD_START) {
+        uint32_t a, b, c;
+        muted_vols(&a, &b, &c);
+        *voice_dw(h, MCPX_VOICE_CUR_VOLA) = a;   /* the voice starts silent, not ramping down from its volumes */
+        *voice_dw(h, MCPX_VOICE_CUR_VOLB) = b;
+        *voice_dw(h, MCPX_VOICE_CUR_VOLC) = c;
+        *voice_dw(h, MCPX_VOICE_TAR_VOLA) = a;
+        *voice_dw(h, MCPX_VOICE_TAR_VOLB) = b;
+        *voice_dw(h, MCPX_VOICE_TAR_VOLC) = c;
+        set_pitch(h, -32768);   /* 1/256: 0.19 frames of the sound per ms */
+        wc_flush();
+        s_hold_stats.holds++;
+    } else {
+        s_hold_stats.mutes++;
+    }
+    __sync_synchronize();
+    s_hold_n++;   /* the entry is whole before the thread can see it */
+    hold_unlock();
+    return 0;
+}
+
+int apu_vp_voice_hold(uintptr_t bar0, uint32_t h, uint32_t due) {
+    (void)bar0;
+    return hold_add(h, due, HOLD_START);
+}
+
+int apu_vp_voice_mute_at(uintptr_t bar0, uint32_t h, uint32_t due) {
+    (void)bar0;
+    return hold_add(h, due, HOLD_MUTE);
+}
+
+void apu_vp_voice_unhold(uintptr_t bar0, uint32_t h) {
+    int i;
+    (void)bar0;
+    if (s_hold_n == 0u || h >= APU_VP_MAX_HANDLES) {
+        return;
+    }
+    hold_lock();
+    i = hold_find(h);
+    if (i >= 0) {
+        if (s_hold[i].kind != HOLD_MUTE) {
+            hold_restore(&s_hold[i]);   /* a held start or a mute already made: the voice as it was asked to be */
+        }
+        hold_remove((uint32_t)i);
+    }
+    hold_unlock();
+}
+
+bool apu_vp_voice_held(uint32_t h) {
+    bool held = false;
+    int i;
+    if (s_hold_n == 0u) {
+        return false;
+    }
+    hold_lock();
+    i = hold_find(h);
+    held = i >= 0 && s_hold[i].kind != HOLD_MUTED;
+    hold_unlock();
+    return held;
+}
+
+void apu_vp_hold_tick(uintptr_t bar0, uint32_t window) {
+    uint32_t now, i;
+    if (s_hold_n == 0u) {
+        return;
+    }
+    s_hold_busy = 1;
+    __sync_synchronize();
+    if (s_hold_game) {
+        s_hold_busy = 0;
+        __sync_synchronize();
+        s_hold_stats.skipped++;
+        return;
+    }
+    now = reg_rd(bar0, MCPX_APU_XGSCNT);
+    i = 0;
+    while (i < s_hold_n) {
+        int32_t err = (int32_t)(now - s_hold[i].due);   /* XGSCNT wraps at 2^32 */
+        uint32_t n = s_hold_n;
+        if (s_hold[i].kind != HOLD_MUTED && err >= -(int32_t)window) {
+            hold_fire(i, err, true);
+            if (s_hold_n < n) {
+                continue;   /* removed: entry i is another now */
+            }
+        }
+        i++;
+    }
+    __sync_synchronize();
+    s_hold_busy = 0;
+}
+
+void apu_vp_hold_overdue(uintptr_t bar0, uint32_t late) {
+    uint32_t now, i;
+    if (s_hold_n == 0u || !s_ready) {
+        return;
+    }
+    hold_lock();
+    now = reg_rd(bar0, MCPX_APU_XGSCNT);
+    i = 0;
+    while (i < s_hold_n) {
+        int32_t err = (int32_t)(now - s_hold[i].due);
+        uint32_t n = s_hold_n;
+        if (s_hold[i].kind != HOLD_MUTED && err > (int32_t)late) {
+            hold_fire(i, err, false);
+            if (s_hold_n < n) {
+                continue;
+            }
+        }
+        i++;
+    }
+    hold_unlock();
+}
+
+bool apu_vp_hold_room(void) {
+    return s_ready && s_hold_n < APU_VP_HOLD_MAX;
+}
+
+uint32_t apu_vp_now(uintptr_t bar0) {
+    return reg_rd(bar0, MCPX_APU_XGSCNT);
+}
+
+void apu_vp_hold_get_stats(apu_vp_hold_stats_t *out) {
+    if (out) {
+        hold_lock();
+        *out = s_hold_stats;
+        out->now = s_hold_n;
+        hold_unlock();
+    }
 }
 
 uint32_t apu_vp_alloc_handle(uintptr_t bar0) {

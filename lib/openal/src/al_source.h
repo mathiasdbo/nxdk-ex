@@ -69,6 +69,8 @@ typedef struct ALsource {
     uint8_t timed_op;                /* alXboxSource*AtSample waiting: 0 none, 1 play, 2 stop */
     ALuint timed_stream;             /* the stream it waits for */
     uint32_t timed_sample;           /* the stream position it acts at */
+    bool timed_nohold;               /* this start found no voice to hold: made at its update */
+    bool timed_muted;                /* a timed stop's mute is armed (apu_voice_mute_at): the stop waits for its frame */
     uint8_t timed_par_n;             /* alXboxSourcefvAtSample changes waiting, oldest first */
     uint8_t timed_par_gains;         /* bit i: change i is AL_XBOX_DIRECT_GAINS (else AL_PITCH) */
     ALuint timed_par_stream;         /* the stream they all wait for */

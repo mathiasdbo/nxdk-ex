@@ -111,6 +111,8 @@ static void source_reset_defaults(ALsource *src, ALuint id) {
     src->timed_op = 0;
     src->timed_stream = 0;
     src->timed_sample = 0;
+    src->timed_muted = false;
+    src->timed_nohold = false;
     src->timed_par_n = 0;
     src->timed_par_gains = 0;
     src->timed_par_stream = 0;
@@ -907,6 +909,7 @@ static void timed_cancel(ALsource *src);
 static void timed_par_drop(ALsource *src);
 static void timed_lead_update(void);
 static void timed_ops(void);
+#define TIMED_HOLD_OVERDUE 960u   /* XGSCNT samples (20 ms) past its frame before this thread releases a hold */
 
 void al_source_update_frame(void) {
     uint64_t t0, t1;
@@ -919,6 +922,7 @@ void al_source_update_frame(void) {
     }
     timed_lead_update();
     timed_ops();
+    apu_vp_hold_overdue(al_source_get_apu_base(), TIMED_HOLD_OVERDUE);   /* the output thread stalled */
     t1 = apu_platform_cycles();
     s_tick_stream_cycles += t1 - t0;
     apu_voice_mgr_update(al_source_get_apu_base());
@@ -2616,13 +2620,29 @@ AL_API ALboolean AL_APIENTRY alIsEnabled(ALenum capability) {
  * updates. A start found late begins as far into the sound as the stream has
  * gone past it, at the sound's own rate. A source's parameter changes are
  * made before its start or stop.
+ *
+ * On a console, where the output thread runs, a buffer source's start or stop
+ * up to TIMED_HOLD_LEAD frames ahead is made exact instead (apu_vp.h,
+ * apu_vp_voice_hold): the start at once, its voice held silent until the
+ * output thread releases it at the frame; the stop's voice muted by the thread
+ * at the frame, and stopped here at the first update past it. Half an update
+ * either side of the frame was audible: a weapon fired every 100 ms played
+ * unevenly, each shot's attack cut by a late start and the shot before ended
+ * early (the console, 2026-10-21).
  */
+#define TIMED_HOLD_LEAD 12000u   /* stream frames: 250 ms at 48 kHz */
 enum { TIMED_NONE = 0, TIMED_PLAY = 1, TIMED_STOP = 2 };
 
 static uint32_t s_timed_src_n;     /* sources with an operation waiting */
 static uint32_t s_timed_par_src_n; /* sources with parameter changes waiting */
 
 static void timed_cancel(ALsource *src) {
+    if (src->timed_muted) {
+        src->timed_muted = false;   /* the stop is not coming: the voice plays on as it was */
+        if (src->hw_voice_idx >= 0) {
+            apu_voice_unhold(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx);
+        }
+    }
     if (src->timed_op != TIMED_NONE) {
         src->timed_op = TIMED_NONE;
         s_timed_src_n--;
@@ -2723,6 +2743,22 @@ static void timed_par_run(ALsource *src) {
     }
 }
 
+/* XGSCNT (48 kHz) `ahead` frames of `stream` from now */
+static uint32_t timed_due(ALuint stream, uint32_t ahead) {
+    ALsource *st = al_source_get(stream);
+    const ALbuffer *rb = (st && st->stream) ? al_stream_ring_buffer(st->stream) : NULL;
+    float out = (float)ahead;
+    if (rb && rb->frequency > 0 && st->pitch > 0.0f) {
+        out = (float)ahead * 48000.0f / ((float)rb->frequency * st->pitch);
+    }
+    return apu_vp_now(al_source_get_apu_base()) + (uint32_t)(out + 0.5f);
+}
+
+/* A buffer source's timed work can be held for the output thread */
+static bool timed_hold_ok(const ALsource *src) {
+    return !src->stream && apu_voice_hold_possible() && apu_vp_hold_room();
+}
+
 /* Starts src `late` stream frames after its frame: that far into the sound */
 static void timed_play(ALsource *src, ALuint stream, uint32_t late) {
     const ALbuffer *pb = al_source_play_buffer(src);
@@ -2787,6 +2823,39 @@ static void timed_ops(void) {
         if (c == AL_SOURCE_CLOCK_RUN) {
             int32_t ahead = (int32_t)(src->timed_sample - pos);   /* the position wraps at 2^32 */
             uint32_t half = timed_half(src->timed_stream);
+            if (ahead > 0 && ahead <= (int32_t)TIMED_HOLD_LEAD) {
+                if (src->timed_op == TIMED_PLAY && src->state != AL_PLAYING && !src->timed_nohold &&
+                    timed_hold_ok(src)) {
+                    uint32_t due = timed_due(src->timed_stream, (uint32_t)ahead), sample = src->timed_sample;
+                    ALuint st = src->timed_stream;
+                    timed_cancel(src);
+                    timed_play(src, st, 0u);
+                    if (src->state == AL_PLAYING && src->hw_voice_idx >= 0 &&
+                        apu_voice_hold(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx, due) == 0) {
+                        continue;
+                    }
+                    /* No voice (a virtual start would run early) or no hold:
+                     * back to waiting, made at its update as before */
+                    if (src->state == AL_PLAYING) {
+                        alSourceStop(src->id);
+                    }
+                    src->timed_op = TIMED_PLAY;
+                    src->timed_stream = st;
+                    src->timed_sample = sample;
+                    src->timed_nohold = true;
+                    s_timed_src_n++;
+                    continue;
+                }
+                if (src->timed_op == TIMED_STOP && !src->timed_muted && src->state == AL_PLAYING &&
+                    src->hw_voice_idx >= 0 && timed_hold_ok(src) &&
+                    apu_voice_mute_at(al_source_get_apu_base(), (uint32_t)src->hw_voice_idx,
+                                      timed_due(src->timed_stream, (uint32_t)ahead)) == 0) {
+                    src->timed_muted = true;
+                }
+            }
+            if (src->timed_muted && ahead > 0) {
+                continue;   /* muted at its frame by the output thread; stopped once past it */
+            }
             if (ahead > (int32_t)half) {
                 continue;
             }
@@ -2794,6 +2863,7 @@ static void timed_ops(void) {
         }
         op = src->timed_op;
         stream = src->timed_stream;
+        src->timed_muted = false;   /* stopping now: the mute stays until the voice is off */
         timed_cancel(src);
         if (op == TIMED_PLAY) {
             timed_play(src, stream, late);
@@ -2835,6 +2905,7 @@ static void timed_queue(ALuint source, ALuint stream, ALuint sample, uint8_t op)
     }
     timed_cancel(src);
     src->timed_op = op;
+    src->timed_nohold = false;
     src->timed_stream = stream;
     src->timed_sample = sample;
     s_timed_src_n++;
