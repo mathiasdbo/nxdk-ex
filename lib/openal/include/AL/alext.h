@@ -633,6 +633,21 @@ typedef struct ALXBOXSTATS {
     ALuint output_lead_min;              /* zero-copy: frames the APU's mix is ahead of the codec, least / most / last */
     ALuint output_lead_max;
     ALuint output_lead_last;
+    /* Timed starts and stops made by the output thread, within about 2 ms (alXboxSourcePlayAtSample /
+     * StopAtSample on a console): held starts, armed mutes, those refused (acted on
+     * at the update instead), those the thread made and those the game thread made
+     * late (the thread stalled), the thread's passes skipped while the game thread
+     * changed the table, and the thread's error against the frame in 48 kHz
+     * samples: least, most, mean of the absolute value */
+    ALuint timed_holds;
+    ALuint timed_mutes;
+    ALuint timed_hold_refused;
+    ALuint timed_hold_done;
+    ALuint timed_hold_overdue;
+    ALuint timed_hold_skipped;
+    ALint timed_hold_err_min;
+    ALint timed_hold_err_max;
+    ALuint timed_hold_err_mean;
 } ALXBOXSTATS;
 
 AL_API void AL_APIENTRY alXboxGetStats(ALXBOXSTATS *stats);

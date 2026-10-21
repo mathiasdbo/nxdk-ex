@@ -1300,6 +1300,19 @@ AL_API void AL_APIENTRY alXboxGetStats(ALXBOXSTATS *stats) {
     s.output_lead_min = a.lead_min;
     s.output_lead_max = a.lead_max;
     s.output_lead_last = a.lead_last;
+    {
+        apu_vp_hold_stats_t h;
+        apu_vp_hold_get_stats(&h);
+        s.timed_holds = h.holds;
+        s.timed_mutes = h.mutes;
+        s.timed_hold_refused = h.refused;
+        s.timed_hold_done = h.done;
+        s.timed_hold_overdue = h.overdue;
+        s.timed_hold_skipped = h.skipped;
+        s.timed_hold_err_min = h.err_min;
+        s.timed_hold_err_max = h.err_max;
+        s.timed_hold_err_mean = h.done ? (ALuint)(h.err_abs_sum / h.done) : 0u;
+    }
     n = (stats->size < sizeof(s)) ? stats->size : (ALuint)sizeof(s);
     s.size = stats->size;
     memcpy(stats, &s, n);

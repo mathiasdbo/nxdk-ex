@@ -299,6 +299,133 @@ int main(void) {
     apu_vp_deinit(base);
     printf("    -> new voices chained out of sight, one head write per list, pause inside a batch [PASS]\n");
 
+    /* 7c. Held starts and timed mutes (apu_vp_voice_hold / _mute_at, the output thread's tick) */
+    printf("[7c] Held starts and timed mutes...\n");
+    assert(apu_vp_init(base) == 0);
+    {
+        uint32_t ma, mb, mc, va, vb, vc, wa, wb, wc;
+        uint16_t v2[APU_VP_OUTPUTS], v3[APU_VP_OUTPUTS];
+        apu_vp_hold_stats_t hs;
+        for (i = 0; i < APU_VP_OUTPUTS; i++) { vols[i] = 0xFFF; v2[i] = 0xFFF; v3[i] = 0xFFF; }
+        apu_vp_pack_volumes(vols, &ma, &mb, &mc);                    /* every output silent */
+        p.vols[0] = 0x181;
+        p.pitch = -501;
+        apu_vp_pack_volumes(p.vols, &va, &vb, &vc);
+        v2[0] = 0x0C1; v2[1] = 0x040;
+        v3[2] = 0x100;
+        set_reg(MCPX_APU_XGSCNT, 0);
+        assert(apu_vp_hold_room());
+        assert(apu_vp_voice_start(base, 83, &p) == 0);
+        apu_vp_batch_begin(base);
+        assert(apu_vp_voice_start(base, 84, &p) == 0);
+        assert(apu_vp_voice_hold(base, 84, 1000) == 0);              /* before the batch shows it to the VP */
+        apu_vp_batch_end(base);
+        assert(reg(MCPX_APU_TVL2D) == 84);
+        assert(voice_dw(84, MCPX_VOICE_CUR_VOLA) == ma && voice_dw(84, MCPX_VOICE_CUR_VOLB) == mb &&
+               voice_dw(84, MCPX_VOICE_CUR_VOLC) == mc);
+        assert(voice_dw(84, MCPX_VOICE_TAR_VOLA) == ma && voice_dw(84, MCPX_VOICE_TAR_VOLC) == mc);
+        assert(voice_dw(84, MCPX_VOICE_TAR_PITCH_LINK) == (0x8000u << 16 | 83u));   /* 1/256, link kept */
+        assert(apu_vp_voice_held(84));
+        assert(apu_vp_voice_hold(base, 84, 2000) != 0);              /* one hold a handle */
+        /* a short one-shot: held 12000 ahead it would creep 47 frames, played out silent */
+        {
+            apu_vp_voice_params_t q = p;
+            q.bytes = 2u * 100u;                                     /* 100 frames: 47 + 64 do not fit */
+            assert(apu_vp_voice_start(base, 85, &q) == 0);
+            assert(apu_vp_voice_hold(base, 85, 12000) != 0 && !apu_vp_voice_held(85));
+            assert(apu_vp_voice_hold(base, 85, 1000) == 0);          /* 4 + 64 do */
+            apu_vp_voice_off(base, 85);
+            q.bytes = 2u * 112u;
+            assert(apu_vp_voice_start(base, 85, &q) == 0);
+            assert(apu_vp_voice_hold(base, 85, 12000) == 0);         /* 47 + 64 = 111 */
+            apu_vp_voice_off(base, 85);
+        }
+        /* volumes and pitch while held: kept for the release, the record stays silent */
+        apu_vp_voice_update(base, 84, 100, v2, -1);
+        assert(voice_dw(84, MCPX_VOICE_TAR_VOLA) == ma && (voice_dw(84, MCPX_VOICE_TAR_PITCH_LINK) >> 16) == 0x8000u);
+        /* the neighbour relinked while held: the pitch half is untouched */
+        apu_vp_voice_pause(base, 83, true);
+        assert(voice_dw(84, MCPX_VOICE_TAR_PITCH_LINK) == (0x8000u << 16 | MCPX_APU_LIST_END));
+        apu_vp_voice_pause(base, 83, false);
+        apu_vp_hold_tick(base, 96);
+        set_reg(MCPX_APU_XGSCNT, 903);
+        apu_vp_hold_tick(base, 96);                                  /* 97 early: not yet */
+        assert(apu_vp_voice_held(84));
+        set_reg(MCPX_APU_XGSCNT, 905);
+        apu_vp_hold_tick(base, 96);                                  /* within half a pass */
+        assert(!apu_vp_voice_held(84));
+        apu_vp_pack_volumes(v2, &wa, &wb, &wc);
+        assert(voice_dw(84, MCPX_VOICE_TAR_VOLA) == wa && voice_dw(84, MCPX_VOICE_TAR_VOLB) == wb &&
+               voice_dw(84, MCPX_VOICE_TAR_VOLC) == wc);
+        assert((voice_dw(84, MCPX_VOICE_TAR_PITCH_LINK) >> 16) == 100u);
+        assert((voice_dw(84, MCPX_VOICE_TAR_PITCH_LINK) & 0xFFFFu) == MCPX_APU_LIST_END);   /* 83 went back on top */
+        apu_vp_hold_get_stats(&hs);
+        assert(hs.holds == 3 && hs.done == 1 && hs.refused == 2 && hs.now == 0 && hs.err_min == -95 &&
+               hs.err_max == -95 && hs.err_abs_sum == 95);
+        /* a mute: written at its frame, later volumes kept back, pitch followed */
+        assert(apu_vp_voice_mute_at(base, 84, 2000) == 0);
+        apu_vp_voice_update(base, 84, 100, v3, -1);                  /* before the frame: heard */
+        apu_vp_pack_volumes(v3, &wa, &wb, &wc);
+        assert(voice_dw(84, MCPX_VOICE_TAR_VOLB) == wb);
+        set_reg(MCPX_APU_XGSCNT, 2100);
+        apu_vp_hold_tick(base, 96);
+        assert(voice_dw(84, MCPX_VOICE_TAR_VOLA) == ma && voice_dw(84, MCPX_VOICE_TAR_VOLB) == mb &&
+               voice_dw(84, MCPX_VOICE_TAR_VOLC) == mc);
+        assert(!apu_vp_voice_held(84));                              /* done: only the stop is left */
+        apu_vp_voice_update(base, 84, 200, v2, -1);
+        assert(voice_dw(84, MCPX_VOICE_TAR_VOLA) == ma && (voice_dw(84, MCPX_VOICE_TAR_PITCH_LINK) >> 16) == 200u);
+        apu_vp_voice_unhold(base, 84);                               /* the stop cancelled: the voice as asked */
+        apu_vp_pack_volumes(v2, &wa, &wb, &wc);
+        assert(voice_dw(84, MCPX_VOICE_TAR_VOLA) == wa && voice_dw(84, MCPX_VOICE_TAR_VOLC) == wc);
+        apu_vp_hold_get_stats(&hs);
+        assert(hs.mutes == 1 && hs.done == 2 && hs.now == 0 && hs.err_max == 100 && hs.err_abs_sum == 195);
+        /* switched off with a hold waiting: dropped, nothing fires later */
+        assert(apu_vp_voice_mute_at(base, 84, 3000) == 0);
+        apu_vp_voice_off(base, 84);
+        apu_vp_hold_get_stats(&hs);
+        assert(hs.now == 0);
+        /* the thread stalled: the game thread releases a hold 20 ms late */
+        assert(apu_vp_voice_start(base, 85, &p) == 0);
+        assert(apu_vp_voice_hold(base, 85, 4000) == 0);
+        set_reg(MCPX_APU_XGSCNT, 4000 + 960);
+        apu_vp_hold_overdue(base, 960);
+        assert(apu_vp_voice_held(85));
+        set_reg(MCPX_APU_XGSCNT, 4000 + 961);
+        apu_vp_hold_overdue(base, 960);
+        assert(!apu_vp_voice_held(85) && voice_dw(85, MCPX_VOICE_TAR_VOLA) == va &&
+               (voice_dw(85, MCPX_VOICE_TAR_PITCH_LINK) >> 16) == (uint16_t)-501);
+        apu_vp_hold_get_stats(&hs);
+        assert(hs.overdue == 1 && hs.done == 2);
+        /* a restart and a pause give the voice back as it was asked to play */
+        assert(apu_vp_voice_hold(base, 85, 9000) == 0);
+        assert(apu_vp_voice_start(base, 85, &p) == 0);
+        assert(!apu_vp_voice_held(85) && voice_dw(85, MCPX_VOICE_TAR_VOLA) == va);
+        assert(apu_vp_voice_hold(base, 85, 9000) == 0);
+        apu_vp_voice_pause(base, 85, true);
+        assert(!apu_vp_voice_held(85) && voice_dw(85, MCPX_VOICE_TAR_VOLA) == va &&
+               (voice_dw(85, MCPX_VOICE_TAR_PITCH_LINK) >> 16) == (uint16_t)-501);
+        /* the table full: refused, the caller acts at once */
+        for (i = 0; i < (int)APU_VP_HOLD_MAX; i++) {
+            assert(apu_vp_voice_mute_at(base, 100u + (uint32_t)i, 20000) == 0);
+        }
+        assert(!apu_vp_hold_room());
+        assert(apu_vp_voice_mute_at(base, 99, 20000) != 0);
+        set_reg(MCPX_APU_XGSCNT, 20000);
+        apu_vp_hold_tick(base, 96);                                  /* every one muted, none removed */
+        apu_vp_hold_get_stats(&hs);
+        assert(hs.now == APU_VP_HOLD_MAX && hs.done == 2u + APU_VP_HOLD_MAX);
+        set_reg(MCPX_APU_XGSCNT, 0);
+    }
+    apu_vp_deinit(base);
+    assert(apu_vp_init(base) == 0);                                  /* a new device: an empty table */
+    {
+        apu_vp_hold_stats_t hs;
+        apu_vp_hold_get_stats(&hs);
+        assert(hs.now == 0 && hs.holds == 0 && apu_vp_hold_room());
+    }
+    apu_vp_deinit(base);
+    printf("    -> held silent at 1/256, released at its frame, mutes kept, drops, overdue, a full table [PASS]\n");
+
     /* 8. Real console: the front end runs one method and stalls */
     printf("[8] Stalled front end (real console)...\n");
     memset(s_bar0, 0, BAR0_SIZE);
