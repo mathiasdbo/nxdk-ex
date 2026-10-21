@@ -561,6 +561,7 @@ typedef struct {
 static gp_slot_t s_slot[APU_GP_SLOTS];
 static uint32_t s_flags;            /* X:FLAGS as last written */
 static uint32_t s_reloc_buf[APU_GP_KERNEL_MAX_WORDS];
+static uint32_t s_p_code[GP_P_END];   /* the kernels' P words as loaded, in cached memory (apu_gp_slot_holds) */
 
 typedef struct {
     uint32_t base, size;
@@ -633,6 +634,13 @@ static bool place(gp_slot_t *slots, uint32_t slot, const apu_gp_kernel_t *k) {
     return s->p != 0xFFFFFFFFu && s->x != 0xFFFFFFFFu && s->y != 0xFFFFFFFFu && s->scr != 0xFFFFFFFFu;
 }
 
+/*
+ * apu_gp_slot_holds runs every update (al_source.c reverb_sync). It compares
+ * the relocated code with s_p_code, the copy load_code keeps in cached memory,
+ * not with the bootstrap image: reading that back from uncached memory a word
+ * at a time cost 0.3 ms a call for the room kernel on a console
+ * (bmi-hw-play-a, 2026-10-21).
+ */
 bool apu_gp_slot_holds(uint32_t slot, const apu_gp_kernel_t *k) {
     const gp_slot_t *s;
     uint32_t i;
@@ -650,7 +658,7 @@ bool apu_gp_slot_holds(uint32_t slot, const apu_gp_kernel_t *k) {
     }
     apu_gp_kernel_relocate(k, s->p, s->x, s->y, s_reloc_buf);
     for (i = 0; i < k->words; i++) {
-        if (s_scratch[s->p + i] != s_reloc_buf[i]) {   /* the bootstrap image mirrors P */
+        if (s_p_code[s->p + i] != s_reloc_buf[i]) {
             return false;
         }
     }
@@ -753,7 +761,7 @@ static int load_code(uintptr_t bar0, uint32_t slot, const gp_slot_t *s, const ui
     uint32_t i, tramp = GP_LOOP_TRAMP0 + slot;
     bool ok = true;
     for (i = 0; i < s->words; i++) {
-        s_scratch[s->p + i] = code[i];
+        s_scratch[s->p + i] = s_p_code[s->p + i] = code[i];
         reg_wr(bar0, PREG(s->p + i), code[i]);
     }
     if (s->abi == 2u) {
