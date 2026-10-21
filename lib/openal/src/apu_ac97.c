@@ -1,5 +1,6 @@
 #include "apu_ac97.h"
 #include "apu_gp.h"
+#include "apu_vp.h"
 #include "apu_platform.h"
 #include <string.h>
 
@@ -418,6 +419,8 @@ static void pump_once(uintptr_t bar0) {
 /* One pass with its CPU time counted */
 static void timed_pass(uintptr_t bar0, void (*hook)(void)) {
     uint64_t t0 = apu_platform_cycles(), dt;
+    /* Held voices first, every pass: within half a pass of their frame */
+    apu_vp_hold_tick(bar0, APU_AC97_HOLD_WINDOW);
     pump_once(bar0);
     if (hook) {
         uint64_t t1 = apu_platform_cycles();
@@ -580,6 +583,14 @@ void apu_ac97_stop(void) {
 
 bool apu_ac97_active(void) {
     return s_active;
+}
+
+bool apu_ac97_threaded(void) {
+#if defined(OPENAL_TARGET_XBOX)
+    return s_active && s_thread != NULL;
+#else
+    return false;
+#endif
 }
 
 bool apu_ac97_zero_copy(void) {

@@ -262,6 +262,15 @@ int apu_voice_pause(uintptr_t apu_base, uint32_t index, int pause);
  */
 void apu_voice_batch(uintptr_t apu_base, bool begin);
 
+/* A start or a stop the output thread makes, within about 2 ms (apu_vp.h, apu_vp_voice_hold):
+ * the slot's voice, started muted, released at XGSCNT `due`; or muted at `due`
+ * (the caller stops it later). Negative: refused, act at once. Possible on a
+ * console only, where the output thread runs. */
+int apu_voice_hold(uintptr_t apu_base, uint32_t index, uint32_t due);
+int apu_voice_mute_at(uintptr_t apu_base, uint32_t index, uint32_t due);
+void apu_voice_unhold(uintptr_t apu_base, uint32_t index);
+bool apu_voice_hold_possible(void);
+
 /**
  * Check if a voice is currently marked active in hardware.
  *
