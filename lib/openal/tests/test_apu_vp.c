@@ -327,6 +327,19 @@ int main(void) {
         assert(voice_dw(84, MCPX_VOICE_TAR_PITCH_LINK) == (0x8000u << 16 | 83u));   /* 1/256, link kept */
         assert(apu_vp_voice_held(84));
         assert(apu_vp_voice_hold(base, 84, 2000) != 0);              /* one hold a handle */
+        /* a short one-shot: held 12000 ahead it would creep 47 frames, played out silent */
+        {
+            apu_vp_voice_params_t q = p;
+            q.bytes = 2u * 100u;                                     /* 100 frames: 47 + 64 do not fit */
+            assert(apu_vp_voice_start(base, 85, &q) == 0);
+            assert(apu_vp_voice_hold(base, 85, 12000) != 0 && !apu_vp_voice_held(85));
+            assert(apu_vp_voice_hold(base, 85, 1000) == 0);          /* 4 + 64 do */
+            apu_vp_voice_off(base, 85);
+            q.bytes = 2u * 112u;
+            assert(apu_vp_voice_start(base, 85, &q) == 0);
+            assert(apu_vp_voice_hold(base, 85, 12000) == 0);         /* 47 + 64 = 111 */
+            apu_vp_voice_off(base, 85);
+        }
         /* volumes and pitch while held: kept for the release, the record stays silent */
         apu_vp_voice_update(base, 84, 100, v2, -1);
         assert(voice_dw(84, MCPX_VOICE_TAR_VOLA) == ma && (voice_dw(84, MCPX_VOICE_TAR_PITCH_LINK) >> 16) == 0x8000u);
@@ -347,7 +360,7 @@ int main(void) {
         assert((voice_dw(84, MCPX_VOICE_TAR_PITCH_LINK) >> 16) == 100u);
         assert((voice_dw(84, MCPX_VOICE_TAR_PITCH_LINK) & 0xFFFFu) == MCPX_APU_LIST_END);   /* 83 went back on top */
         apu_vp_hold_get_stats(&hs);
-        assert(hs.holds == 1 && hs.done == 1 && hs.refused == 1 && hs.now == 0 && hs.err_min == -95 &&
+        assert(hs.holds == 3 && hs.done == 1 && hs.refused == 2 && hs.now == 0 && hs.err_min == -95 &&
                hs.err_max == -95 && hs.err_abs_sum == 95);
         /* a mute: written at its frame, later volumes kept back, pitch followed */
         assert(apu_vp_voice_mute_at(base, 84, 2000) == 0);
