@@ -31,6 +31,29 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
+
+/*
+ * pb_release_debug_screen(): the scan-out buffer XVideoSetMode allocated
+ * (XVideoGetFB(), pbkit's debug screen) given back. From then on pbkit never
+ * shows it (pb_show_debug_screen, pb_kill's restore of the old scan-out) and
+ * its reports go to the kernel debugger (DbgPrint) instead of being drawn
+ * into it: every debugPrint below this point is pb_debug_print.
+ */
+static  int         pb_DebugScreenGone;
+
+static void pb_debug_print(const char *format, ...)
+{
+    char buf[512];
+    va_list args;
+
+    va_start(args, format);
+    vsnprintf(buf, sizeof(buf), format, args);
+    va_end(args);
+    if (pb_DebugScreenGone) DbgPrint("%s", buf);
+    else debugPrint("%s", buf);
+}
+#define debugPrint pb_debug_print
 
 //a macro used to build up a valid method
 #define EncodeMethod(subchannel,command,nparam) ((nparam<<18)+(subchannel<<13)+command)
@@ -1748,6 +1771,13 @@ DWORD pb_get_vbl_counter(void)
 }
 
 
+void pb_release_debug_screen(void)
+{
+    if (pb_DebugScreenGone || !pb_running || !XVideoGetFB()) return;
+    pb_DebugScreenGone=1;
+    MmFreeContiguousMemory(XVideoGetFB());
+}
+
 void pb_back_buffers(int n)
 {
     pb_BackBuffersWanted=(n==1)?1:2;
@@ -1947,6 +1977,7 @@ void pb_show_front_screen(void)
 
 void pb_show_debug_screen(void)
 {
+    if (pb_DebugScreenGone) return; //given back (pb_release_debug_screen): keep showing the scene
     VIDEOREG(PCRTC_START)=((DWORD)XVideoGetFB())&0x0FFFFFFF;
     pb_debug_screen_active=1;
 }
@@ -2197,7 +2228,8 @@ void pb_kill(void)
     VIDEOREG(NV_PFB_CFG1)=pb_OldFBConfig1;
     VIDEOREG(NV_PMC_ENABLE)=pb_OldMCEnable;
     VIDEOREG(NV_PMC_INTR_EN_0)=pb_OldMCInterrupt;
-    VIDEOREG(PCRTC_START)=pb_OldVideoStart;
+    //not back to a debug screen that was given back: the front buffer stays allocated and shown
+    if (!pb_DebugScreenGone) VIDEOREG(PCRTC_START)=pb_OldVideoStart;
 
     NtClose(pb_VBlankEvent);
 }
