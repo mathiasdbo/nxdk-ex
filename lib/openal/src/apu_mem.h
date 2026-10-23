@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -167,6 +168,16 @@ int apu_prd_build_virt(const void *buffer, size_t size, NVAPU_PRD_ENTRY *out_prd
  * @return 32-bit physical RAM address, or 0 if unresolvable.
  */
 uint32_t apu_mem_get_physical_address(const void *ptr);
+
+/**
+ * @brief Lock (or unlock) the pages of application memory the APU reads.
+ *
+ * The kernel may move the physical pages of ordinary memory to make room for
+ * a contiguous allocation; a locked page stays where it is. Locks count per
+ * page, so ranges that share a page may be locked and unlocked independently.
+ * Does nothing off the Xbox.
+ */
+void apu_mem_lock_pages(const void *ptr, size_t size, bool unlock);
 
 #ifdef __cplusplus
 }

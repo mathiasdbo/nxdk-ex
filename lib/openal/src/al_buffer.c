@@ -22,6 +22,7 @@ static bool s_static_flush = true;
  * list and tail copy) and its PRD table */
 static void release_data(ALbuffer *buf) {
     if (buf->is_static) {
+        apu_mem_lock_pages(buf->data_virt, (size_t)buf->size, true);
         free(buf->pages);
         if (buf->tail_virt) {
             apu_mem_free_phys(buf->tail_virt);
@@ -539,9 +540,14 @@ AL_API void AL_APIENTRY alBufferDataStatic(ALuint buffer, ALenum format, const A
         alSetError(AL_OUT_OF_MEMORY);
         return;
     }
+    /* The voice reads these pages by their physical addresses, looked up once:
+     * locked, so a contiguous allocation elsewhere cannot move them under it
+     * (unlocked in release_data) */
+    apu_mem_lock_pages(data, (size_t)size, false);
     for (i = 0; i < engine_pages; i++) {
         uint32_t phys = apu_mem_get_physical_address((const void *)((start & ~(uintptr_t)0xFFF) + 4096u * i));
         if (phys == 0) {
+            apu_mem_lock_pages(data, (size_t)size, true);
             free(pages);
             apu_mem_free_phys(tail);
             alSetError(AL_INVALID_VALUE);   /* not RAM the APU can read */
