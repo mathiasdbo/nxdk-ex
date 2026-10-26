@@ -449,7 +449,7 @@ static void thread_start(void) {
     s_thread = NULL;
     if (s_use_thread) {
         s_quit = 0;
-        s_thread = CreateThread(NULL, 0, pump_thread, NULL, 0, NULL);
+        s_thread = CreateThread(NULL, APU_AC97_PUMP_STACK, pump_thread, NULL, 0, NULL);
         if (s_thread) {
             /* Above the game: a late pass is an audible gap */
             SetThreadPriority(s_thread, THREAD_PRIORITY_HIGHEST);
