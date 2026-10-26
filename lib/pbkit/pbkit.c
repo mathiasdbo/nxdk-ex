@@ -94,6 +94,16 @@ static  int         pb_running=0;
 
 static  DWORD           pb_vbl_counter=0;
 
+//Batch 3 (sync): VBlank/swap callbacks, presentation interval, fences
+static  void            (*volatile pb_VBlankCallback)(DWORD vbl_count)=NULL;
+static  void            (*volatile pb_SwapCallback)(DWORD frame, DWORD vbl_count)=NULL;
+static  volatile int    pb_PresentInterval=PB_PRESENT_INTERVAL_ONE;
+static  volatile DWORD  pb_LastFlipVBL;     //pb_vbl_counter when a frame was last put on screen
+static  volatile int    pb_VBLFlippedSlot=-1;   //intervals other than ONE: slot the ISR flipped to at this VBlank
+static  DWORD           pb_FenceLast;       //last value pb_insert_fence handed out
+static  volatile DWORD  *pb_FenceMem=NULL;  //GPU written fence value (semaphore DMA context, pb_DmaBuffer8)
+#define PB_FENCE_START  0xFFFFFF00u         //first fences wrap past 0 early: wrap bugs show up at once
+
 #ifdef DBG
 static int          pb_trace_mode=1;
 #else
@@ -302,12 +312,47 @@ static NTAPI VOID pb_shutdown_notification_routine (PHAL_SHUTDOWN_REGISTRATION S
 
 
 //private functions
+
+//The frame in slot pb_BackBufferNxtVBL is on screen (PCRTC_START was written): free its slot
+static void pb_retire_shown(void)
+{
+    int next=pb_BackBufferNxtVBL;
+
+    pb_BackBufferbReady[next]=0;
+
+    VIDEOREG(NV_PGRAPH_INCREMENT)|=NV_PGRAPH_INCREMENT_READ_3D_TRIGGER;
+
+    pb_FramesShown++;
+    pb_LastFlipVBL=pb_vbl_counter;
+
+    //rotate next back buffer
+    pb_BackBufferNxtVBL=(next+1)%pb_FrameBuffersCount;
+}
+
+//PB_PRESENT_INTERVAL_IMMEDIATE / ONE_OR_IMMEDIATE: show the finished frames now (from the
+//PB_FINISHED subprogram, i.e. the DPC), without waiting for the VBlank. Tearing is possible.
+static void pb_flip_now(void)
+{
+    void    (*swap_cb)(DWORD,DWORD);
+    int     next;
+
+    while (pb_BackBufferbReady[next=pb_BackBufferNxtVBL]==1)
+    {
+        if (pb_debug_screen_active==0) VIDEOREG(PCRTC_START)=pb_FBAddr[pb_BackBufferIndex[next]]&0x03FFFFFF;
+        pb_retire_shown();
+        swap_cb=pb_SwapCallback;
+        if (swap_cb) swap_cb(pb_FramesShown,pb_vbl_counter);
+    }
+}
+
 static void pb_vbl_handler(void)
 {
     BYTE        old_color_addr; //important index to preserve if we are called from Dpc or Isr
 
-    int     flag;
     int     next;
+    int     shown;
+    void    (*vbl_cb)(DWORD);
+    void    (*swap_cb)(DWORD,DWORD);
 
     old_color_addr=VIDEOREG8(NV_PRMCIO_CRX__COLOR);
 
@@ -315,21 +360,18 @@ static void pb_vbl_handler(void)
 
     //Index of next back buffer to show up (0-4)
     next=pb_BackBufferNxtVBL;
+    shown=0;
 
     //Is the next back buffer to show up is ready?
+    //(interval ONE: the ISR showed it; other intervals: only if the ISR chose to)
     if (pb_BackBufferbReady[next]==1)
+    if ((pb_PresentInterval==PB_PRESENT_INTERVAL_ONE)||(pb_VBLFlippedSlot==next))
     {
         //screen swapping has been done already, theoretically, in ISR
-        pb_BackBufferbReady[next]=0;
-
-        VIDEOREG(NV_PGRAPH_INCREMENT)|=NV_PGRAPH_INCREMENT_READ_3D_TRIGGER;
-
-        pb_FramesShown++;
-
-        //rotate next back buffer
-        next=(next+1)%pb_FrameBuffersCount;
-        pb_BackBufferNxtVBL=next;
+        pb_retire_shown();
+        shown=1;
     }
+    pb_VBLFlippedSlot=-1;
 
     do
     {
@@ -338,7 +380,11 @@ static void pb_vbl_handler(void)
 
     NtPulseEvent(pb_VBlankEvent, NULL);
 
-//  if (UserCallback) UserCallback(); //user callback must be brief and preserve fpu state
+    //user callbacks: must be brief, no pbkit calls, save/restore the FPU state if they use it
+    vbl_cb=pb_VBlankCallback;
+    if (vbl_cb) vbl_cb(pb_vbl_counter);
+    swap_cb=pb_SwapCallback;
+    if (shown && swap_cb) swap_cb(pb_FramesShown,pb_vbl_counter);
 
     VIDEOREG8(NV_PRMCIO_CRX__COLOR)=old_color_addr; //restore color index
 }
@@ -392,8 +438,11 @@ static void pb_subprog(DWORD subprogID, DWORD paramA, DWORD paramB)
             next=pb_BackBufferNxt;
             pb_BackBufferIndex[next]=paramA;
             pb_BackBufferbReady[next]=1;
-            next=(next+1)%pb_FrameBuffersCount;
-            pb_BackBufferNxt=next;
+            pb_BackBufferNxt=(next+1)%pb_FrameBuffersCount;
+            if (pb_PresentInterval==PB_PRESENT_INTERVAL_IMMEDIATE) pb_flip_now();
+            //ONE_OR_IMMEDIATE: the frame missed the VBlank when one passed with nothing new to show
+            else if ((pb_PresentInterval==PB_PRESENT_INTERVAL_ONE_OR_IMMEDIATE)&&
+                     (next==pb_BackBufferNxtVBL)&&(pb_vbl_counter!=pb_LastFlipVBL)) pb_flip_now();
             break;
 
         default:
@@ -896,8 +945,20 @@ static BOOLEAN __stdcall ISR(PKINTERRUPT Interrupt, PVOID ServiceContext)
     if (VIDEOREG(NV_PMC_INTR_0)&NV_PMC_INTR_0_PCRTC_PENDING)
     {
         //Need to show next back buffer to show up? (do it now, it's urgent)
-        if (pb_debug_screen_active==0)
-        if (pb_BackBufferbReady[pb_BackBufferNxtVBL]==1) VIDEOREG(PCRTC_START)=pb_FBAddr[pb_BackBufferIndex[pb_BackBufferNxtVBL]]&0x03FFFFFF;
+        if (pb_PresentInterval==PB_PRESENT_INTERVAL_ONE)
+        {
+            if (pb_debug_screen_active==0)
+            if (pb_BackBufferbReady[pb_BackBufferNxtVBL]==1) VIDEOREG(PCRTC_START)=pb_FBAddr[pb_BackBufferIndex[pb_BackBufferNxtVBL]]&0x03FFFFFF;
+        }
+        else if (pb_BackBufferbReady[pb_BackBufferNxtVBL]==1)
+        {
+            //TWO: at most every second VBlank (pb_vbl_counter+1 is the VBlank being handled)
+            if ((pb_PresentInterval!=PB_PRESENT_INTERVAL_TWO)||((DWORD)(pb_vbl_counter+1-pb_LastFlipVBL)>=2))
+            {
+                if (pb_debug_screen_active==0) VIDEOREG(PCRTC_START)=pb_FBAddr[pb_BackBufferIndex[pb_BackBufferNxtVBL]]&0x03FFFFFF;
+                pb_VBLFlippedSlot=pb_BackBufferNxtVBL;
+            }
+        }
     }
 
     VIDEOREG(NV_PMC_INTR_EN_0)=NV_PMC_INTR_EN_0_INTA_DISABLED;
@@ -1604,6 +1665,17 @@ static void pb_jump_to_head(void)
     }
 #endif
 
+    //The Dma engine must have started on what was pushed since the last jump before
+    //PUT goes back to the head: while GET is still at the head, PUT = head reads as an
+    //empty push buffer and all of it (a whole frame, its PB_FINISHED included) is skipped.
+    //(A fast frame loop can get here before the engine has fetched anything: seen on xemu.)
+    if (pb_Put!=pb_Head)
+    {
+        pb_kick();
+        TimeStampTicks=KeTickCount;
+        while ((((*(pb_DmaUserAddr+0x44/4))|0x80000000)==(DWORD)pb_Head)&&(KeTickCount-TimeStampTicks<=TICKSTIMEOUT)) {};
+    }
+
     //writes a jump command
     //forces GPU to jump at push buffer head address at next fetch
     *(pb_Put+0)=1+(((DWORD)pb_Head)&0x0FFFFFFF);
@@ -1884,6 +1956,114 @@ void pb_target_extra_buffer(int buffer_index)
 DWORD pb_get_vbl_counter(void)
 {
     return pb_vbl_counter; //allows caller to know if a frame has been missed
+}
+
+void pb_set_vblank_callback(void (*cb)(DWORD vbl_count))
+{
+    pb_VBlankCallback=cb;
+}
+
+void pb_set_swap_callback(void (*cb)(DWORD frame, DWORD vbl_count))
+{
+    pb_SwapCallback=cb;
+}
+
+void pb_set_presentation_interval(int interval)
+{
+    if ((interval<PB_PRESENT_INTERVAL_IMMEDIATE)||(interval>PB_PRESENT_INTERVAL_ONE_OR_IMMEDIATE))
+    {
+        debugPrint("pb_set_presentation_interval: invalid interval %d\n",interval);
+        return;
+    }
+    pb_PresentInterval=interval;
+}
+
+int pb_get_presentation_interval(void)
+{
+    return pb_PresentInterval;
+}
+
+/*
+ * Display field status. The NV2A CRTC has no field register xemu emulates
+ * (NV_PCRTC_RASTER is a counter there) and in the SDTV modes the TV encoder,
+ * not the CRTC, interlaces: the NV2A scans out a whole 480 line frame per
+ * VBlank and each VBlank is one TV field. So:
+ * - interlaced or not comes from the AV mode the kernel set
+ *   (AvSendTVEncoderOption AV_OPTION_QUERY_MODE): output mode bits 31:30
+ *   0 (480 line SDTV) and 1 (525 line SDTV) are interlaced, 2 (HDTV) only
+ *   with TV table index 3 (1080i), 3 (VGA) never;
+ * - the field alternates with the VBlank counter, its absolute parity is
+ *   anchored once per pb_init on the kernel's AV_OPTION_GUESS_FIELD (non-zero
+ *   = odd field).
+ * The two kernel calls are made on the first call after pb_init (call it at
+ * PASSIVE_LEVEL once, e.g. after pb_init, not from a callback first).
+ */
+#define PB_AV_OPTION_QUERY_MODE     13
+#define PB_AV_OPTION_GUESS_FIELD    15
+static int pb_FieldPhase=-2;    //-2: not queried yet, -1: progressive/unknown, 0/1: field at even VBlank counts
+
+void pb_get_display_field_status(DWORD *vbl_count, int *field)
+{
+    DWORD   vbl;
+    ULONG   mode,guess,out;
+    int     tries;
+
+    if (pb_FieldPhase==-2)
+    {
+        mode=0;
+        AvSendTVEncoderOption((PVOID)VIDEO_BASE,PB_AV_OPTION_QUERY_MODE,0,&mode);
+        out=mode&0xC0000000;
+        if ((mode==0)||(out==0xC0000000)||((out==0x80000000)&&((mode&0xFF)!=3)))
+            pb_FieldPhase=-1;
+        else
+        {
+            for(tries=0;tries<4;tries++)
+            {
+                vbl=pb_vbl_counter;
+                guess=0;
+                AvSendTVEncoderOption((PVOID)VIDEO_BASE,PB_AV_OPTION_GUESS_FIELD,0,&guess);
+                if (vbl==pb_vbl_counter) break; //no VBlank in between
+            }
+            pb_FieldPhase=((guess!=0)?1:0)^(int)(vbl&1);
+        }
+    }
+    vbl=pb_vbl_counter;
+    if (vbl_count) *vbl_count=vbl;
+    if (field) *field=(pb_FieldPhase<0)?-1:(int)((vbl&1)^(DWORD)pb_FieldPhase);
+}
+
+/*
+ * Fences: the 3D semaphore DMA context (8, set up by pb_init) points at
+ * pb_DmaBuffer8. NV097_BACK_END_WRITE_SEMAPHORE_RELEASE makes the GPU write
+ * the fence value there once the rendering pushed before it has passed the
+ * back end; the CPU compares it with the fence (signed 32-bit difference, so
+ * the counter may wrap; pb_init starts it just below the wrap).
+ */
+DWORD pb_insert_fence(void)
+{
+    uint32_t        *p;
+    DWORD           fence;
+
+    fence=pb_FenceLast+1;
+    p=pb_begin();
+    p=pb_push2(p,NV097_SET_SEMAPHORE_OFFSET,0,fence); //+NV097_BACK_END_WRITE_SEMAPHORE_RELEASE
+    pb_end_deferred(p);
+    pb_FenceLast=fence;
+    return fence;
+}
+
+bool pb_is_fence_pending(DWORD fence)
+{
+    if (pb_FenceMem==NULL) return false;
+    if ((LONG)(fence-pb_FenceLast)>0) return false;     //never inserted
+    if ((LONG)(fence-*pb_FenceMem)<=0) return false;    //the GPU has written this value or a later one
+    pb_kick(); //the fence may still be in blocks left by pb_end_deferred
+    return true;
+}
+
+void pb_block_on_fence(DWORD fence)
+{
+    while (pb_is_fence_pending(fence)) __asm__ __volatile__ ("pause");
 }
 
 
@@ -2346,6 +2526,7 @@ void pb_kill(void)
     pb_FrameBuffersAddr=0;
     pb_DSAddr=0;
 
+    pb_FenceMem=NULL;
     if (pb_DmaBuffer8) MmFreeContiguousMemory(pb_DmaBuffer8);
     if (pb_DmaBuffer2) MmFreeContiguousMemory(pb_DmaBuffer2);
     if (pb_DmaBuffer7) MmFreeContiguousMemory(pb_DmaBuffer7);
@@ -2671,11 +2852,19 @@ int pb_init(void)
     pb_FrameBuffersAddr=0;
 
 
-    pb_DmaBuffer8 = MmAllocateContiguousMemoryEx(32, 0, MAXRAM, 0, PAGE_READWRITE);
+    //DMA context 8 is the 3D semaphore context (NV097_SET_CONTEXT_DMA_SEMAPHORE): the GPU writes
+    //fence values at offset 0. One uncached page: the CPU polls what the GPU writes.
+    pb_DmaBuffer8 = MmAllocateContiguousMemoryEx(PAGE_SIZE, 0, MAXRAM, PAGE_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
     pb_DmaBuffer2 = MmAllocateContiguousMemoryEx(32, 0, MAXRAM, 0, PAGE_READWRITE);
     pb_DmaBuffer7 = MmAllocateContiguousMemoryEx(32, 0, MAXRAM, 0, PAGE_READWRITE);
     if ((pb_DmaBuffer8==NULL)||(pb_DmaBuffer2==NULL)||(pb_DmaBuffer7==NULL)) return -2;
     memset(pb_DmaBuffer8,0,32);
+    pb_FenceLast=PB_FENCE_START;
+    pb_DmaBuffer8[0]=PB_FENCE_START;    //no fence pending
+    pb_FenceMem=(volatile DWORD *)pb_DmaBuffer8;
+    pb_VBLFlippedSlot=-1;
+    pb_LastFlipVBL=pb_vbl_counter;
+    pb_FieldPhase=-2;   //video mode may have changed: query it again
     memset(pb_DmaBuffer2,0,32);
     memset(pb_DmaBuffer7,0,32);
 
@@ -2706,6 +2895,7 @@ int pb_init(void)
 
     if (pb_install_gpu_interrupt()==0)
     {
+        pb_FenceMem=NULL;
         if (pb_DmaBuffer8) MmFreeContiguousMemory(pb_DmaBuffer8);
         if (pb_DmaBuffer2) MmFreeContiguousMemory(pb_DmaBuffer2);
         if (pb_DmaBuffer7) MmFreeContiguousMemory(pb_DmaBuffer7);
