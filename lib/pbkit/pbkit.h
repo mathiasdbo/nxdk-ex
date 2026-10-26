@@ -61,6 +61,13 @@ void    pb_get_display_field_status(DWORD *vbl_count, int *field);
 void    pb_set_presentation_interval(int interval);
 int     pb_get_presentation_interval(void);
 
+//Fences: pb_insert_fence() queues a GPU write of a new 32-bit value (wrap-safe compare) once
+//everything pushed before it has been rendered (NV097_BACK_END_WRITE_SEMAPHORE_RELEASE). Like
+//pb_end_deferred it does not kick the push buffer; pb_is_fence_pending/pb_block_on_fence kick it
+//when the fence has not passed. A fence that was never inserted is not pending.
+DWORD   pb_insert_fence(void);
+bool    pb_is_fence_pending(DWORD fence);
+void    pb_block_on_fence(DWORD fence);     //busy waits until the GPU has passed the fence
 DWORD   pb_wait_for_vbl(void);  //waits for VBL, returns VBL counter value as bonus info
                 //you can avoid calling it and try to draw a lot in advance
                 //use it if you need strong synchronization with controls
