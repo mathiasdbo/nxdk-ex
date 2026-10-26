@@ -72,6 +72,17 @@ DWORD   pb_back_buffer_pitch(void);
 DWORD   *pb_depth_stencil_buffer(void); //returns the (shared) depth stencil buffer address (CPU side)
 DWORD   pb_depth_stencil_pitch(void);   //bytes between two lines of the depth stencil buffer
 
+//GPU tile regions (NV_PFB_TILE 0..7): pb_init uses #0 (frame buffers), #1 (depth stencil)
+//and #2 (extra buffers). An application render target can be assigned to a free one;
+//tile_addr & tile_size must be 16Kb aligned and tile_pitch one of the 16 listed pitches
+//(0x200..0x7000). tile_flags (same values as the XDK D3DTILE_FLAGS_*):
+#define PB_TILE_FLAGS_ZBUFFER   0x00000001  //tile holds a depth (stencil) buffer
+#define PB_TILE_FLAGS_Z32BITS   0x04000000  //32 bits depth (Z24S8), omit for Z16
+#define PB_TILE_FLAGS_ZCOMPRESS 0x80000000  //automatic depth compression (NV_PFB_ZCOMP tag)
+void    pb_assign_tile(int tile_index,DWORD tile_addr,DWORD tile_size,DWORD tile_pitch,
+                       DWORD tile_z_start_tag,DWORD tile_z_offset,DWORD tile_flags);
+void    pb_release_tile(int tile_index,int clear_offset); //clear_offset=1 also resets NV_PFB_ZCOMP_OFFSET
+
 void    pb_set_viewport(int dwx,int dwy,int width,int height,float zmin,float zmax);
 
 int pb_busy(void);
