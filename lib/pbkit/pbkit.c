@@ -94,12 +94,15 @@ static  int         pb_running=0;
 
 static  DWORD           pb_vbl_counter=0;
 
-//Batch 3 (sync): VBlank/swap callbacks, presentation interval
+//Batch 3 (sync): VBlank/swap callbacks, presentation interval, fences
 static  void            (*volatile pb_VBlankCallback)(DWORD vbl_count)=NULL;
 static  void            (*volatile pb_SwapCallback)(DWORD frame, DWORD vbl_count)=NULL;
 static  volatile int    pb_PresentInterval=PB_PRESENT_INTERVAL_ONE;
 static  volatile DWORD  pb_LastFlipVBL;     //pb_vbl_counter when a frame was last put on screen
 static  volatile int    pb_VBLFlippedSlot=-1;   //intervals other than ONE: slot the ISR flipped to at this VBlank
+static  DWORD           pb_FenceLast;       //last value pb_insert_fence handed out
+static  volatile DWORD  *pb_FenceMem=NULL;  //GPU written fence value (semaphore DMA context, pb_DmaBuffer8)
+#define PB_FENCE_START  0xFFFFFF00u         //first fences wrap past 0 early: wrap bugs show up at once
 
 #ifdef DBG
 static int          pb_trace_mode=1;
@@ -2029,6 +2032,39 @@ void pb_get_display_field_status(DWORD *vbl_count, int *field)
     if (field) *field=(pb_FieldPhase<0)?-1:(int)((vbl&1)^(DWORD)pb_FieldPhase);
 }
 
+/*
+ * Fences: the 3D semaphore DMA context (8, set up by pb_init) points at
+ * pb_DmaBuffer8. NV097_BACK_END_WRITE_SEMAPHORE_RELEASE makes the GPU write
+ * the fence value there once the rendering pushed before it has passed the
+ * back end; the CPU compares it with the fence (signed 32-bit difference, so
+ * the counter may wrap; pb_init starts it just below the wrap).
+ */
+DWORD pb_insert_fence(void)
+{
+    uint32_t        *p;
+    DWORD           fence;
+
+    fence=pb_FenceLast+1;
+    p=pb_begin();
+    p=pb_push2(p,NV097_SET_SEMAPHORE_OFFSET,0,fence); //+NV097_BACK_END_WRITE_SEMAPHORE_RELEASE
+    pb_end_deferred(p);
+    pb_FenceLast=fence;
+    return fence;
+}
+
+bool pb_is_fence_pending(DWORD fence)
+{
+    if (pb_FenceMem==NULL) return false;
+    if ((LONG)(fence-pb_FenceLast)>0) return false;     //never inserted
+    if ((LONG)(fence-*pb_FenceMem)<=0) return false;    //the GPU has written this value or a later one
+    pb_kick(); //the fence may still be in blocks left by pb_end_deferred
+    return true;
+}
+
+void pb_block_on_fence(DWORD fence)
+{
+    while (pb_is_fence_pending(fence)) __asm__ __volatile__ ("pause");
+}
 
 
 void pb_release_debug_screen(void)
@@ -2490,6 +2526,7 @@ void pb_kill(void)
     pb_FrameBuffersAddr=0;
     pb_DSAddr=0;
 
+    pb_FenceMem=NULL;
     if (pb_DmaBuffer8) MmFreeContiguousMemory(pb_DmaBuffer8);
     if (pb_DmaBuffer2) MmFreeContiguousMemory(pb_DmaBuffer2);
     if (pb_DmaBuffer7) MmFreeContiguousMemory(pb_DmaBuffer7);
@@ -2815,11 +2852,16 @@ int pb_init(void)
     pb_FrameBuffersAddr=0;
 
 
-    pb_DmaBuffer8 = MmAllocateContiguousMemoryEx(32, 0, MAXRAM, 0, PAGE_READWRITE);
+    //DMA context 8 is the 3D semaphore context (NV097_SET_CONTEXT_DMA_SEMAPHORE): the GPU writes
+    //fence values at offset 0. One uncached page: the CPU polls what the GPU writes.
+    pb_DmaBuffer8 = MmAllocateContiguousMemoryEx(PAGE_SIZE, 0, MAXRAM, PAGE_SIZE, PAGE_READWRITE | PAGE_NOCACHE);
     pb_DmaBuffer2 = MmAllocateContiguousMemoryEx(32, 0, MAXRAM, 0, PAGE_READWRITE);
     pb_DmaBuffer7 = MmAllocateContiguousMemoryEx(32, 0, MAXRAM, 0, PAGE_READWRITE);
     if ((pb_DmaBuffer8==NULL)||(pb_DmaBuffer2==NULL)||(pb_DmaBuffer7==NULL)) return -2;
     memset(pb_DmaBuffer8,0,32);
+    pb_FenceLast=PB_FENCE_START;
+    pb_DmaBuffer8[0]=PB_FENCE_START;    //no fence pending
+    pb_FenceMem=(volatile DWORD *)pb_DmaBuffer8;
     pb_VBLFlippedSlot=-1;
     pb_LastFlipVBL=pb_vbl_counter;
     pb_FieldPhase=-2;   //video mode may have changed: query it again
@@ -2853,6 +2895,7 @@ int pb_init(void)
 
     if (pb_install_gpu_interrupt()==0)
     {
+        pb_FenceMem=NULL;
         if (pb_DmaBuffer8) MmFreeContiguousMemory(pb_DmaBuffer8);
         if (pb_DmaBuffer2) MmFreeContiguousMemory(pb_DmaBuffer2);
         if (pb_DmaBuffer7) MmFreeContiguousMemory(pb_DmaBuffer7);
