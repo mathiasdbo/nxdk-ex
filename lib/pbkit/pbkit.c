@@ -65,6 +65,7 @@ static  int         pb_DepthBpp=32;     //bits per pixel of pb_DepthFmt (compute
 static  int         pb_DepthFloat=0;    //NV097_SET_CONTROL0_Z_FORMAT: 0=fixed point depth, 1=floating point depth
 static  int         pb_WBuffer=1;       //NV097_SET_CONTROL0_Z_PERSPECTIVE_ENABLE: 1=depth is w (W-buffering), 0=depth is z
                                         //(1 is what pbkit has always pushed in set_draw_buffer, see pb_control0)
+static  int         pb_Dither=-1;       //NV097_SET_DITHER_ENABLE: -1=auto (on for 16 bits color formats), 0=off, 1=on
 
 static  int         pb_running=0;
 
@@ -2298,6 +2299,26 @@ float pb_depth_scale(void)
     return pb_ZScale;
 }
 
+//Dither defaults to on with a 16 bits color format and off with a 32 bits one.
+void pb_set_dither(bool enable)
+{
+    uint32_t    *p;
+
+    pb_Dither = enable ? 1 : 0;
+
+    if (pb_running == 0) return;
+
+    p = pb_begin();
+    p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_DITHER_ENABLE, pb_Dither);
+    pb_end(p);
+}
+
+bool pb_get_dither(void)
+{
+    if (pb_Dither < 0) return pb_ColorBpp == 16;
+    return pb_Dither != 0;
+}
+
 DWORD *pb_depth_stencil_buffer(void)
 {
     return (DWORD *)pb_DSAddr;
@@ -3325,7 +3346,7 @@ int pb_init(void)
     p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_BLEND_FUNC_SRC,1); //SrcBlend=(1,1,1,1)
     p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_BLEND_FUNC_DST,0); //DstBlend=(0,0,0,0)
     p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_DEPTH_WRITE_ENABLE,1); //ZWriteEnable=TRUE
-    p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_DITHER_ENABLE,0); //DitherEnable=FALSE
+    p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_DITHER_ENABLE,pb_get_dither()?1:0); //DitherEnable=FALSE (32 bits) / TRUE (16 bits) unless pb_set_dither was called
     p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_SHADE_MODEL,0x1D01); //ShadeMode="gouraud"
     p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_COLOR_MASK,0x01010101); // ColorWriteEnable=abgr
     p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_STENCIL_OP_ZFAIL,0x1E00); //StencilZFail="keep"

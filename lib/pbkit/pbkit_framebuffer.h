@@ -43,6 +43,11 @@ bool pb_get_w_buffer (void);
 // (Z16), 1.0E30 (Z24S8 float), 511.9375 (Z16 float). Valid after pb_init.
 float pb_depth_scale (void);
 
+// Color dithering (NV097_SET_DITHER_ENABLE). Default: on for the 16 bits color
+// formats, off for the 32 bits ones. Any time.
+void pb_set_dither (bool enable);
+bool pb_get_dither (void);
+
 #if defined(__cplusplus)
 }
 #endif
