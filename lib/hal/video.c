@@ -35,6 +35,21 @@
 #define NV_PMC_INTR_EN_0_INTA_HARDWARE 0x00000001
 #define NV_PMC_INTR_EN_0_INTA_SOFTWARE 0x00000002
 
+#define NV_PRMCIO_CRX__COLOR			0x006013D4
+#define NV_PRMCIO_CR__COLOR			0x006013D5
+#define NV_CIO_CR_OFFSET_INDEX			0x13 // pitch / 8, bits 7:0
+#define NV_CIO_CRE_RPC0_INDEX			0x19 // bits 7:5 = pitch / 8, bits 10:8
+#define NV_CIO_CRE_LSR_INDEX			0x25 // bit 5 = pitch / 8, bit 11
+
+// AV mode word, output field (bits 31:30)
+#define AV_MODE_OUT_MASK			0xC0000000
+#define AV_MODE_OUT_HDTV			0x80000000
+#define AV_MODE_OUT_VGA				0xC0000000
+#define AV_MODE_TV_MASK				0x0000007F
+
+#define XVIDEO_FLAGS_ALL (XVIDEO_FLAG_WIDESCREEN | XVIDEO_FLAG_INTERLACED | XVIDEO_FLAG_PROGRESSIVE | \
+                          XVIDEO_FLAG_FIELD | XVIDEO_FLAG_10X11PIXELASPECTRATIO)
+
 #define NV_USER_DAC_WRITE_MODE_ADDRESS 0x006813C8
 #define NV_USER_DAC_PALETTE_DATA 0x006813C9
 
@@ -57,6 +72,8 @@ static BOOL			flickerSet		= FALSE;
 static BOOL			softenFilter		= FALSE;
 static BOOL			softenSet		= FALSE;
 static GAMMA_RAMP_ENTRY	gammaRampEntries[256];
+static DWORD			dwCurrentAvMode		= 0;
+static DWORD			dwCurrentFlags		= 0;
 
 static KINTERRUPT InterruptObject;
 static KDPC DPCObject;
@@ -136,6 +153,19 @@ static VIDEO_MODE_SETTING vidModes[] =
 };
 
 static int iVidModes = sizeof(vidModes) / sizeof(VIDEO_MODE_SETTING);
+
+/* AV mode output bits 31:30: 0 / 1 SDTV (interlaced), 2 HDTV (interlaced only
+   for TV table index 3, 1080i), 3 VGA (progressive) */
+static BOOL AvModeIsInterlaced(DWORD dwMode)
+{
+	DWORD out = dwMode & AV_MODE_OUT_MASK;
+
+	if (out == AV_MODE_OUT_VGA)
+		return FALSE;
+	if (out == AV_MODE_OUT_HDTV)
+		return (dwMode & AV_MODE_TV_MASK) == 3;
+	return TRUE;
+}
 
 static void __stdcall DPC(PKDPC Dpc,
 PVOID DeferredContext,
@@ -412,11 +442,159 @@ BOOL XVideoSetMode(int width, int height, int bpp, int refresh)
 		vmCurrent.height = vm.height;
 		vmCurrent.bpp = vm.bpp;
 		vmCurrent.refresh = vm.refresh;
+		dwCurrentAvMode = dwMode;
+		dwCurrentFlags = AvModeIsInterlaced(dwMode) ? XVIDEO_FLAG_INTERLACED : XVIDEO_FLAG_PROGRESSIVE;
 		return TRUE;
 	}
 
 	memset(&vmCurrent, 0x00, sizeof(VIDEO_MODE));
+	dwCurrentAvMode = 0;
+	dwCurrentFlags = 0;
 	return FALSE;
+}
+
+/* 640x480 modes and their 10:11 pixel aspect ratio (FPAR) variant with the same
+   bits 31:24: register / CRTC / TV table indices (bits 23:0) of the kernel's
+   AV_MODE_640x480_FPAR_* modes (Cxbx-Reloaded, EmuKrnlAvModes.h) */
+static const DWORD fparModes[][2] =
+{
+	{0x010101, 0x0F0D0F}, // NTSC-M
+	{0x010103, 0x0F0D10}, // NTSC-J
+	{0x01010B, 0x0F0D11}, // PAL-60
+	{0x01010D, 0x0F0D12}, // NTSC YPrPb (480i)
+	{0x030307, 0x100E13}, // PAL-I 50 Hz
+	{0x030314, 0x100E18}, // PAL-I YPrPb
+	{0x010119, 0x0F0D1B}, // PAL-60 YPrPb
+	{0x070701, 0x110F01}, // 480p (HDTV output only, VGA is excluded)
+};
+
+BOOL XVideoSetModeEx(int width, int height, int bpp, int refresh, DWORD flags)
+{
+	DWORD scan = flags & (XVIDEO_FLAG_INTERLACED | XVIDEO_FLAG_PROGRESSIVE);
+	DWORD dwMode, out;
+	int i, index = -1;
+
+	if (flags == 0)
+		return XVideoSetMode(width, height, bpp, refresh);
+
+	if ((flags & ~XVIDEO_FLAGS_ALL) || (flags & XVIDEO_FLAG_FIELD) ||
+	    (scan == (XVIDEO_FLAG_INTERLACED | XVIDEO_FLAG_PROGRESSIVE)))
+		return FALSE;
+
+	if (bpp == 0)
+		bpp = 32;
+
+	if (scan == 0)
+	{
+		/* the mode XVideoSetMode would pick */
+		VIDEO_MODE vm;
+		void *p = NULL;
+		while (XVideoListModes(&vm, bpp, refresh, &p))
+		{
+			if (vm.width == width && vm.height == height)
+			{
+				index = (int)p - 1;
+				refresh = vm.refresh;
+				break;
+			}
+		}
+	}
+	else
+	{
+		DWORD dwEnc = XVideoGetEncoderSettings();
+		DWORD dwAdapter = dwEnc & VIDEO_ADAPTER_MASK;
+		DWORD dwStandard = dwEnc & VIDEO_STANDARD_MASK;
+
+		if (refresh == 0)
+		{
+			if (dwStandard == VIDEO_REGION_PAL)
+				refresh = (dwEnc & VIDEO_60Hz) ? 60 : 50;
+			else
+				refresh = 60;
+		}
+		for (i = 0; i < iVidModes; i++)
+		{
+			VIDEO_MODE_SETTING *m = &vidModes[i];
+			BOOL interlaced = AvModeIsInterlaced(m->dwMode);
+
+			if ((m->dwFlags & VIDEO_ADAPTER_MASK) != dwAdapter || m->dwStandard != dwStandard ||
+			    m->refresh != refresh || m->width != width || m->height != height)
+				continue;
+			if ((scan == XVIDEO_FLAG_INTERLACED) != interlaced)
+				continue;
+			/* the HDTV modes need their dashboard setting */
+			if ((m->dwMode & AV_MODE_OUT_MASK) == AV_MODE_OUT_HDTV)
+			{
+				if (m->height == 480 && !(dwEnc & VIDEO_MODE_480P))
+					continue;
+				if (m->height == 720 && !(dwEnc & VIDEO_MODE_720P))
+					continue;
+				if (m->height == 1080 && !(dwEnc & VIDEO_MODE_1080I))
+					continue;
+			}
+			index = i;
+			break;
+		}
+	}
+	if (index < 0)
+		return FALSE;
+
+	dwMode = vidModes[index].dwMode;
+	out = dwMode & AV_MODE_OUT_MASK;
+
+	if (flags & XVIDEO_FLAG_10X11PIXELASPECTRATIO)
+	{
+		DWORD fpar = 0;
+		if (width != 640 || height != 480 || out == AV_MODE_OUT_VGA)
+			return FALSE;
+		for (i = 0; i < (int)(sizeof(fparModes) / sizeof(fparModes[0])); i++)
+		{
+			if ((dwMode & 0x00FFFFFF) == fparModes[i][0])
+			{
+				fpar = fparModes[i][1];
+				break;
+			}
+		}
+		if (fpar == 0)
+			return FALSE;
+		dwMode = (dwMode & 0xFF000000) | fpar;
+	}
+
+	/* SDTV (and 480i YPrPb) modes have a 16:9 variant with the WSS bit, the HDTV
+	   and VGA modes do not (AV_MODE_*_16x9, Cxbx-Reloaded EmuKrnlAvModes.h) */
+	if ((flags & XVIDEO_FLAG_WIDESCREEN) && out != AV_MODE_OUT_HDTV && out != AV_MODE_OUT_VGA)
+		dwMode |= XVIDEO_AV_MODE_WSS;
+
+	XVideoInit(dwMode, width, height, bpp);
+
+	vmCurrent.width = width;
+	vmCurrent.height = height;
+	vmCurrent.bpp = bpp;
+	vmCurrent.refresh = refresh;
+	dwCurrentAvMode = dwMode;
+	dwCurrentFlags = (flags & (XVIDEO_FLAG_WIDESCREEN | XVIDEO_FLAG_10X11PIXELASPECTRATIO)) |
+	                 (AvModeIsInterlaced(dwMode) ? XVIDEO_FLAG_INTERLACED : XVIDEO_FLAG_PROGRESSIVE);
+	return TRUE;
+}
+
+DWORD XVideoGetModeFlags(void)
+{
+	return dwCurrentFlags;
+}
+
+DWORD XVideoGetAvMode(void)
+{
+	return dwCurrentAvMode;
+}
+
+DWORD XVideoGetVideoFlags(void)
+{
+	ULONG type = 0, value = 0, length = 0;
+
+	if (!NT_SUCCESS(ExQueryNonVolatileSetting(XC_VIDEO, &type, &value, sizeof(value), &length)) ||
+	    length != sizeof(value))
+		return 0;
+	return value;
 }
 
 
