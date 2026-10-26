@@ -20,7 +20,41 @@
  */
 static ALsource g_sources[AL_MAX_SOURCES];
 static ALuint s_source_end;   /* al_source_id_end() */
+/*
+ * The voice tick walks the sources with a stream (to bring each up to date and
+ * measure its interval) and the ones with timed work. Walking all of them read
+ * one or two cache lines of every source, a miss each once the frame's
+ * rendering has evicted them: tens of microseconds an update for the few that
+ * matter. A bit here is set when a source may need the walk (a stream created,
+ * timed work queued) and cleared by the walk once it does not; the walk's tests
+ * are unchanged, so it acts on the same sources in the same order.
+ */
+static uint32_t s_stream_mask[AL_MAX_SOURCES / 32u];
+static uint32_t s_timed_mask[AL_MAX_SOURCES / 32u];
+
+static void src_mask_set(uint32_t *m, const ALsource *src) {
+    const uint32_t i = (uint32_t)(src - g_sources);
+    m[i >> 5] |= 1u << (i & 31u);
+}
+
+/* The first source at index i or above with its bit set in m, or s_source_end */
+static size_t src_mask_next(const uint32_t *m, size_t i) {
+    while (i < s_source_end) {
+        uint32_t bits = m[i >> 5] >> (i & 31u);
+        if (bits != 0u) {
+            i += (size_t)__builtin_ctz(bits);
+            return (i < s_source_end) ? i : s_source_end;
+        }
+        i = (i | 31u) + 1u;
+    }
+    return s_source_end;
+}
+
+static void src_mask_clear(uint32_t *m, size_t i) {
+    m[i >> 5] &= ~(1u << (i & 31u));
+}
 static uint64_t s_tick_stream_cycles, s_tick_voice_cycles;   /* al_source_tick_cycles(), per device */
+static uint64_t s_tick_timed_cycles, s_tick_gp_check_cycles, s_tick_efx_cycles;   /* al_source_tick_cycles_more() */
 static bool s_subsystem_initialized = false;
 static uintptr_t s_apu_base = 0; /* 0: no base installed, see al_source_get_apu_base() */
 static uint32_t s_spatial_calc_count = 0;
@@ -141,6 +175,7 @@ void al_source_init_subsystem(void) {
     s_play_seq = 0;
     s_source_end = 0;
     s_tick_stream_cycles = s_tick_voice_cycles = 0;
+    s_tick_timed_cycles = s_tick_gp_check_cycles = s_tick_efx_cycles = 0;
     s_subsystem_initialized = true;
 }
 
@@ -167,6 +202,7 @@ void al_source_cleanup_subsystem(void) {
     apu_spatial_reset();
     s_source_end = 0;
     s_tick_stream_cycles = s_tick_voice_cycles = 0;
+    s_tick_timed_cycles = s_tick_gp_check_cycles = s_tick_efx_cycles = 0;
     s_subsystem_initialized = false;
 }
 
@@ -904,31 +940,52 @@ void al_source_tick_cycles(uint64_t *stream, uint64_t *voices) {
     *voices = s_tick_voice_cycles;
 }
 
+void al_source_tick_cycles_more(uint64_t *timed, uint64_t *gp_check, uint64_t *efx) {
+    *timed = s_tick_timed_cycles;
+    *gp_check = s_tick_gp_check_cycles;
+    *efx = s_tick_efx_cycles;
+}
+
 /* alXboxSourcePlayAtSample / StopAtSample (the end of this file) */
 static void timed_cancel(ALsource *src);
 static void timed_par_drop(ALsource *src);
 static void timed_lead_update(void);
 static void timed_ops(void);
+/* Set by the update between its stream loop and the end of its timed work:
+ * every stream was brought up to date microseconds ago, so timed_clock()
+ * reads the position that loop left instead of updating the stream again
+ * (each update reads the voice's position from the APU) */
+static bool s_streams_fresh;
 #define TIMED_HOLD_OVERDUE 960u   /* XGSCNT samples (20 ms) past its frame before this thread releases a hold */
 
 void al_source_update_frame(void) {
-    uint64_t t0, t1;
+    uint64_t t0, t1, t2;
     ensure_subsystem_initialized();
     t0 = apu_platform_cycles();
-    for (size_t i = 0; i < s_source_end; i++) {
-        if (g_sources[i].in_use) {
-            source_update_stream(&g_sources[i]);
+    for (size_t i = src_mask_next(s_stream_mask, 0); i < s_source_end; i = src_mask_next(s_stream_mask, i + 1u)) {
+        if (!g_sources[i].in_use || !g_sources[i].stream) {
+            src_mask_clear(s_stream_mask, i);
+            continue;
         }
+        source_update_stream(&g_sources[i]);
     }
+    t2 = apu_platform_cycles();
+    s_streams_fresh = true;
     timed_lead_update();
     timed_ops();
+    s_streams_fresh = false;
     apu_vp_hold_overdue(al_source_get_apu_base(), TIMED_HOLD_OVERDUE);   /* the output thread stalled */
     t1 = apu_platform_cycles();
+    s_tick_timed_cycles += t1 - t2;
     s_tick_stream_cycles += t1 - t0;
     apu_voice_mgr_update(al_source_get_apu_base());
-    s_tick_voice_cycles += apu_platform_cycles() - t1;
-    reverb_sync();   /* in the update's unsplit rest (ALXBOXSTATS) */
+    t0 = apu_platform_cycles();
+    s_tick_voice_cycles += t0 - t1;
+    reverb_sync();
+    t1 = apu_platform_cycles();
+    s_tick_gp_check_cycles += t1 - t0;
     al_efx_timed_service();
+    s_tick_efx_cycles += apu_platform_cycles() - t1;
 }
 
 
@@ -1331,6 +1388,7 @@ AL_API void AL_APIENTRY alSourcei(ALuint source, ALenum param, ALint value) {
                 al_buffer_retain(buf);
                 src->source_type = AL_STATIC;
             }
+            apu_voice_mgr_standby_maybe();   /* a playing source without a voice may now have a buffer */
             break;
 
         case AL_LOOPING:
@@ -1899,6 +1957,7 @@ AL_API void AL_APIENTRY alSourcePlay(ALuint source) {
         return;
     }
     src->state = AL_PLAYING;
+    apu_voice_mgr_standby_maybe();
 }
 
 AL_API void AL_APIENTRY alSourcePause(ALuint source) {
@@ -2050,6 +2109,7 @@ AL_API void AL_APIENTRY alSourceQueueBuffers(ALuint source, ALsizei nb, const AL
             alSetError(AL_OUT_OF_MEMORY);
             return;
         }
+        src_mask_set(s_stream_mask, src);
     }
     ALenum err = al_stream_queue(src->stream, nb, buffers);
     if (err != AL_NO_ERROR) {
@@ -2060,6 +2120,10 @@ AL_API void AL_APIENTRY alSourceQueueBuffers(ALuint source, ALsizei nb, const AL
         return;
     }
     src->source_type = AL_STREAMING;
+    /* A playing source without a voice may now have a buffer to play: a new
+     * stream, or one whose queue ran empty (al_stream_ring_buffer NULL until
+     * a format comes back) */
+    apu_voice_mgr_standby_maybe();
 }
 
 AL_API void AL_APIENTRY alSourceUnqueueBuffers(ALuint source, ALsizei nb, ALuint *buffers) {
@@ -2311,6 +2375,18 @@ static const apu_gp_kernel_t *gp_slot_want(int kind, const apu_gp_kernel_t *k) {
     return (kind == AL_GP_REVERB) ? apu_gp_reverb_kernel() : ((kind == AL_GP_KERNEL) ? k : NULL);
 }
 
+/*
+ * reverb_sync() runs every update. Each slot's check relocates its kernel and
+ * compares it word by word with the code loaded (apu_gp_slot_holds): 92 us a
+ * call on a console for a game's room kernel (r3d bmi-720-perf1, 2026-10-25),
+ * for an answer that only changes when the slots or the effects do. So it
+ * runs again only after one of them changed: a slot loaded, stopped or reset
+ * or the GP restarted (apu_gp_slots_generation), or an effect, a slot's
+ * effect or the reverb changed (reverb_apply, which every such change calls).
+ */
+static bool s_gp_synced;
+static uint32_t s_gp_synced_gen;
+
 static void reverb_apply(void) {
     apu_reverb_params_t p[APU_GP_SLOTS];
     apu_gp_kernel_t k[APU_GP_SLOTS];
@@ -2318,6 +2394,7 @@ static void reverb_apply(void) {
     int kind[APU_GP_SLOTS];
     uintptr_t base = al_source_get_apu_base();
     uint32_t i;
+    s_gp_synced = false;
     if (!apu_gp_ready() || apu_vp_front_end_ok()) {
         return;
     }
@@ -2344,7 +2421,10 @@ static void reverb_sync(void) {
     apu_reverb_params_t p;
     apu_gp_kernel_t k;
     const uint32_t *params;
-    uint32_t i;
+    uint32_t i, gen = apu_gp_slots_generation();
+    if (s_gp_synced && gen == s_gp_synced_gen) {
+        return;   /* nothing changed since every slot held its effect */
+    }
     for (i = 0; i < APU_GP_SLOTS; i++) {
         int kind = gp_slot_effect(i, &p, &k, &params);
         if (kind != AL_GP_NONE && !apu_gp_slot_holds(i, gp_slot_want(kind, &k))) {
@@ -2352,6 +2432,8 @@ static void reverb_sync(void) {
             return;
         }
     }
+    s_gp_synced = true;
+    s_gp_synced_gen = gen;
 }
 
 bool al_reverb_active(void) {
@@ -2675,9 +2757,11 @@ static al_source_clock_t timed_clock(ALuint stream, uint32_t *pos) {
     if (st->state != AL_PLAYING || st->hw_voice_idx < 0) {
         return AL_SOURCE_CLOCK_WAIT;
     }
-    source_update_stream(st);
-    if (st->state != AL_PLAYING) {
-        return AL_SOURCE_CLOCK_STOPPED;
+    if (!s_streams_fresh) {
+        source_update_stream(st);
+        if (st->state != AL_PLAYING) {
+            return AL_SOURCE_CLOCK_STOPPED;
+        }
     }
     *pos = s_dbg_clock ? s_dbg_pos : al_stream_clock(st->stream);   /* not read_pos: an unqueue moves it back */
     return AL_SOURCE_CLOCK_RUN;
@@ -2686,7 +2770,7 @@ static al_source_clock_t timed_clock(ALuint stream, uint32_t *pos) {
 /* Each stream timed work waits on: half the frames it played since the last
  * update (once per update) */
 static void timed_lead_update(void) {
-    for (size_t i = 0; i < s_source_end; i++) {
+    for (size_t i = src_mask_next(s_stream_mask, 0); i < s_source_end; i = src_mask_next(s_stream_mask, i + 1u)) {
         ALsource *st = &g_sources[i];
         uint32_t pos = 0;
         if (!st->in_use || !st->lead_used) {
@@ -2814,13 +2898,15 @@ static void timed_ops(void) {
         return;
     }
     apu_voice_batch(al_source_get_apu_base(), true);   /* the ones due together start on one APU frame */
-    for (size_t i = 0; i < s_source_end && (s_timed_src_n > 0u || s_timed_par_src_n > 0u); i++) {
+    for (size_t i = src_mask_next(s_timed_mask, 0); i < s_source_end && (s_timed_src_n > 0u || s_timed_par_src_n > 0u);
+         i = src_mask_next(s_timed_mask, i + 1u)) {
         ALsource *src = &g_sources[i];
         uint32_t pos = 0, late = 0;
         uint8_t op;
         ALuint stream;
         al_source_clock_t c;
-        if (!src->in_use) {
+        if (!src->in_use || (src->timed_op == TIMED_NONE && src->timed_par_n == 0u)) {
+            src_mask_clear(s_timed_mask, i);
             continue;
         }
         if (src->timed_par_n != 0u) {
@@ -2857,6 +2943,7 @@ static void timed_ops(void) {
                     src->timed_sample = sample;
                     src->timed_nohold = true;
                     s_timed_src_n++;
+                    src_mask_set(s_timed_mask, src);
                     continue;
                 }
                 if (src->timed_op == TIMED_STOP && !src->timed_muted && src->state == AL_PLAYING &&
@@ -2922,6 +3009,7 @@ static void timed_queue(ALuint source, ALuint stream, ALuint sample, uint8_t op)
     src->timed_stream = stream;
     src->timed_sample = sample;
     s_timed_src_n++;
+    src_mask_set(s_timed_mask, src);
     timed_lead_set(stream);
     timed_ops();   /* one already due, or a stopped stream: now */
 }
@@ -2972,6 +3060,7 @@ AL_API void AL_APIENTRY alXboxSourcefvAtSample(ALuint source, ALenum param, cons
     n = src->timed_par_n;
     if (n == 0u) {
         s_timed_par_src_n++;
+        src_mask_set(s_timed_mask, src);
     }
     src->timed_par[n].sample = sample;
     src->timed_par[n].v[0] = values[0];

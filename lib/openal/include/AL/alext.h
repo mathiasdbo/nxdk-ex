@@ -648,6 +648,13 @@ typedef struct ALXBOXSTATS {
     ALint timed_hold_err_min;
     ALint timed_hold_err_max;
     ALuint timed_hold_err_mean;
+    /* more of the update_cycles split: of update_stream_cycles, the timed
+     * starts and stops (the lead, the queued operations, the overdue holds);
+     * after the voices, the check that each GP slot runs its effect, and the
+     * EFX slots' timed changes */
+    unsigned long long update_timed_cycles;
+    unsigned long long update_gp_check_cycles;
+    unsigned long long update_efx_cycles;
 } ALXBOXSTATS;
 
 AL_API void AL_APIENTRY alXboxGetStats(ALXBOXSTATS *stats);

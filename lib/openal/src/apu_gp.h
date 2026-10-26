@@ -222,6 +222,13 @@ bool apu_gp_kernels_fit(const apu_gp_kernel_t *const set[APU_GP_SLOTS]);
 /** Slot `slot` runs kernel `k` (its code, relocated where it is, and its sizes); NULL: the slot is empty. */
 bool apu_gp_slot_holds(uint32_t slot, const apu_gp_kernel_t *k);
 
+/**
+ * A count that changes whenever what any slot holds may have changed: a slot
+ * loaded or stopped, the slots reset, the GP restarted. While it stays the
+ * same, apu_gp_slot_holds() answers as it did for the same kernels.
+ */
+uint32_t apu_gp_slots_generation(void);
+
 /** Stop whatever slot `slot` runs and free its ranges. */
 void apu_gp_slot_stop(uintptr_t bar0, uint32_t slot);
 

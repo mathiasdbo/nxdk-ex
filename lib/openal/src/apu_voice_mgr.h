@@ -72,6 +72,13 @@ void apu_voice_mgr_release(ALsource *src);
 void apu_voice_mgr_update(uintptr_t apu_base);
 
 /**
+ * A source may have become a promotion candidate (playing, no voice, a buffer
+ * to play): the next apu_voice_mgr_update() looks for candidates again. Until
+ * then, once a look found none, it does not walk the sources.
+ */
+void apu_voice_mgr_standby_maybe(void);
+
+/**
  * Get count of active hardware voices currently bound to playing/paused sources.
  *
  * @return Number of hardware voice channels in use (0..64).

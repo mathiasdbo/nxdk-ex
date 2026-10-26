@@ -27,6 +27,16 @@ static void set_owner(uint32_t v, int id) {
 
 /* Per-update standby candidate priorities, indexed by source id - 1 (0 = not a candidate) */
 static float s_promo_priority[AL_MAX_SOURCES];
+/* Set when a source may have become a candidate (apu_voice_mgr_standby_maybe,
+ * and here wherever a playing source loses its voice); cleared by a look that
+ * found no candidate at all. The look reads every source, a cache miss or two
+ * each once rendering has evicted them, and finds none in nearly every update. */
+static bool s_promo_dirty = true;
+static uint32_t s_promo_idle;   /* updates since the last look, while clean */
+
+void apu_voice_mgr_standby_maybe(void) {
+    s_promo_dirty = true;
+}
 
 /*
  * ============================================================================
@@ -148,6 +158,7 @@ int apu_voice_mgr_allocate(ALsource *src) {
             if (owner) {
                 al_source_voice_lost(owner);
                 owner->hw_voice_idx = AL_HW_VOICE_INVALID;
+                s_promo_dirty = true;
             }
             set_owner(v, (int)src->id);
             src->hw_voice_idx = (int)v;
@@ -158,6 +169,7 @@ int apu_voice_mgr_allocate(ALsource *src) {
         if (!al_source_voice_loops(owner) && apu_voice_is_active(apu_base, v) == 0) {
             owner->state = AL_STOPPED;
             owner->hw_voice_idx = AL_HW_VOICE_INVALID;
+            s_promo_dirty = true;
             set_owner(v, (int)src->id);
             src->hw_voice_idx = (int)v;
             return (int)v;
@@ -234,6 +246,7 @@ int apu_voice_mgr_allocate(ALsource *src) {
          */
         if (victim) {
             victim->hw_voice_idx = AL_HW_VOICE_INVALID;
+            s_promo_dirty = true;   /* virtual standby */
             if (!victim->virtualize) {
                 /* AL_XBOX_VIRTUALIZE off: a source that loses its voice stops */
                 victim->state = AL_STOPPED;
@@ -257,6 +270,7 @@ int apu_voice_mgr_allocate(ALsource *src) {
      * stays AL_PLAYING while it waits and restarts from sample 0 when promoted
      * (a preempted one resumes from its saved position instead). */
     src->hw_voice_idx = AL_HW_VOICE_INVALID;
+    s_promo_dirty = true;
     return AL_HW_VOICE_INVALID;
 }
 
@@ -290,6 +304,7 @@ void apu_voice_mgr_release(ALsource *src) {
     } else {
         src->hw_voice_idx = AL_HW_VOICE_INVALID;
     }
+    s_promo_dirty = true;
 }
 
 /*
@@ -334,10 +349,12 @@ void apu_voice_mgr_update(uintptr_t apu_base) {
                  (v < 32u) ? !(active0 & (1u << v)) : !(active1 & (1u << (v - 32u))))) {
                 owner->state = AL_STOPPED;
                 owner->hw_voice_idx = AL_HW_VOICE_INVALID;
+                s_promo_dirty = true;
                 set_owner(v, AL_HW_VOICE_INVALID);
             } else if (owner->state != AL_PLAYING && owner->state != AL_PAUSED) {
                 al_source_voice_lost(owner);
                 owner->hw_voice_idx = AL_HW_VOICE_INVALID;
+                s_promo_dirty = true;
                 set_owner(v, AL_HW_VOICE_INVALID);
             }
         }
@@ -346,9 +363,15 @@ void apu_voice_mgr_update(uintptr_t apu_base) {
     /* 2. Promotion phase: promote highest-priority virtual standby sources to free slots.
      * Each standby candidate's priority is computed once per update; free slots
      * then take the best remaining candidate (ties: lowest source id). */
-    bool candidates_ready = false;
+    bool candidates_ready = false, any_candidate = false;
     const ALuint id_end = al_source_id_end();
     const uint32_t slots = apu_voice_slot_count();
+    /* No source can have become a candidate since a look found none; a look
+     * every 32 updates (~0.5 s) anyway, so a way in that misses the flag costs
+     * a short gap, not a source left silent */
+    if (!s_promo_dirty && (++s_promo_idle & 31u) != 0u) {
+        return;
+    }
     for (uint32_t v = 0; v < slots; v++) {
         if (s_owned[v >> 5] & (1u << (v & 31u))) {
             continue;
@@ -361,9 +384,14 @@ void apu_voice_mgr_update(uintptr_t apu_base) {
                 if (src && src->in_use && src->state == AL_PLAYING &&
                     src->hw_voice_idx == AL_HW_VOICE_INVALID && al_source_play_buffer(src) != NULL) {
                     s_promo_priority[id - 1] = apu_voice_mgr_calc_priority(src);
+                    any_candidate = true;
                 }
             }
             candidates_ready = true;
+            if (!any_candidate) {
+                s_promo_dirty = false;
+                break;
+            }
         }
 
         ALuint best_id = 0;
