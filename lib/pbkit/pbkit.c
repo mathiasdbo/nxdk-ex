@@ -120,6 +120,7 @@ static  DWORD           pb_Size=PBKIT_PUSHBUFFER_SIZE;//push buffer size, must b
 static  uint32_t        *pb_Head;   //points at push buffer head
 static  uint32_t        *pb_Tail;   //points at push buffer tail
 static  uint32_t        *pb_Put=NULL;   //where next command+params are to be written
+static  uint32_t        *pb_Kicked=NULL;    //pb_Put as last handed to the Dma engine (pb_end_deferred)
 
 static  float           pb_CpuFrequency;
 
@@ -1505,6 +1506,7 @@ static void pb_start(void)
         pb_cache_flush();
         *(pb_DmaUserAddr+0x40/4)=((DWORD)pb_Put)&0x03FFFFFF;
         //from now any write will be detected
+        pb_Kicked=pb_Put;
 
 #ifdef DBG
         if ((*(pb_DmaUserAddr+0x44/4))>0x04000000)
@@ -1586,6 +1588,8 @@ int pb_busy(void)
 {
     DWORD           PutAddr;
     DWORD           GetAddr;
+
+    pb_kick(); //blocks left by pb_end_deferred: GET never reaches a Put the Dma engine was not given
 
     GetAddr=*(pb_DmaUserAddr+0x44/4);
 #ifdef DBG
@@ -1795,6 +1799,7 @@ void pb_wait_for_flip(void)
 {
     LARGE_INTEGER timeout;
 
+    pb_kick(); //the frame waited on may still be in blocks left by pb_end_deferred
     if (pb_FrameBuffersCount>2) return;
     timeout.QuadPart=-10000;    //1 ms: the VBlank event is pulsed, a pulse between the test and the wait is not lost for a whole frame
     while (pb_FramesShown!=pb_FramesFinished)
@@ -1803,6 +1808,7 @@ void pb_wait_for_flip(void)
 
 DWORD pb_wait_for_vbl(void)
 {
+    pb_kick(); //no work left unsent while the CPU sleeps
     NtWaitForSingleObject(pb_VBlankEvent, FALSE, NULL);
     return pb_vbl_counter; //allows caller to know if a frame has been missed
 }
@@ -1943,6 +1949,45 @@ void pb_end(uint32_t *pEnd)
     }
 }
 
+
+/*
+ * pb_end without the kick: the block is queued (pb_Put moves on) but the Dma
+ * engine is told only once PB_DEFER_DWORDS have built up, at the next pb_end
+ * or pb_kick, or before pbkit waits on the GPU (pb_busy, pb_wait_for_flip,
+ * pb_wait_for_vbl, pb_reset, pb_finished). Each kick is a write-combining
+ * flush, a read-modify-write and spin on NV_PFB_WC_CACHE and the PUT write
+ * (pb_start): for a caller ending hundreds of small blocks a frame, most of
+ * their cost. A caller that waits on the GPU by other means (polling memory
+ * the GPU writes) calls pb_kick first.
+ */
+#define PB_DEFER_DWORDS 1024u
+
+void pb_end_deferred(uint32_t *pEnd)
+{
+#ifdef DBG
+    if (pEnd!=pb_PushNext)
+    {
+        debugPrint("pb_end_deferred: input pointer invalid or not following previous write addresses\n");
+        assert(false);
+    }
+    if (pb_BeginEndPair==0)
+    {
+        debugPrint("pb_end_deferred without a pb_begin\n");
+        assert(false);
+    }
+    pb_BeginEndPair=0;
+#endif
+
+    pb_Put=pEnd;
+    if (pb_trace_mode || !pb_Kicked || pb_Put<pb_Kicked || (DWORD)(pb_Put-pb_Kicked)>=PB_DEFER_DWORDS)
+        pb_start();
+}
+
+void pb_kick(void)
+{
+    if (pb_Put && pb_Put!=pb_Kicked)
+        pb_start();
+}
 
 void pb_push_to(DWORD subchannel, uint32_t *p, DWORD command, DWORD nparam)
 {
