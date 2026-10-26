@@ -3062,8 +3062,10 @@ void pb_kill(void)
     VIDEOREG(NV_PFB_CFG1)=pb_OldFBConfig1;
     VIDEOREG(NV_PMC_ENABLE)=pb_OldMCEnable;
     VIDEOREG(NV_PMC_INTR_EN_0)=pb_OldMCInterrupt;
+    //a persisted display (XVideoPersistDisplay) stays on screen across XLaunchXBE
+    if (pSavedData) VIDEOREG(PCRTC_START)=(DWORD)MmGetPhysicalAddress(pSavedData)&0x03FFFFFF;
     //not back to a debug screen that was given back: the front buffer stays allocated and shown
-    if (!pb_DebugScreenGone) VIDEOREG(PCRTC_START)=pb_OldVideoStart;
+    else if (!pb_DebugScreenGone) VIDEOREG(PCRTC_START)=pb_OldVideoStart;
 
     NtClose(pb_VBlankEvent);
 }
