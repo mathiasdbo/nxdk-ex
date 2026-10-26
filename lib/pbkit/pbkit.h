@@ -52,6 +52,14 @@ void    pb_set_swap_callback(void (*cb)(DWORD frame, DWORD vbl_count));
 //scanned out in an interlaced mode, -1 when progressive or unknown. Either pointer may be NULL.
 void    pb_get_display_field_status(DWORD *vbl_count, int *field);
 
+//Presentation interval (D3DPRESENT_INTERVAL_*): when pb_finished() frames are put on screen.
+//Can be changed at any time; it lasts across pb_kill/pb_init.
+#define PB_PRESENT_INTERVAL_ONE             1   //at the next VBlank (default, the classic pbkit behaviour)
+#define PB_PRESENT_INTERVAL_TWO             2   //at a VBlank, at most every second VBlank
+#define PB_PRESENT_INTERVAL_IMMEDIATE       0   //as soon as the GPU has finished the frame (tearing)
+#define PB_PRESENT_INTERVAL_ONE_OR_IMMEDIATE 3  //at the next VBlank, immediately if the frame missed one
+void    pb_set_presentation_interval(int interval);
+int     pb_get_presentation_interval(void);
 
 DWORD   pb_wait_for_vbl(void);  //waits for VBL, returns VBL counter value as bonus info
                 //you can avoid calling it and try to draw a lot in advance
