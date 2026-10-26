@@ -145,6 +145,18 @@ void apu_mem_shutdown(void) {
     s_pool_size = 0;
 }
 
+void apu_mem_lock_pages(const void *ptr, size_t size, bool unlock) {
+#ifdef OPENAL_TARGET_XBOX
+    if (ptr && size) {
+        MmLockUnlockBufferPages((PVOID)ptr, size, unlock ? TRUE : FALSE);
+    }
+#else
+    (void)ptr;
+    (void)size;
+    (void)unlock;
+#endif
+}
+
 uint32_t apu_mem_get_physical_address(const void *ptr) {
     if (!ptr) {
         return 0;
