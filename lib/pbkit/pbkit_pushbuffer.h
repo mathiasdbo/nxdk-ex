@@ -137,6 +137,15 @@ uint32_t *pb_push_4x4_matrix (uint32_t *p, DWORD command, const float *m);
 // Ends a block of pushbuffer commands that was started via pb_begin, sending queued data to the GPU.
 void pb_end (uint32_t *pEnd);
 
+// Ends a block like pb_end but sends it to the GPU only once 4 KiB have built up,
+// or at the next pb_end, pb_kick or pbkit wait (pb_busy, pb_wait_for_flip,
+// pb_wait_for_vbl, pb_reset, pb_finished): one write-combining flush and MMIO spin
+// for many small blocks. Call pb_kick before waiting on the GPU any other way.
+void pb_end_deferred (uint32_t *pEnd);
+
+// Sends the blocks pb_end_deferred left queued, if any.
+void pb_kick (void);
+
 #if defined(__cplusplus)
 }
 #endif
