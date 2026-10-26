@@ -34,8 +34,9 @@ void pb_fill (int x, int y, int w, int h, DWORD color)
     switch (pb_ColorFmt) {
         case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
         case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_O1R5G5B5:
+            // A8R8G8B8 -> A1R5G5B5: red 23..19 -> 14..10, green 15..11 -> 9..5, blue 7..3 -> 4..0
             color =
-                ((color >> 16) & 0x8000) | ((color >> 7) & 0x7C00) | ((color >> 5) & 0x03E0) | ((color >> 3) & 0x001F);
+                ((color >> 16) & 0x8000) | ((color >> 9) & 0x7C00) | ((color >> 6) & 0x03E0) | ((color >> 3) & 0x001F);
             break;
         case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5:
             color = ((color >> 8) & 0xF800) | ((color >> 5) & 0x07E0) | ((color >> 3) & 0x001F);
