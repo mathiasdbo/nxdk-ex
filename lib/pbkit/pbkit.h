@@ -40,6 +40,34 @@ void    pb_show_debug_screen(void); //shows debug screen (default openxdk+SDL bu
 void    pb_show_depth_screen(void); //shows depth screen (depth stencil buffer)
 
 DWORD   pb_get_vbl_counter(void);
+
+//VBlank and swap callbacks (NULL removes them). Both run in pbkit's DPC (DISPATCH_LEVEL), right
+//after the VBlank handling (swap: after a frame was put on screen, also from the DPC for
+//PB_PRESENT_INTERVAL_IMMEDIATE flips). They must be brief, must not call pbkit and must save and
+//restore the FPU state themselves if they use floating point (KeSaveFloatingPointState).
+//vbl_count is pb_get_vbl_counter() at that VBlank, frame the number of frames shown since pb_init.
+void    pb_set_vblank_callback(void (*cb)(DWORD vbl_count));
+void    pb_set_swap_callback(void (*cb)(DWORD frame, DWORD vbl_count));
+//Display field status: *vbl_count = VBlank counter, *field = 0 (even) or 1 (odd) field being
+//scanned out in an interlaced mode, -1 when progressive or unknown. Either pointer may be NULL.
+void    pb_get_display_field_status(DWORD *vbl_count, int *field);
+
+//Presentation interval (D3DPRESENT_INTERVAL_*): when pb_finished() frames are put on screen.
+//Can be changed at any time; it lasts across pb_kill/pb_init.
+#define PB_PRESENT_INTERVAL_ONE             1   //at the next VBlank (default, the classic pbkit behaviour)
+#define PB_PRESENT_INTERVAL_TWO             2   //at a VBlank, at most every second VBlank
+#define PB_PRESENT_INTERVAL_IMMEDIATE       0   //as soon as the GPU has finished the frame (tearing)
+#define PB_PRESENT_INTERVAL_ONE_OR_IMMEDIATE 3  //at the next VBlank, immediately if the frame missed one
+void    pb_set_presentation_interval(int interval);
+int     pb_get_presentation_interval(void);
+
+//Fences: pb_insert_fence() queues a GPU write of a new 32-bit value (wrap-safe compare) once
+//everything pushed before it has been rendered (NV097_BACK_END_WRITE_SEMAPHORE_RELEASE). Like
+//pb_end_deferred it does not kick the push buffer; pb_is_fence_pending/pb_block_on_fence kick it
+//when the fence has not passed. A fence that was never inserted is not pending.
+DWORD   pb_insert_fence(void);
+bool    pb_is_fence_pending(DWORD fence);
+void    pb_block_on_fence(DWORD fence);     //busy waits until the GPU has passed the fence
 DWORD   pb_wait_for_vbl(void);  //waits for VBL, returns VBL counter value as bonus info
                 //you can avoid calling it and try to draw a lot in advance
                 //use it if you need strong synchronization with controls
