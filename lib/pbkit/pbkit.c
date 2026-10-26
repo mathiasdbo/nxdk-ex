@@ -179,6 +179,8 @@ static  DWORD           pb_ExtraBuffersCount=0;
 static  DWORD           pb_DepthStencilAddr;
 static  DWORD           pb_DepthStencilPitch;
 static int          pb_DepthStencilLast;
+static  int         pb_FBTiled;     //frame buffers in tile #0 (surface pitch is a tile pitch)
+static  int         pb_DSTiled;     //depth stencil buffer in tile #1
 static  DWORD           pb_DSAddr;      //depth stencil address
 static  DWORD           pb_DSSize;      //size of depth stencil buffer
 static  DWORD           pb_GPUDepthStencilFormat;//encoded format for GPU
@@ -242,6 +244,22 @@ static  float           pb_BiasTable[7]={
                     2.0f    };
 
 static HAL_SHUTDOWN_REGISTRATION pb_shutdown_registration;
+
+//1 if pitch is one of the 16 tile pitches
+static int pb_is_tile_pitch(DWORD pitch)
+{
+    int i;
+    for(i=0;i<16;i++) if (pb_TilePitches[i]==pitch) return 1;
+    return 0;
+}
+
+//smallest tile pitch greater or equal to pitch, 0 if pitch is larger than all of them
+static DWORD pb_tile_pitch_at_least(DWORD pitch)
+{
+    int i;
+    for(i=0;i<16;i++) if (pb_TilePitches[i]>=pitch) return pb_TilePitches[i];
+    return 0;
+}
 
 //forward references
 static void pb_load_gr_ctx(int ctx_id);
@@ -2444,6 +2462,16 @@ DWORD pb_depth_stencil_pitch(void)
     return pb_DepthStencilPitch;
 }
 
+bool pb_frame_buffers_tiled(void)
+{
+    return pb_FBTiled != 0;
+}
+
+bool pb_depth_stencil_tiled(void)
+{
+    return pb_DSTiled != 0;
+}
+
 /**
  * Helper function to calculate numerator and denominator for PTIMER
  *
@@ -2540,6 +2568,7 @@ int pb_init(void)
     DWORD           VSize;
 
     DWORD           Pitch;
+    DWORD           TilePitch;
 
     DWORD           Addr;
     DWORD           Size;
@@ -3236,15 +3265,14 @@ int pb_init(void)
     Pitch=(((ColorBpp*HSize)>>3)+0x3F)&0xFFFFFFC0; //64 units aligned
     pb_FrameBuffersPitch=Pitch;
 
-    //look for a standard listed pitch value greater or equal to theoretical one
-    for(i=0;i<16;i++)
-    {
-        if (pb_TilePitches[i]>=Pitch)
-        {
-            Pitch=pb_TilePitches[i];
-            break;
-        }
-    }
+    //Tile pitch rule: a tiled buffer's surface pitch must be its tile pitch.
+    //The CRTC scans the front buffer out with the pitch XVideoSetMode gave
+    //AvSetDisplayMode (width*Bpp), and pb_show_debug_screen shares that pitch,
+    //so the surface pitch of the frame buffers can't be raised to the next tile
+    //pitch. When width*Bpp is not a tile pitch itself (640 wide 16 bits: 1280,
+    //tile pitch would be 1536) the frame buffers are simply not tiled.
+    //640 wide 32 bits (2560=0xA00) is a tile pitch: tiled as it always was.
+    pb_FBTiled=pb_is_tile_pitch(Pitch);
 
     Size=Pitch*VSize;
 
@@ -3290,17 +3318,19 @@ int pb_init(void)
     //fully recover original values. Compression is aborted if the 16 dwords have
     //very different values (will occur at the edges of projected triangles).
 
-    pb_assign_tile( 0,              //int   tile_index,
-            pb_FrameBuffersAddr&0x03FFFFFF, //DWORD tile_addr,
-            FBSize,             //DWORD tile_size,
-            Pitch,              //DWORD tile_pitch,
-            0,              //DWORD tile_z_start_tag,
-            0,              //DWORD tile_z_offset,
-            0               //DWORD tile_flags
-            );
+    if (pb_FBTiled)
+        pb_assign_tile( 0,              //int   tile_index,
+                pb_FrameBuffersAddr&0x03FFFFFF, //DWORD tile_addr,
+                FBSize,             //DWORD tile_size,
+                Pitch,              //DWORD tile_pitch (= surface pitch)
+                0,              //DWORD tile_z_start_tag,
+                0,              //DWORD tile_z_offset,
+                0               //DWORD tile_flags
+                );
 
 
     pb_DSAddr=0;            //stays 0 (NULL) without a depth stencil buffer
+    pb_DSTiled=0;
     pb_DSSize=0;
     pb_DepthStencilPitch=0;
 
@@ -3312,17 +3342,14 @@ int pb_init(void)
         //(not necessarily the size of a pixel line, because of hardware optimization)
 
         Pitch=(((DepthBpp*HSize)>>3)+0x3F)&0xFFFFFFC0; //64 units aligned
-        pb_DepthStencilPitch=Pitch;
 
-        //look for a standard listed pitch value greater or equal to theoretical one
-        for(i=0;i<16;i++)
-        {
-            if (pb_TilePitches[i]>=Pitch)
-            {
-                Pitch=pb_TilePitches[i];
-                break;
-            }
-        }
+        //Tile pitch rule: the depth buffer is never scanned out (pb_show_depth_screen
+        //is a debug view), so its surface pitch is raised to the next tile pitch
+        //(640 wide Z16: 1280 -> 1536; Z24S8: 2560, already a tile pitch).
+        TilePitch=pb_tile_pitch_at_least(Pitch);
+        if (TilePitch) Pitch=TilePitch;
+        pb_DSTiled=(TilePitch!=0);
+        pb_DepthStencilPitch=Pitch;
 
         Size=Pitch*VSize;
 
@@ -3348,10 +3375,11 @@ int pb_init(void)
 
         pb_DSAddr=DSAddr;
 
-        pb_assign_tile( 1,              //int   tile_index,
+        if (pb_DSTiled)
+            pb_assign_tile( 1,              //int   tile_index,
                 pb_DepthStencilAddr&0x03FFFFFF, //DWORD tile_addr,
                 DSSize,             //DWORD tile_size,
-                Pitch,              //DWORD tile_pitch,
+                Pitch,              //DWORD tile_pitch (= surface pitch)
                 0,              //DWORD tile_z_start_tag,
                 0,              //DWORD tile_z_offset,
                 (DepthBpp==32)?     //DWORD tile_flags: compressed depth buffer,
@@ -3369,17 +3397,7 @@ int pb_init(void)
         //(not necessarily the size of a pixel line, because of hardware optimization)
 
         Pitch=(((ColorBpp*HSize)>>3)+0x3F)&0xFFFFFFC0; //64 units aligned
-
-        //look for a standard listed pitch value greater or equal to theoretical one
-        for(i=0;i<16;i++)
-        {
-            if (pb_TilePitches[i]>=Pitch)
-            {
-                Pitch=pb_TilePitches[i];
-                break;
-            }
-        }
-
+        //same surface pitch as the frame buffers (set_draw_buffer), tiled only if it is a tile pitch
         Size=Pitch*VSize;
 
         //verify 64 bytes alignment for size of a frame buffer
@@ -3404,7 +3422,8 @@ int pb_init(void)
             EXAddr+=Size;
         }
 
-        pb_assign_tile( 2,              //int   tile_index,
+        if (pb_is_tile_pitch(Pitch))
+            pb_assign_tile( 2,              //int   tile_index,
                 pb_EXAddr[0]&0x03FFFFFF,    //DWORD tile_addr,
                 EXSize,             //DWORD tile_size,
                 Pitch,              //DWORD tile_pitch,

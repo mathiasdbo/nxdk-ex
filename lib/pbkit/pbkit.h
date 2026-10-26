@@ -74,6 +74,11 @@ DWORD   pb_back_buffer_height(void);
 DWORD   pb_back_buffer_pitch(void);
 DWORD   *pb_depth_stencil_buffer(void); //returns the (shared) depth stencil buffer address (CPU side)
 DWORD   pb_depth_stencil_pitch(void);   //bytes between two lines of the depth stencil buffer
+//Tile pitch rule: a tiled buffer's surface pitch is its tile pitch. The depth stencil buffer
+//uses the next tile pitch (640 wide Z16: 1536). The frame buffers keep width*Bpp (scan-out
+//pitch) and are tiled only when that is a tile pitch (640 wide 32 bits: yes, 16 bits: no).
+bool    pb_frame_buffers_tiled(void);   //after pb_init: frame buffers are in tile #0
+bool    pb_depth_stencil_tiled(void);   //after pb_init: depth stencil buffer is in tile #1 (compressed)
 
 //GPU tile regions (NV_PFB_TILE 0..7): pb_init uses #0 (frame buffers), #1 (depth stencil)
 //and #2 (extra buffers). An application render target can be assigned to a free one;
