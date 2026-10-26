@@ -881,7 +881,7 @@ DWORD pb_wait_until_tiles_not_busy(void)
 }
 
 
-static void pb_release_tile(int index,int clear_offset)
+void pb_release_tile(int index,int clear_offset)
 {
     volatile DWORD *pTile;
     volatile DWORD *pZcomp;
@@ -961,6 +961,8 @@ void pb_assign_tile(    int tile_index,
 
     DWORD               EncodedZStartTag;
     DWORD               EncodedZOffset;
+
+    assert((tile_index>=0)&&(tile_index<8)); //NV2A has 8 tile regions (NV_PFB_TILE(0..7))
 #ifdef DBG
     if ((tile_addr&0x3fff)||(tile_size&0x3fff)) debugPrint("pb_assign_tile: addr & size not well aligned\n");
 #endif
@@ -3224,7 +3226,9 @@ int pb_init(void)
             Pitch,              //DWORD tile_pitch,
             0,              //DWORD tile_z_start_tag,
             0,              //DWORD tile_z_offset,
-            (DepthBpp==32)?0x84000001:0x80000001 //DWORD tile_flags (0x04000000 for 32 bits)
+            (DepthBpp==32)?     //DWORD tile_flags: compressed depth buffer,
+            (PB_TILE_FLAGS_ZCOMPRESS|PB_TILE_FLAGS_Z32BITS|PB_TILE_FLAGS_ZBUFFER): //0x84000001 for Z24S8
+            (PB_TILE_FLAGS_ZCOMPRESS|PB_TILE_FLAGS_ZBUFFER)     //0x80000001 for Z16
             );
 
 
