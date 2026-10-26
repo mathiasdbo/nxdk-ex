@@ -8,6 +8,10 @@ Batch 2 (memory): no depth buffer, application supplied frame and depth
 buffers, the tile pitch rule, and the back buffer count. Validated on xemu with
 `samples/pbkit_memory`, see [Batch 2](#batch-2-memory).
 
+Batch 3 (sync): VBlank and swap callbacks, display field status, presentation
+intervals, fences, and a `pb_reset` fix. Validated on xemu with
+`samples/pbkit_sync`, see [Batch 3](#batch-3-sync).
+
 The points a console must still confirm are listed at the end of each batch.
 
 ## API added (all additive, nothing existing changed signature)
@@ -299,3 +303,170 @@ Framebuffer captures matched the readbacks. `samples/pbkit_formats` config 1
    xemu).
 4. Physical address checks: xemu maps contiguous memory like the kernel does;
    `MmGetPhysicalAddress` on write combined memory on hardware.
+
+## Batch 3: sync
+
+VBlank and swap callbacks, display field status, presentation intervals and
+fences. Validated on xemu with `samples/pbkit_sync`.
+
+### API added
+
+`pbkit.h`
+
+| Function | When | What |
+| --- | --- | --- |
+| `pb_set_vblank_callback(void (*cb)(DWORD vbl_count))` | any time, `NULL` removes | called once per VBlank from pbkit's DPC, after the flip and the VBlank event pulse. |
+| `pb_set_swap_callback(void (*cb)(DWORD frame, DWORD vbl_count))` | any time, `NULL` removes | called once per frame put on screen, from the DPC: after the VBlank callback for VBlank flips, from the `PB_FINISHED` subprogram for immediate flips. `frame` = frames shown since `pb_init` (consecutive). |
+| `pb_get_display_field_status(DWORD *vbl_count, int *field)` | after `pb_init` | VBlank counter and the field being scanned out: 0 even, 1 odd, -1 progressive or unknown (D3D `GetDisplayFieldStatus`). |
+| `pb_set_presentation_interval(int)` / `pb_get_presentation_interval()` | any time, lasts across `pb_kill`/`pb_init` | `PB_PRESENT_INTERVAL_IMMEDIATE` 0, `_ONE` 1 (default), `_TWO` 2, `_ONE_OR_IMMEDIATE` 3. |
+| `DWORD pb_insert_fence(void)` | after `pb_init` | queues a GPU write of the next fence value; does not kick (like `pb_end_deferred`). |
+| `bool pb_is_fence_pending(DWORD)` | after `pb_init` | the GPU has not passed the fence yet (kicks the push buffer when it has not). A fence never inserted is not pending. |
+| `void pb_block_on_fence(DWORD)` | after `pb_init` | busy waits (`pause`) until the fence has passed. |
+
+Callbacks run at DISPATCH_LEVEL inside the DPC: they must be brief, must not
+call pbkit, and must save and restore the FPU state themselves
+(`KeSaveFloatingPointState`) if they use floating point. The VBlank handler is
+also run from a few pbkit polling loops (tile set-up, `pb_kill`) when they see
+the VBlank pending, so a callback can occasionally run in thread context.
+
+### Presentation intervals
+
+`PB_PRESENT_INTERVAL_ONE` is the classic path, unchanged: the ISR writes
+`PCRTC_START` at the VBlank when the next queued frame is ready, the DPC
+retires it. `pb_finished` pushes the same bytes for every interval; only the
+CPU side of the flip changes.
+
+| Interval | Where the flip happens |
+| --- | --- |
+| ONE | ISR at the VBlank, if the next queued frame is ready (as before). |
+| TWO | ISR at the VBlank, only when at least two VBlanks passed since the last flip. |
+| IMMEDIATE | `PB_FINISHED` subprogram (DPC), as soon as the GPU has passed the frame's end; `PCRTC_START` is latched at HSYNC (`NV_PCRTC_CONFIG_START_ADDRESS_HSYNC`), so the scan-out switches mid-frame: tearing. Frames still queued (e.g. after switching from ONE) are flipped in order. |
+| ONE_OR_IMMEDIATE | ISR at the VBlank like ONE; immediate from the subprogram when the frame is the only one queued and a VBlank has passed since the last flip (the frame missed it). |
+
+For intervals other than ONE the ISR records which slot it flipped
+(`pb_VBLFlippedSlot`) and the DPC retires only that slot, so a frame marked
+ready between the ISR and the DPC is not retired without having been shown.
+
+### Fences
+
+`pb_init` already binds the 3D semaphore DMA context
+(`NV097_SET_CONTEXT_DMA_SEMAPHORE`, method 0x1A4 in the `SET_OBJECT2A` list) to
+DMA object 8, `pb_DmaBuffer8`. That buffer is now one uncached, page aligned
+page. `pb_insert_fence` pushes `NV097_SET_SEMAPHORE_OFFSET` 0 and
+`NV097_BACK_END_WRITE_SEMAPHORE_RELEASE` value (3 dwords): the GPU writes the
+value once the rendering pushed before it has passed the back end, without an
+interrupt and without stalling. The CPU compares with a signed 32-bit
+difference, `(LONG)(fence - written) > 0` = pending, so the counter may wrap;
+`pb_init` starts it at 0xFFFFFF00 so the wrap happens within the first 256
+fences of every run and wrap bugs show at once.
+
+Why not a `FIRE_INTERRUPT` subprogram like `PB_FINISHED`: that stalls PGRAPH
+until the CPU's DPC has handled it, for every fence. xemu emulates the
+semaphore release (pgraph `NV097_BACK_END_WRITE_SEMAPHORE_RELEASE`: surface
+update, then a 32-bit store at the semaphore DMA object + offset), and the
+sample checks it end to end (readback after the fence, wrap).
+
+`pb_insert_fence` ends its block with `pb_end_deferred`; `pb_is_fence_pending`
+and `pb_block_on_fence` call `pb_kick` when the fence has not passed, so a
+fence behind deferred blocks cannot wait forever.
+
+### Display field status
+
+There is no CRTC field register to read: xemu's `NV_PCRTC_RASTER` is a counter
+that increments on every read, and in the SDTV modes the TV encoder
+interlaces, not the CRTC (the NV2A scans out a whole frame per VBlank, each
+VBlank is one TV field). `pb_get_display_field_status`:
+
+- interlaced or not: the AV mode the kernel set
+  (`AvSendTVEncoderOption(AV_OPTION_QUERY_MODE)`, option 13). Output mode bits
+  31:30: 0 (480 line SDTV) and 1 (525 line SDTV) are interlaced; 2 (HDTV) only
+  with TV table index 3 (1080i); 3 (VGA) never. `field` is -1 otherwise.
+- the field alternates with the VBlank counter; its absolute parity is
+  anchored once per `pb_init` on `AV_OPTION_GUESS_FIELD` (option 15), non-zero =
+  odd.
+
+The two kernel calls happen on the first call after `pb_init`: make that
+first call at PASSIVE_LEVEL (not from a callback).
+
+### Push buffer reset fix (`pb_reset`)
+
+The sample found frames lost at high frame rates on xemu (IMMEDIATE, light scene:
+61 of 12278 frames never reached the
+`PB_FINISHED` subprogram). `pb_jump_to_head` writes the jump at `pb_Put`, sets
+PUT to the head and waits for GET to be at the head. When the DMA engine has
+not fetched anything since the previous jump, GET is still at the head: the
+wait ends at once, and PUT = head = GET reads as an empty push buffer, so the
+whole frame (its `PB_FINISHED` included) is skipped and then overwritten.
+`pb_jump_to_head` now first kicks and waits (same 100 tick timeout) until GET
+has left the head when something was pushed since the last jump. After the
+fix: 0 lost frames over 12189 (IMMEDIATE) and on every configuration below.
+The push buffer contents are unchanged.
+
+### samples/pbkit_sync
+
+Five configurations cycled with `pb_kill` / `XVideoSetMode` / `pb_init`
+(`make CONFIG=n` for one, `make clean` first), 640x480 32 bpp, triple
+buffering. Each runs the fence tests and the field status at the default
+interval, then sets the callbacks and the interval and measures over 10 s
+windows (`KeTickCount`): VBlank callbacks per second against the VBlank
+counter, swap callbacks against frames (consecutive frame numbers; after each
+window the queue is drained and the totals must be equal), flips per VBlank,
+and the share of flips outside the VBlank (a swap callback more than 20000 TSC
+cycles after the VBlank callback). "Slow" frames are held back by the CPU to
+1.4 refresh periods (23 ms at 60 Hz). Fence tests: pending right after 200
+full screen fills, block returns, passed after; a fence behind
+`pb_end_deferred` blocks only (block must kick); a CPU written sentinel pixel
+is the drawn color once the fence has passed; 300 fences across the wrap
+(consecutive values, fences from before the wrap and the first one not
+pending, never inserted ones not pending). Results: `pb_print`, `DbgPrint` and
+a `PBSYNCRS` tagged block in `.data` (0x33000 in this build) with one summary
+row per configuration.
+
+xemu v0.8.139, 2026-10-26, 60 Hz (AV mode 0x0801010D, 480i), one `CONFIG=n`
+ISO per row (4 windows each, values of the last), then the cycling ISO:
+
+| # | Config | VBlank cb/s | Swap cb / frames, drained totals | Flips per VBlank | Immediate flips | Frames/s | Verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | ONE, light | 60.05 | 601 / 603, 2416 / 2416 | 1.000 | 0 / 1000 | 60.25 | PASS |
+| 1 | TWO, light | 60.03 | 301 / 303, 1216 / 1216 | 0.500 | 0 / 1000 | 30.26 | PASS |
+| 2 | IMMEDIATE, light | 71.16 (see below) | 1412 / 1412, 12582 / 12582 | 1.983 | 997 / 1000 | 141.12 | FAIL 0x001 on xemu (VBlank rate only) |
+| 3 | ONE, slow frames | 60.56 | 435 / 435, 1744 / 1744 | 0.717 | 0 / 1000 | 43.47 | PASS |
+| 4 | ONE_OR_IMMEDIATE, slow frames | 59.97 | 435 / 435, 1744 / 1744 | 0.725 | 1000 / 1000 | 43.47 | PASS |
+
+All rows: VBlank callbacks = VBlank counter increments exactly; field
+sequence 0101010101010101 over 16 consecutive VBlanks;
+`AV_OPTION_GUESS_FIELD` always 0 on xemu; fences: first 0xFFFFFF01, pending
+right after insert (both checks), block 0 ms, deferred + kick ok, readback
+00FF00, wrap 0xFFFFFF04..0x0000002F, old and never inserted fences not
+pending.
+
+Config 2 fails only the VBlank rate check, an xemu artifact: xemu paces the
+VBlank interrupt on host time while the guest clock falls behind under this
+load. Measured against the host clock over 30.8 s: 1830 VBlanks (59.4/s) and
+26208 guest `KeTickCount` ms (0.85 real time), i.e. 69/s per guest second.
+The light configurations measure 60.0/s.
+
+The cycling ISO ran the five configurations and went on into the second
+round (re-init after every interval, ONE again after ONE_OR_IMMEDIATE):
+summary rows 60.07 / 1.000 / 0, 60.00 / 0.500 / 0, 71.17 / 1.963 / 996
+(rate check only), 60.26 / 0.721 / 0, 59.97 / 0.725 / 1000 (VBlank cb/s,
+flips per VBlank, immediate per 1000), no fence failure, drained totals equal.
+Framebuffer captures showed the report of each configuration (the moving bar
+of IMMEDIATE is not torn there: xemu presents whole frames).
+
+### What xemu cannot prove (console checks)
+
+1. The field status: xemu emulates neither a field bit nor the encoder, the
+   kernel's `AV_OPTION_GUESS_FIELD` returns 0 there. On a console: the absolute
+   parity (does field 0 match the even field on a 480i TV?), behaviour in 480p
+   / 720p (-1) and 1080i, and the cost of the two kernel calls.
+2. VBlank rates and immediate flips against a real 60 / 50 Hz CRTC, PAL 50 Hz
+   (~50 callbacks/s), and the IMMEDIATE VBlank rate check (fails on xemu for
+   the reason above).
+3. Tearing of IMMEDIATE / ONE_OR_IMMEDIATE flips (`PCRTC_START` latched at
+   HSYNC); xemu presents whole frames.
+4. Fences on hardware: the back end writing the semaphore only after the ROP
+   has written the pixels (xemu flushes the surface first by construction),
+   and the CPU seeing the GPU's write in the uncached page.
+5. The `pb_reset` fix on hardware (the DMA engine starts within microseconds,
+   so the race was rarer there, not impossible).
