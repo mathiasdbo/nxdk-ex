@@ -1604,6 +1604,17 @@ static void pb_jump_to_head(void)
     }
 #endif
 
+    //The Dma engine must have started on what was pushed since the last jump before
+    //PUT goes back to the head: while GET is still at the head, PUT = head reads as an
+    //empty push buffer and all of it (a whole frame, its PB_FINISHED included) is skipped.
+    //(A fast frame loop can get here before the engine has fetched anything: seen on xemu.)
+    if (pb_Put!=pb_Head)
+    {
+        pb_kick();
+        TimeStampTicks=KeTickCount;
+        while ((((*(pb_DmaUserAddr+0x44/4))|0x80000000)==(DWORD)pb_Head)&&(KeTickCount-TimeStampTicks<=TICKSTIMEOUT)) {};
+    }
+
     //writes a jump command
     //forces GPU to jump at push buffer head address at next fetch
     *(pb_Put+0)=1+(((DWORD)pb_Head)&0x0FFFFFFF);
