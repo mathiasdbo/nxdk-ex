@@ -12,6 +12,10 @@ Batch 3 (sync): VBlank and swap callbacks, display field status, presentation
 intervals, fences, and a `pb_reset` fix. Validated on xemu with
 `samples/pbkit_sync`, see [Batch 3](#batch-3-sync).
 
+Batch 4 (quality): render to texture (swizzled and linear render targets) and
+multisampling (2x / 4x with a GPU resolve). Validated on xemu with
+`samples/pbkit_quality`, see [Batch 4](#batch-4-quality).
+
 The points a console must still confirm are listed at the end of each batch.
 
 ## API added (all additive, nothing existing changed signature)
@@ -470,3 +474,224 @@ of IMMEDIATE is not torn there: xemu presents whole frames).
    and the CPU seeing the GPU's write in the uncached page.
 5. The `pb_reset` fix on hardware (the DMA engine starts within microseconds,
    so the race was rarer there, not impossible).
+
+## Batch 4: quality
+
+Render to texture and multisampling. Validated on xemu with
+`samples/pbkit_quality`.
+
+### API added
+
+`pbkit.h`
+
+| Function | When | What |
+| --- | --- | --- |
+| `int pb_set_render_target(const pb_render_target *rt)` | after `pb_init` | draw into an application buffer until `pb_target_back_buffer`, `pb_target_extra_buffer`, the next `pb_set_render_target` (`NULL` = back buffer) or `pb_finished`. 0, or -1 for an invalid target (nothing changed). |
+| `pb_render_target` | | `addr`, `width`, `height`, `color_format` (`NV097_SET_SURFACE_FORMAT_COLOR_LE_*`), `swizzled`, `pitch` (linear), `depth_addr` (`NULL`: none), `depth_pitch` (linear). |
+| `DWORD pb_swizzle_offset(x, y, w, h, bytes_per_pixel)` | any time | byte offset of texel (x, y) in a swizzled w x h surface or texture, for CPU access. |
+| `pb_set_multisample(int)` / `pb_get_multisample()` | before `pb_init` (asserted) | `PB_MS_NONE` 0 (default), `PB_MS_2X` 1, `PB_MS_4X` 2. |
+| `DWORD *pb_multisample_buffer(void)` / `pb_multisample_pitch()` | after `pb_init` | the sample buffer (`NULL` / 0 without multisampling). |
+
+Nothing changes for an application that calls neither `pb_set_render_target`
+nor `pb_set_multisample`: same allocations, same tiles, same push buffer bytes
+(see "Default path" below).
+
+### Render targets
+
+`set_draw_buffer` became `set_draw_target(color, width, height, pitch, size,
+zeta, zeta pitch, zeta size, surface format)`; the back buffers, the extra
+buffers, the sample buffer and `pb_set_render_target` all go through it. Like
+before it re-bases DMA objects 9 and 11 (color, `PB_SETOUTER` subprogram) and
+pushes `SET_SURFACE_PITCH` (color offset 0), `SET_SURFACE_CLIP` and
+`SET_SURFACE_FORMAT`.
+
+- **Swizzled**: `NV097_SET_SURFACE_FORMAT_TYPE_SWIZZLE` with log2 width / height
+  in bits 16-23 / 24-31; width and height powers of two up to 4096; the pitch
+  fields are ignored by the hardware, pbkit writes width * Bpp. Sample it as a
+  `SZ_*` texture of the same size (normalized coordinates).
+- **Linear**: `TYPE_PITCH`, pitch and depth pitch >= width * Bpp, multiples of
+  64. Sample it as a `LU_IMAGE_*` texture (texel coordinates). The tile pitch
+  rule of batch 2 applies if the application tiles it (`pb_assign_tile`, tile
+  #4..#7 are free).
+- **Depth buffer**: optional. It uses pbkit's depth format (Z24S8 under
+  `PB_DEPTH_NONE`) and the color buffer's layout. DMA object 10 (zeta) is now
+  re-based when the depth buffer moves, not only when it appears or
+  disappears. A target without one turns the depth and stencil tests off (as
+  `PB_DEPTH_NONE` always did); the next target with one turns them back on and
+  now also re-enables depth writes (before, only `pb_init` did, which was fine
+  while the depth buffer could not come and go).
+- The surface clip is the target size; `pb_set_viewport` now clamps to the
+  current target instead of the screen. pb_init's window clip (scissor) covers
+  the screen, so a target larger than the screen widens it to 4096 and the
+  next smaller one narrows it back (only then: the default path pushes
+  nothing).
+- Checks: format known, address and depth address 64 bytes aligned, mapped 1:1
+  below 0x03FFB000 (the first byte: the buffer must be
+  `MmAllocateContiguousMemoryEx` memory), sizes, pitches. An invalid target
+  returns -1 before anything is pushed.
+- **No `pb_fill` / `pb_erase_depth_stencil_buffer` on a swizzled target**: xemu
+  asserts (`!(entry.swizzle && pg->clearing)`, `pgraph/gl/surface.c`) and
+  exits. Clear it with a quad. The sample does so for both target types.
+- Before sampling what the GPU rendered, push `NV097_WAIT_FOR_IDLE`; before the
+  CPU reads it, wait for the GPU (a fence or `pb_busy`).
+
+`pb_swizzle_offset` interleaves the bits of x and y (x in bit 0) while both
+have bits left, then appends the remaining bits of the larger dimension, the
+NV2A / XDK `XGSwizzle` order for non-square sizes.
+
+### Multisampling
+
+`pb_set_multisample(PB_MS_2X)` stores 2 samples per pixel side by side
+(`NV097_SET_SURFACE_FORMAT_ANTI_ALIASING_CENTER_CORNER_2`), `PB_MS_4X` 2x2
+(`SQUARE_OFFSET_4`). `pb_init` then allocates:
+
+- a **sample buffer**: width * 2 x height (4X: x height * 2), pitch raised to
+  the next tile pitch (640 wide: 5120 for 32 bits, 2560 for 16 bits), tile #3,
+  16 Kb granular;
+- the **depth stencil buffer at the same scaled size** (tile #1, compressed, as
+  before; an application depth buffer must have the scaled pitch and size);
+- the frame buffers (scan-out) at the screen size, unchanged.
+
+`pb_target_back_buffer` draws into the sample buffer with the scaled depth
+buffer, surface format `| (mode << 12)`. `NV097_SET_ANTI_ALIASING_CONTROL`
+(`NV20_TCL_PRIMITIVE_3D_MULTISAMPLE`, 0x1D7C) has always been pushed enabled
+with sample mask 0xFFFF by `pb_init`, so nothing changes there.
+
+All coordinates stay in screen pixels: vertices, `pb_set_viewport`, the
+surface clip, window clip, `pb_fill` and the depth clear rectangles. The GPU
+scales them for an anti-aliased surface. xemu does the same
+(`pgraph_apply_anti_aliasing_factor` on clip, scissor and clear rectangles;
+`surfaceSize` = surface size / AA factor in the vertex shader), which is why
+games' 1x coordinates render correctly there. `pb_back_buffer_width/height/pitch`
+and `pb_back_buffer()` keep describing the scan-out buffer.
+
+**Resolve** (`pb_finished`, before the `PB_FINISHED` subprogram): pbkit pushes
+`NV097_WAIT_FOR_IDLE`, targets the rotating back buffer (screen size, no
+anti-aliasing, no depth buffer), and draws a screen sized quad textured with
+the sample buffer as a `LU_IMAGE_*` texture of the scaled size (format
+matching the color format), bilinear, clamped. Pixel center x + 0.5 maps to
+texel coordinate 2x + 1 (and 2y + 1 for 4X), the corner shared by the pixel's
+samples, where bilinear filtering weighs them equally: a box filter. Vertex
+program `MOV oT0, v9; MOV oPos, v0` in transform program slots 134-135,
+inline vertices (`SET_VERTEX_DATA4F_M` attributes 9 then 0), final combiner
+output = texture 0, no blending / alpha test / culling / logic op, color mask
+all. Then the flip is queued exactly as before, so every presentation interval
+of batch 3 behaves the same (measured below), and `pb_target_back_buffer`
+points the GPU at the sample buffer again.
+
+The resolve changes GPU state the application may rely on. Afterwards: texture
+stage 0 is disabled (pbkit default), stages 1-3 disabled, culling on (pbkit
+default), transform program start 0, execution mode program, depth / stencil
+tests and depth writes on; changed and not restored: shader stage program,
+combiners, blending, alpha test, logic op, color mask, polygon modes, the
+inline values of vertex attributes 0 and 9, transform program slots 134-135.
+Set your state again after `pb_finished` (the sample re-pushes its shaders
+and vertex arrays every frame).
+
+Left out (optional in the spec):
+
+- Quincunx, gaussian and the 2x horizontal-linear filters, and
+  `SetScreenSpaceOffset`. The box filter is the only one. Quincunx / gaussian
+  would be extra taps (texture stages 1-3 at offsets, combiner weights) or the
+  texture unit's convolution kernel (`NV097_SET_TEXTURE_FILTER` bits 13-15,
+  MAG = 4), unverified on xemu and hardware.
+- Supersampling (CENTER_1 surface at a scaled size with a scaled viewport, the
+  XDK `*_SUPERSAMPLE_*` modes).
+- With multisampling, `pb_target_extra_buffer` draws at screen size without
+  anti-aliasing and without a depth buffer (the depth buffer is scaled), and
+  `pb_show_depth_screen` shows the scaled depth buffer with the scan-out pitch
+  (sheared).
+
+### Default path
+
+`set_draw_target` for the back buffer pushes the same blocks as
+`set_draw_buffer` did: color DMA 9 and 11, the zeta block only on the first
+call after `pb_init` (`pb_DepthStencilLast` -2), with the same methods
+(`STENCIL_ENABLE` is now `flag && Z24S8`, identical when there is a depth
+buffer and for `PB_DEPTH_NONE`; the added `DEPTH_WRITE_ENABLE 1` is only
+pushed on a none -> present transition, which needs a render target), then
+pitch / clip / CONTROL0 / format. No window clip block (no larger target), no
+resolve, no allocation (`pb_MSMode` = `PB_MS_NONE`, scale 1: the depth pitch
+and size expressions multiply by 1). `pb_set_viewport` clamps to the target
+size, equal to the screen size. Re-run on xemu with this batch's library:
+`samples/pbkit_memory` cycling, all six configurations PASS (fails 0), and
+`samples/pbkit_sync` cycling, the batch 3 summary rows again (60.05 / 1.000 /
+0, 60.04 / 0.500 / 0, 72.98 / 1.901 / 994 with only the known xemu VBlank
+rate failure, 60.56 / 0.717 / 0, 59.97 / 0.725 / 1000; no fence failure).
+
+### samples/pbkit_quality
+
+Five configurations cycled with `pb_kill` / `XVideoSetMode` / `pb_init`
+(`make CONFIG=n` for one, delete `main.obj`, `bin/default.xbe` and the ISO
+first), 640x480 32 bpp, A8R8G8B8, Z24S8, triple buffering.
+
+- **0 RTT swizzled**, **1 RTT linear + depth**: a 128x128 A8R8G8B8 target
+  (swizzled / pitch 512) is cleared with a far quad, gets four colored
+  quadrants (z 0.1) and then a magenta square over the center (z 0.9). The CPU
+  reads five texels (`pb_swizzle_offset` for config 0): the quadrants, and at
+  (60, 60) magenta without a depth buffer, the red quadrant with one (the
+  target's own depth buffer hides the square). The target is then sampled
+  (`SZ_A8R8G8B8` 2^7 x 2^7 / `LU_IMAGE_A8R8G8B8`, nearest) on a 256x256 quad
+  in the back buffer, whose pixels at the same texels are read back.
+  Also: `pb_swizzle_offset` spot checks (square and 8x2 / 2x8), an invalid
+  target (swizzled, width 100) returns -1.
+- **2 MS 2x**, **3 MS 4x**, **4 MS off**: a white triangle on black,
+  (300,200) (600.1,200) (300,500.1); its hypotenuse x + y = 800.1 crosses
+  pixels (x, 799 - x) 0.1 pixel past their center. Without multisampling
+  those 240 pixels (x 330..569) are pure white; with 2x / 4x they must be
+  blended (green in 8..247 for >= 90 % of them). Also: pitches (frame buffer
+  2560, depth 2560 * scale, sample buffer 5120), a pixel fully inside / outside
+  is pure, the raw samples of edge pixel (450, 349) in the sample buffer, and
+  flips per VBlank over 2 s for each presentation interval with the resolve
+  (ONE 0.9-1.01, TWO 0.45-0.52, IMMEDIATE >= 0.9, ONE_OR_IMMEDIATE 0.9-1.01,
+  swap callback count / VBlank counter).
+
+Results: `pb_print`, `DbgPrint` and a `PBQUALRS` tagged block in `.data`
+(0x35000 in this build) with one summary row per configuration.
+
+xemu v0.8.139, 2026-10-26, one `CONFIG=n` ISO per row, then the cycling ISO:
+
+| # | Config | Readback | Verdict |
+| --- | --- | --- | --- |
+| 0 | RTT swizzled | texels FF0000 00FF00 0000FF FFFF00, (60,60) FF00FF; quad pixels identical; swizzle checks ok, reject -1 | PASS |
+| 1 | RTT linear + depth | texels FF0000 00FF00 0000FF FFFF00, (60,60) FF0000 (square hidden); quad identical | PASS |
+| 2 | MS 2x | pitches 2560 / 5120 / 5120; edge 240 / 240 blended, all 0x808080; samples FFFFFF 000000; flips/VBlank 1.000 0.500 17.45 1.000 | PASS |
+| 3 | MS 4x | pitches 2560 / 5120 / 5120; edge 240 / 240 blended, all 0xBFBFBF; samples FFFFFF FFFFFF FFFFFF 000000; flips/VBlank 1.000 0.500 16.75 1.008 | PASS |
+| 4 | MS off | pitches 2560 / 2560, no sample buffer; edge 240 / 240 pure FFFFFF; flips/VBlank 1.000 0.500 34.94 1.000 | PASS |
+
+The cycling ISO passed all five and config 0 / 1 again in the second round
+(re-init with and without the sample buffer). Framebuffer captures show the
+sampled quadrants (the magenta square only in config 0) and the triangle with
+a grey (2x) / light grey (4x) / hard (off) edge.
+
+How xemu resolves: it renders an anti-aliased surface at the scaled size
+(supersampling: the pixel shader runs per sample) and stores it in guest
+memory at that size, two (2x1) or four (2x2) texels per pixel, the layout the
+resolve reads. The CPU reads the raw samples there (config 2 / 3). Its sample
+positions are the centers of the scaled grid ((x + 0.25, y + 0.5) and
+(x + 0.75, y + 0.5) for 2x; the four quarter centers for 4x), hence exactly
+1/2 and 3/4 coverage on this edge. IMMEDIATE flips per VBlank are high
+because these frames are tiny and xemu presents whole frames; the resolve
+halves that rate (34.9 -> 17.4).
+
+### What xemu cannot prove (console checks)
+
+1. The hardware sample positions of CENTER_CORNER_2 and SQUARE_OFFSET_4 (the
+   name suggests center + corner for 2x) and multisampling proper (one shade
+   per pixel, coverage per sample) instead of xemu's supersampling: the
+   sample checks only require a blend, not 1/2 or 3/4.
+2. That the hardware scales surface clip, window clip and clear rectangles by
+   the AA factor (xemu does; if not, clears and clips cover a quarter / half
+   of the sample buffer) and that vertex positions are 1x.
+3. The resolve's texel alignment: hardware pixel centers or the rasterizer's
+   1/16 subpixel snapping may shift the box filter off the sample corner
+   (unequal weights, not a wrong image).
+4. Whether `NV097_WAIT_FOR_IDLE` is enough before texturing from a surface the
+   GPU just rendered (texture cache), for the resolve and for render targets.
+   xemu synchronizes surfaces and textures by construction.
+5. `NV097_CLEAR_SURFACE` on a swizzled surface (asserts in xemu; the XDK does
+   not allow `Clear` on swizzled targets either, as far as known).
+6. A swizzled target with a depth buffer (the zeta surface swizzled the same
+   way): not exercised by the sample.
+7. Tile #3 for the sample buffer (tiled color surface at pitch 5120) and the
+   scaled compressed depth buffer: xemu ignores tiling.
