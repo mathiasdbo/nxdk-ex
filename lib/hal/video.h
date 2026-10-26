@@ -113,6 +113,18 @@ DWORD XVideoGetAvMode(void);
 // VIDEO_LETTERBOX, VIDEO_MODE_480P / 720P / 1080I, VIDEO_60Hz (PAL 60)
 DWORD XVideoGetVideoFlags(void);
 
+/*
+Keeps the picture on screen across XLaunchXBE: copies the frame buffer the
+CRTC is showing into persisted contiguous memory, points the CRTC at the copy
+and hands it to the kernel (AvSetSavedDataAddress). The next title's first
+XVideoSetMode / XVideoSetModeEx frees it; before that, AvGetSavedDataAddress()
+returns it (the kernel may move it at the reboot: use that address, and its
+second dword is overwritten by the kernel). With pbkit, call it once the last
+frame is on screen (no frame queued), then pb_kill() and XLaunchXBE.
+Returns FALSE when no mode is set or the allocation fails.
+*/
+BOOL XVideoPersistDisplay(void);
+
 void XVideoSetSoftenFilter(BOOL enable);
 void XVideoSetVideoEnable(BOOL enable);
 void XVideoSetGammaRamp(unsigned int offset, const GAMMA_RAMP_ENTRY *entries, unsigned int count);

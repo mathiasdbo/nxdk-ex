@@ -587,6 +587,63 @@ DWORD XVideoGetAvMode(void)
 	return dwCurrentAvMode;
 }
 
+static unsigned char ReadCRTC(unsigned char index)
+{
+	unsigned char old = VIDEOREG8(NV_PRMCIO_CRX__COLOR);
+	unsigned char value;
+
+	VIDEOREG8(NV_PRMCIO_CRX__COLOR) = index;
+	value = VIDEOREG8(NV_PRMCIO_CR__COLOR);
+	VIDEOREG8(NV_PRMCIO_CRX__COLOR) = old;
+	return value;
+}
+
+BOOL XVideoPersistDisplay(void)
+{
+	DWORD start, pitch, size, minPitch;
+	PVOID previous, copy, src;
+
+	if (vmCurrent.width == 0)
+		return FALSE;
+
+	/* What the CRTC shows: start address, and the pitch in 8 byte units split
+	   over CR13 / CR19 / CR25 the way AvSetDisplayMode programs it */
+	start = VIDEOREG(PCRTC_START) & 0x03FFFFFF;
+	pitch = (ReadCRTC(NV_CIO_CR_OFFSET_INDEX) |
+	         ((ReadCRTC(NV_CIO_CRE_RPC0_INDEX) & 0xE0) << 3) |
+	         ((ReadCRTC(NV_CIO_CRE_LSR_INDEX) & 0x20) << 6)) * 8;
+	minPitch = vmCurrent.width * ((vmCurrent.bpp + 7) / 8);
+	if (pitch < minPitch)
+		pitch = minPitch;
+	size = (pitch * vmCurrent.height + 0xFFF) & ~0xFFF;
+
+	/* a display this title persisted before */
+	previous = AvGetSavedDataAddress();
+	if (previous != NULL) {
+		AvSetSavedDataAddress(NULL);
+		MmPersistContiguousMemory(previous, MmQueryAllocationSize(previous), FALSE);
+		MmFreeContiguousMemory(previous);
+	}
+
+	copy = MmAllocateContiguousMemoryEx(size, 0x00000000, 0x03FFAFFF, 0x1000,
+	                                    PAGE_READWRITE | PAGE_WRITECOMBINE);
+	if (copy == NULL)
+		return FALSE;
+	src = MmMapIoSpace(start, size, PAGE_READWRITE | PAGE_NOCACHE);
+	if (src == NULL) {
+		MmFreeContiguousMemory(copy);
+		return FALSE;
+	}
+	memcpy(copy, src, size);
+	MmUnmapIoSpace(src, size);
+	asm __volatile__("sfence");
+
+	VIDEOREG(PCRTC_START) = (unsigned int)MmGetPhysicalAddress(copy) & 0x03FFFFFF;
+	MmPersistContiguousMemory(copy, size, TRUE);
+	AvSetSavedDataAddress(copy);
+	return TRUE;
+}
+
 DWORD XVideoGetVideoFlags(void)
 {
 	ULONG type = 0, value = 0, length = 0;
