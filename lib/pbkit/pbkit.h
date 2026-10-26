@@ -58,6 +58,21 @@ DWORD pb_wait_until_tiles_not_busy(void);
 
 void    pb_extra_buffers(int n);//requests additional back buffers (default is 0) (call it before pb_init)
 void    pb_back_buffers(int n); //2 (default): triple buffering; 1: double buffering, one frame buffer less (call it before pb_init)
+//Application supplied buffers (call before pb_init; pbkit uses them instead of allocating and
+//never frees them; pass NULL to go back to pbkit's own buffers). Allocate them with
+//  MmAllocateContiguousMemoryEx(size, 0, 0x03FFB000, 0x4000, PAGE_READWRITE | PAGE_WRITECOMBINE)
+//(16 Kb aligned, below 0x03FFB000, write combined: the CPU side mapping is the app's job).
+//pb_init checks 64 bytes alignment and physical contiguity and fails with -12 (frame buffers)
+//or -13 (depth stencil buffer).
+//- frame buffers: count must be pb_back_buffers()+1 (3 by default), pitch the scan-out pitch
+//  pbkit uses itself, width*Bpp rounded to 64 (0 = that pitch); the CRTC is not reprogrammed.
+//  Tiled (tile #0) when the pitch is a tile pitch and the buffers follow each other in one
+//  16 Kb aligned block whose size is a 16 Kb multiple (e.g. one 3*640*480*4 allocation).
+//- depth stencil buffer: any pitch >= width*Bpp (2 or 4 bytes) that is a 64 bytes multiple.
+//  Tiled and compressed (tile #1) when the pitch is a tile pitch (1536 for 640 wide Z16, 2560
+//  for Z24S8), the address 16 Kb aligned and pitch*height a 16 Kb multiple.
+void    pb_set_frame_buffers(DWORD *addrs[], int count, DWORD pitch);
+void    pb_set_depth_stencil_buffer(DWORD *addr, DWORD pitch);
 void    pb_release_debug_screen(void); //after pb_init: frees XVideoSetMode's own frame buffer (the debug screen); pbkit then never shows it and prints its reports with DbgPrint (nxdk's debugPrint must not be used after this either)
 void    pb_wait_for_flip(void); //double buffering: waits until the frames pb_finished queued are on screen (call it before drawing the next frame; no-op with triple buffering)
 void    pb_size(DWORD size);    //sets push buffer size (default is 512Kb) (call it before pb_init)
@@ -74,6 +89,11 @@ DWORD   pb_back_buffer_height(void);
 DWORD   pb_back_buffer_pitch(void);
 DWORD   *pb_depth_stencil_buffer(void); //returns the (shared) depth stencil buffer address (CPU side)
 DWORD   pb_depth_stencil_pitch(void);   //bytes between two lines of the depth stencil buffer
+//Tile pitch rule: a tiled buffer's surface pitch is its tile pitch. The depth stencil buffer
+//uses the next tile pitch (640 wide Z16: 1536). The frame buffers keep width*Bpp (scan-out
+//pitch) and are tiled only when that is a tile pitch (640 wide 32 bits: yes, 16 bits: no).
+bool    pb_frame_buffers_tiled(void);   //after pb_init: frame buffers are in tile #0
+bool    pb_depth_stencil_tiled(void);   //after pb_init: depth stencil buffer is in tile #1 (compressed)
 
 //GPU tile regions (NV_PFB_TILE 0..7): pb_init uses #0 (frame buffers), #1 (depth stencil)
 //and #2 (extra buffers). An application render target can be assigned to a free one;
