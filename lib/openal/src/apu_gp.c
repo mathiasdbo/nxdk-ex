@@ -559,6 +559,7 @@ typedef struct {
 } gp_slot_t;
 
 static gp_slot_t s_slot[APU_GP_SLOTS];
+static uint32_t s_slots_gen;        /* apu_gp_slots_generation() */
 static uint32_t s_flags;            /* X:FLAGS as last written */
 static uint32_t s_reloc_buf[APU_GP_KERNEL_MAX_WORDS];
 static uint32_t s_p_code[GP_P_END];   /* the kernels' P words as loaded, in cached memory (apu_gp_slot_holds) */
@@ -710,6 +711,11 @@ bool apu_gp_kernels_fit(const apu_gp_kernel_t *const set[APU_GP_SLOTS]) {
 static void slots_reset(void) {
     memset(s_slot, 0, sizeof(s_slot));
     s_flags = 0;
+    s_slots_gen++;
+}
+
+uint32_t apu_gp_slots_generation(void) {
+    return s_slots_gen;
 }
 
 static void flags_write(uintptr_t bar0) {
@@ -729,6 +735,7 @@ void apu_gp_slot_stop(uintptr_t bar0, uint32_t slot) {
     (void)mailbox_idle(bar0);
     s_flags &= ~slot_flag(slot);
     s_slot[slot].kind = SLOT_OFF;
+    s_slots_gen++;
     s_flags &= ~FLAG_LOWPASS;
     for (i = 0; i < APU_GP_SLOTS; i++) {
         if (s_slot[i].kind == SLOT_REVERB) {
@@ -760,6 +767,7 @@ static void idle_calibrate(uintptr_t bar0) {
 static int load_code(uintptr_t bar0, uint32_t slot, const gp_slot_t *s, const uint32_t *code) {
     uint32_t i, tramp = GP_LOOP_TRAMP0 + slot;
     bool ok = true;
+    s_slots_gen++;   /* P words change; a restart below empties the other slots too */
     for (i = 0; i < s->words; i++) {
         s_scratch[s->p + i] = s_p_code[s->p + i] = code[i];
         reg_wr(bar0, PREG(s->p + i), code[i]);
@@ -840,6 +848,7 @@ static int slot_load(uintptr_t bar0, uint32_t slot, const apu_gp_kernel_t *k, co
     }
     memset((uint8_t *)s_scratch + s->scr, 0, k->scratch_bytes);
     s->kind = kind;
+    s_slots_gen++;
     return 0;
 }
 

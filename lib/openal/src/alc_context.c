@@ -1294,6 +1294,7 @@ AL_API void AL_APIENTRY alXboxGetStats(ALXBOXSTATS *stats) {
     s.output_queue_cycles = a.queue_cycles;
     s.output_scrub_cycles = a.thread_hook_cycles;
     al_source_tick_cycles(&s.update_stream_cycles, &s.update_voice_cycles);
+    al_source_tick_cycles_more(&s.update_timed_cycles, &s.update_gp_check_cycles, &s.update_efx_cycles);
     s.update_service_cycles = apu_vp_service_cycles();
     s.output_zero_copy = a.zero_copy ? AL_TRUE : AL_FALSE;
     s.output_slips = a.slips;
