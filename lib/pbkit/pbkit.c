@@ -94,6 +94,10 @@ static  int         pb_running=0;
 
 static  DWORD           pb_vbl_counter=0;
 
+//Batch 3 (sync): VBlank/swap callbacks
+static  void            (*volatile pb_VBlankCallback)(DWORD vbl_count)=NULL;
+static  void            (*volatile pb_SwapCallback)(DWORD frame, DWORD vbl_count)=NULL;
+
 #ifdef DBG
 static int          pb_trace_mode=1;
 #else
@@ -302,12 +306,15 @@ static NTAPI VOID pb_shutdown_notification_routine (PHAL_SHUTDOWN_REGISTRATION S
 
 
 //private functions
+
 static void pb_vbl_handler(void)
 {
     BYTE        old_color_addr; //important index to preserve if we are called from Dpc or Isr
 
-    int     flag;
     int     next;
+    int     shown;
+    void    (*vbl_cb)(DWORD);
+    void    (*swap_cb)(DWORD,DWORD);
 
     old_color_addr=VIDEOREG8(NV_PRMCIO_CRX__COLOR);
 
@@ -315,6 +322,7 @@ static void pb_vbl_handler(void)
 
     //Index of next back buffer to show up (0-4)
     next=pb_BackBufferNxtVBL;
+    shown=0;
 
     //Is the next back buffer to show up is ready?
     if (pb_BackBufferbReady[next]==1)
@@ -329,6 +337,7 @@ static void pb_vbl_handler(void)
         //rotate next back buffer
         next=(next+1)%pb_FrameBuffersCount;
         pb_BackBufferNxtVBL=next;
+        shown=1;
     }
 
     do
@@ -338,7 +347,11 @@ static void pb_vbl_handler(void)
 
     NtPulseEvent(pb_VBlankEvent, NULL);
 
-//  if (UserCallback) UserCallback(); //user callback must be brief and preserve fpu state
+    //user callbacks: must be brief, no pbkit calls, save/restore the FPU state if they use it
+    vbl_cb=pb_VBlankCallback;
+    if (vbl_cb) vbl_cb(pb_vbl_counter);
+    swap_cb=pb_SwapCallback;
+    if (shown && swap_cb) swap_cb(pb_FramesShown,pb_vbl_counter);
 
     VIDEOREG8(NV_PRMCIO_CRX__COLOR)=old_color_addr; //restore color index
 }
@@ -1897,6 +1910,66 @@ DWORD pb_get_vbl_counter(void)
     return pb_vbl_counter; //allows caller to know if a frame has been missed
 }
 
+void pb_set_vblank_callback(void (*cb)(DWORD vbl_count))
+{
+    pb_VBlankCallback=cb;
+}
+
+void pb_set_swap_callback(void (*cb)(DWORD frame, DWORD vbl_count))
+{
+    pb_SwapCallback=cb;
+}
+
+/*
+ * Display field status. The NV2A CRTC has no field register xemu emulates
+ * (NV_PCRTC_RASTER is a counter there) and in the SDTV modes the TV encoder,
+ * not the CRTC, interlaces: the NV2A scans out a whole 480 line frame per
+ * VBlank and each VBlank is one TV field. So:
+ * - interlaced or not comes from the AV mode the kernel set
+ *   (AvSendTVEncoderOption AV_OPTION_QUERY_MODE): output mode bits 31:30
+ *   0 (480 line SDTV) and 1 (525 line SDTV) are interlaced, 2 (HDTV) only
+ *   with TV table index 3 (1080i), 3 (VGA) never;
+ * - the field alternates with the VBlank counter, its absolute parity is
+ *   anchored once per pb_init on the kernel's AV_OPTION_GUESS_FIELD (non-zero
+ *   = odd field).
+ * The two kernel calls are made on the first call after pb_init (call it at
+ * PASSIVE_LEVEL once, e.g. after pb_init, not from a callback first).
+ */
+#define PB_AV_OPTION_QUERY_MODE     13
+#define PB_AV_OPTION_GUESS_FIELD    15
+static int pb_FieldPhase=-2;    //-2: not queried yet, -1: progressive/unknown, 0/1: field at even VBlank counts
+
+void pb_get_display_field_status(DWORD *vbl_count, int *field)
+{
+    DWORD   vbl;
+    ULONG   mode,guess,out;
+    int     tries;
+
+    if (pb_FieldPhase==-2)
+    {
+        mode=0;
+        AvSendTVEncoderOption((PVOID)VIDEO_BASE,PB_AV_OPTION_QUERY_MODE,0,&mode);
+        out=mode&0xC0000000;
+        if ((mode==0)||(out==0xC0000000)||((out==0x80000000)&&((mode&0xFF)!=3)))
+            pb_FieldPhase=-1;
+        else
+        {
+            for(tries=0;tries<4;tries++)
+            {
+                vbl=pb_vbl_counter;
+                guess=0;
+                AvSendTVEncoderOption((PVOID)VIDEO_BASE,PB_AV_OPTION_GUESS_FIELD,0,&guess);
+                if (vbl==pb_vbl_counter) break; //no VBlank in between
+            }
+            pb_FieldPhase=((guess!=0)?1:0)^(int)(vbl&1);
+        }
+    }
+    vbl=pb_vbl_counter;
+    if (vbl_count) *vbl_count=vbl;
+    if (field) *field=(pb_FieldPhase<0)?-1:(int)((vbl&1)^(DWORD)pb_FieldPhase);
+}
+
+
 
 void pb_release_debug_screen(void)
 {
@@ -2687,6 +2760,7 @@ int pb_init(void)
     pb_DmaBuffer7 = MmAllocateContiguousMemoryEx(32, 0, MAXRAM, 0, PAGE_READWRITE);
     if ((pb_DmaBuffer8==NULL)||(pb_DmaBuffer2==NULL)||(pb_DmaBuffer7==NULL)) return -2;
     memset(pb_DmaBuffer8,0,32);
+    pb_FieldPhase=-2;   //video mode may have changed: query it again
     memset(pb_DmaBuffer2,0,32);
     memset(pb_DmaBuffer7,0,32);
 

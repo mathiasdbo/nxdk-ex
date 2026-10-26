@@ -40,6 +40,19 @@ void    pb_show_debug_screen(void); //shows debug screen (default openxdk+SDL bu
 void    pb_show_depth_screen(void); //shows depth screen (depth stencil buffer)
 
 DWORD   pb_get_vbl_counter(void);
+
+//VBlank and swap callbacks (NULL removes them). Both run in pbkit's DPC (DISPATCH_LEVEL), right
+//after the VBlank handling (swap: after a frame was put on screen, also from the DPC for
+//PB_PRESENT_INTERVAL_IMMEDIATE flips). They must be brief, must not call pbkit and must save and
+//restore the FPU state themselves if they use floating point (KeSaveFloatingPointState).
+//vbl_count is pb_get_vbl_counter() at that VBlank, frame the number of frames shown since pb_init.
+void    pb_set_vblank_callback(void (*cb)(DWORD vbl_count));
+void    pb_set_swap_callback(void (*cb)(DWORD frame, DWORD vbl_count));
+//Display field status: *vbl_count = VBlank counter, *field = 0 (even) or 1 (odd) field being
+//scanned out in an interlaced mode, -1 when progressive or unknown. Either pointer may be NULL.
+void    pb_get_display_field_status(DWORD *vbl_count, int *field);
+
+
 DWORD   pb_wait_for_vbl(void);  //waits for VBL, returns VBL counter value as bonus info
                 //you can avoid calling it and try to draw a lot in advance
                 //use it if you need strong synchronization with controls
