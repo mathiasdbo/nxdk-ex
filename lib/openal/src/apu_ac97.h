@@ -47,6 +47,12 @@ extern "C" {
 #define APU_AC97_PRIME        4u     /* copy mode: silent buffers queued at start, the GP-to-codec lead (~43 ms) */
 #define APU_AC97_AHEAD        8u     /* copy mode: most buffers queued ahead of the one playing (~85 ms) */
 #define APU_AC97_PUMP_MS      4u     /* pump thread period */
+/* The pump thread's stack. CreateThread's 0 would give it the XBE's main
+ * stack size (1 MiB with Xash3D's link): a pass and the thread hook need a
+ * few KiB. Raise it for an output callback that needs more. */
+#ifndef APU_AC97_PUMP_STACK
+#define APU_AC97_PUMP_STACK   (128u * 1024u)
+#endif
 #define APU_AC97_HOLD_WINDOW  96u    /* samples: a held voice is released half a pass (2 ms) before its frame at most */
 #define APU_AC97_ZC_PIECE_BYTES 512u /* zero-copy: one buffer-list entry, 128 frames (2.67 ms) */
 

@@ -131,6 +131,8 @@ ALuint al_source_id_end(void);
 /** Cycles the voice tick spent bringing streams up to date and in the voice
  * manager (with the APU service), since the start (AL_XBOX_stats) */
 void al_source_tick_cycles(uint64_t *stream, uint64_t *voices);
+/* of the stream part, the timed operations; after the voices, the GP check and the EFX service */
+void al_source_tick_cycles_more(uint64_t *timed, uint64_t *gp_check, uint64_t *efx);
 
 /**
  * Override the APU base MMIO address used by the source subsystem (host testing support).
