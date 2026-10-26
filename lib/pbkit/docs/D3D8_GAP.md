@@ -94,27 +94,32 @@ all 8 tiles. Tiles 0, 1 and 2 are pbkit's.
 
 Cycles through 7 configurations with `pb_kill` / `XVideoSetMode` / `pb_init`
 (re-init survives on xemu; `make CONFIG=n` builds a single configuration
-build instead). Each one clears, draws two overlapping triangles (A red:
+that holds its frame forever; `make clean` first when changing CONFIG, the
+object does not depend on CFLAGS).
 z = 0.9, w = 0.3; B blue: z = 0.1, w = 0.7, in depth units, winner drawn
 first, loser last), `pb_finished`, then reads color and depth back with the
 CPU at 4 pixels (clear, overlap, A only, B only). Results go to `pb_print`,
 `DbgPrint` and a `PBFMTRES` tagged block in `.data` (0x32000 in this build).
 
-xemu run (`G:\Games\Xemu\xemu.exe -s -dvd_path <iso>`, `xemu_debug.py mem /
-screenshot`, note that every GDB connection halts the VM until `mon cont`):
+xemu run (`xemu.exe -s -dvd_path <iso>`, results read over the GDB stub).
+Every GDB connection halts the VM until it is resumed, which slows the cycle
+down a lot, and a framebuffer read that lands in the middle of a mode switch
+can take xemu down: poll rarely, or capture the single configuration builds.
 
-| # | Config | Screenshot | Color readback (clear / overlap / A / B) | Depth readback | Verdict |
-| --- | --- | --- | --- | --- | --- |
-| 0 | Z24S8 + A8R8G8B8, Z-buffer | run4_cfg0_z24s8_argb_z.png | 404040 / 0000FF / FF0000 / 0000FF | FFFFFF / 199999 / E66665 / 199999 (exp 0.1 and 0.9 of 0xFFFFFF) | PASS |
-| 1 | Z16 + R5G6B5, Z-buffer | run4_cfg1_z16_r5g6b5_z.png | 4208 / 001F / F800 / 001F | FFFF / 1999 / E665 / 1999 | PASS |
-| 2 | Z16 float + X1R5G5B5, Z-buffer | run4_cfg2_z16f_x1r5g5b5_z.png | 2108 / 001F / 7C00 / 001F | 3C00 / 2E66 / 3B33 / 2E66 (xemu writes IEEE half of z/511.9375) | PASS (ordering) |
-| 3 | Z24S8 float + A8R8G8B8, Z-buffer | run4_cfg3_z24s8f_argb_z.png | 404040 / 0000FF / FF0000 / 0000FF | FFFFA1 / 199999 / E66666 / 199999 (xemu emulates F24S8 as fixed Z24S8) | PASS (ordering) |
-| 4 | Z24S8 + A8R8G8B8, W-buffer (pbkit default CONTROL0) | run4_cfg4_z24s8_argb_w.png | 404040 / FF0000 / FF0000 / 0000FF | FFFFFF / 4CCCCC / 4CCCCC / B33332 (= w 0.3 / 0.7) | PASS |
-| 5 | Z24S8 float + A8R8G8B8, W-buffer | run4_cfg5_z24s8f_argb_w.png | 404040 / 0000FF / FF0000 / 0000FF | FFFFA1 / 000000 / 000000 / 000000 | FAIL on xemu, console only |
-| 6 | Z16 float + R5G6B5, W-buffer | run5_cfg6_z16f_r5g6b5_w_single.png (`make CONFIG=6` build) | 4208 / F800 / F800 / 001F | 3C00 / 34CC / 34CC / 3999 (xemu: half of w/511.9375) | PASS (ordering) |
+| # | Config | Color readback (clear / overlap / A / B) | Depth readback | Verdict |
+| --- | --- | --- | --- | --- |
+| 0 | Z24S8 + A8R8G8B8, Z-buffer | 404040 / 0000FF / FF0000 / 0000FF | FFFFFF / 199999 / E66665 / 199999 (exp 0.1 and 0.9 of 0xFFFFFF) | PASS |
+| 1 | Z16 + R5G6B5, Z-buffer | 4208 / 001F / F800 / 001F | FFFF / 1999 / E665 / 1999 | PASS |
+| 2 | Z16 float + X1R5G5B5, Z-buffer | 2108 / 001F / 7C00 / 001F | 3C00 / 2E66 / 3B33 / 2E66 (xemu writes IEEE half of z/511.9375) | PASS (ordering) |
+| 3 | Z24S8 float + A8R8G8B8, Z-buffer | 404040 / 0000FF / FF0000 / 0000FF | FFFFA1 / 199999 / E66666 / 199999 (xemu emulates F24S8 as fixed Z24S8) | PASS (ordering) |
+| 4 | Z24S8 + A8R8G8B8, W-buffer (pbkit default CONTROL0) | 404040 / FF0000 / FF0000 / 0000FF | FFFFFF / 4CCCCC / 4CCCCC / B33332 (= w 0.3 / 0.7) | PASS |
+| 5 | Z24S8 float + A8R8G8B8, W-buffer | 404040 / 0000FF / FF0000 / 0000FF | FFFFA1 / 000000 / 000000 / 000000 | FAIL on xemu, console only |
+| 6 | Z16 float + R5G6B5, W-buffer (`make CONFIG=6` build) | 4208 / F800 / F800 / 001F | 3C00 / 34CC / 34CC / 3999 (xemu: half of w/511.9375) | PASS (ordering) |
 
-Screenshots: `C:\Users\mathi\AppData\Local\Temp\claude\G--Proyectos-xndk-ex\2304bfd3-b547-490f-b2eb-b4b1ae116686\scratchpad\pbkit\`.
-The 15 bpp screenshot is decoded by the tool as R5G6B5, hence its colour cast.
+Framebuffer captures of every configuration (xemu v0.8.139, 2026-10-26) matched
+the readbacks; the 15 bpp one has to be decoded as X1R5G5B5 (the capture tool
+assumes R5G6B5 for 16 bits). Run twice, once on the change set and once after
+merging master (double buffering, deferred kicks): same values.
 
 Config 5: xemu keeps F24S8 in a fixed point `GL_DEPTH24_STENCIL8` normalized by
 1E30 (`pgraph/gl/constants.h` FIXME), and its W path squares w for the slope
