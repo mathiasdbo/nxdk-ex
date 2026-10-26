@@ -1,0 +1,23 @@
+struct vIn {
+	float4 color    : DIFFUSE;
+	float4 tex      : TEXCOORD0;
+	float4 position : POSITION;
+};
+
+struct vOut {
+	float4 col  : COLOR;
+	float4 tex0 : TEXCOORD0;
+	float4 pos  : POSITION;
+};
+
+/* Pass-through: screen space positions (x, y in pixels, z, w), color and
+ * texture coordinate 0 as given by the application. */
+vOut main(vIn I)
+{
+	vOut result;
+
+	result.col = I.color;
+	result.tex0 = I.tex;
+	result.pos = I.position;
+	return result;
+}
