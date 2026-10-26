@@ -1,0 +1,10 @@
+struct vOut {
+	float4 color : COLOR;
+	float4 tex0  : TEXCOORD0;
+};
+
+/* Texture stage 0 only (the render target sampled as a texture) */
+float4 main(vOut I, uniform sampler2D tex) : COLOR
+{
+	return tex2D(tex, I.tex0.xy);
+}
