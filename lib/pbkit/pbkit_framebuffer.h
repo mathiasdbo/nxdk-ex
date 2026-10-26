@@ -21,6 +21,28 @@ extern "C" {
 // Sets the framebuffer's color surface format (call it before pb_init).
 void pb_set_color_format (unsigned int fmt, bool swizzled);
 
+// Sets the depth stencil surface format, NV097_SET_SURFACE_FORMAT_ZETA_Z16 or
+// NV097_SET_SURFACE_FORMAT_ZETA_Z24S8 (default). Call it before pb_init, the
+// buffer is allocated there (Z16: 2 bytes/pixel, no stencil plane).
+void pb_set_depth_format (unsigned int fmt);
+unsigned int pb_get_depth_format (void);
+
+// Floating point depth values (NV097_SET_CONTROL0_Z_FORMAT), default off. May
+// be called at any time; pb_init pushes it and a later call re-pushes CONTROL0
+// and the viewport z range. See pb_depth_scale for the z range per format.
+void pb_set_depth_float (bool enable);
+bool pb_get_depth_float (void);
+
+// W-buffering (NV097_SET_CONTROL0_Z_PERSPECTIVE_ENABLE): the depth written and
+// tested is the interpolated vertex w instead of z. pbkit has always enabled
+// it, so the default is on; pass false for a plain Z-buffer. Any time.
+void pb_set_w_buffer (bool enable);
+bool pb_get_w_buffer (void);
+
+// The depth value 1.0f maps to in pb_set_viewport: 0xFFFFFF (Z24S8), 0xFFFF
+// (Z16), 1.0E30 (Z24S8 float), 511.9375 (Z16 float). Valid after pb_init.
+float pb_depth_scale (void);
+
 #if defined(__cplusplus)
 }
 #endif
