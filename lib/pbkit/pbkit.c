@@ -31,6 +31,29 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
+
+/*
+ * pb_release_debug_screen(): the scan-out buffer XVideoSetMode allocated
+ * (XVideoGetFB(), pbkit's debug screen) given back. From then on pbkit never
+ * shows it (pb_show_debug_screen, pb_kill's restore of the old scan-out) and
+ * its reports go to the kernel debugger (DbgPrint) instead of being drawn
+ * into it: every debugPrint below this point is pb_debug_print.
+ */
+static  int         pb_DebugScreenGone;
+
+static void pb_debug_print(const char *format, ...)
+{
+    char buf[512];
+    va_list args;
+
+    va_start(args, format);
+    vsnprintf(buf, sizeof(buf), format, args);
+    va_end(args);
+    if (pb_DebugScreenGone) DbgPrint("%s", buf);
+    else debugPrint("%s", buf);
+}
+#define debugPrint pb_debug_print
 
 //a macro used to build up a valid method
 #define EncodeMethod(subchannel,command,nparam) ((nparam<<18)+(subchannel<<13)+command)
@@ -103,6 +126,7 @@ static  DWORD           pb_Size=PBKIT_PUSHBUFFER_SIZE;//push buffer size, must b
 static  uint32_t        *pb_Head;   //points at push buffer head
 static  uint32_t        *pb_Tail;   //points at push buffer tail
 static  uint32_t        *pb_Put=NULL;   //where next command+params are to be written
+static  uint32_t        *pb_Kicked=NULL;    //pb_Put as last handed to the Dma engine (pb_end_deferred)
 
 static  float           pb_CpuFrequency;
 
@@ -126,7 +150,10 @@ static  DWORD           pb_FreeInst;        //next free space in PRAMIN area (ad
 
 static  int         pb_BackBufferNxt=0;
 static  int         pb_BackBufferNxtVBL=0;
-static  int         pb_BackBufferbReady[3]={0,0,0};
+static  int         pb_BackBufferbReady[5]={0,0,0,0,0}; //5: pb_init clears five
+static  int         pb_BackBuffersWanted=2;     //pb_back_buffers(): 2 triple buffering, 1 double
+static  volatile DWORD  pb_FramesFinished;      //pb_finished() calls since pb_init
+static  volatile DWORD  pb_FramesShown;         //frames the VBlank handler has put on screen
 static  int         pb_BackBufferIndex[3];
 
 static  DWORD           pb_FifoChannelsReady=0;
@@ -246,8 +273,10 @@ static void pb_vbl_handler(void)
 
         VIDEOREG(NV_PGRAPH_INCREMENT)|=NV_PGRAPH_INCREMENT_READ_3D_TRIGGER;
 
+        pb_FramesShown++;
+
         //rotate next back buffer
-        next=(next+1)%3;
+        next=(next+1)%pb_FrameBuffersCount;
         pb_BackBufferNxtVBL=next;
     }
 
@@ -312,7 +341,7 @@ static void pb_subprog(DWORD subprogID, DWORD paramA, DWORD paramB)
             next=pb_BackBufferNxt;
             pb_BackBufferIndex[next]=paramA;
             pb_BackBufferbReady[next]=1;
-            next=(next+1)%3;
+            next=(next+1)%pb_FrameBuffersCount;
             pb_BackBufferNxt=next;
             break;
 
@@ -1487,6 +1516,7 @@ static void pb_start(void)
         pb_cache_flush();
         *(pb_DmaUserAddr+0x40/4)=((DWORD)pb_Put)&0x03FFFFFF;
         //from now any write will be detected
+        pb_Kicked=pb_Put;
 
 #ifdef DBG
         if ((*(pb_DmaUserAddr+0x44/4))>0x04000000)
@@ -1568,6 +1598,8 @@ int pb_busy(void)
 {
     DWORD           PutAddr;
     DWORD           GetAddr;
+
+    pb_kick(); //blocks left by pb_end_deferred: GET never reaches a Put the Dma engine was not given
 
     GetAddr=*(pb_DmaUserAddr+0x44/4);
 #ifdef DBG
@@ -1803,8 +1835,40 @@ DWORD pb_get_vbl_counter(void)
 }
 
 
+void pb_release_debug_screen(void)
+{
+    if (pb_DebugScreenGone || !pb_running || !XVideoGetFB()) return;
+    pb_DebugScreenGone=1;
+    MmFreeContiguousMemory(XVideoGetFB());
+}
+
+void pb_back_buffers(int n)
+{
+    pb_BackBuffersWanted=(n==1)?1:2;
+}
+
+/*
+ * Double buffering (pb_back_buffers(1)): after pb_finished() the next back
+ * buffer is the one on screen until the VBlank handler shows the frame just
+ * finished. Nothing makes the GPU wait for that, so the caller waits here,
+ * on the CPU, before it pushes the next frame's drawing: until every frame
+ * pb_finished() queued is on screen. A no-op with triple buffering, where
+ * the next back buffer is never the one shown.
+ */
+void pb_wait_for_flip(void)
+{
+    LARGE_INTEGER timeout;
+
+    pb_kick(); //the frame waited on may still be in blocks left by pb_end_deferred
+    if (pb_FrameBuffersCount>2) return;
+    timeout.QuadPart=-10000;    //1 ms: the VBlank event is pulsed, a pulse between the test and the wait is not lost for a whole frame
+    while (pb_FramesShown!=pb_FramesFinished)
+        NtWaitForSingleObject(pb_VBlankEvent, FALSE, &timeout);
+}
+
 DWORD pb_wait_for_vbl(void)
 {
+    pb_kick(); //no work left unsent while the CPU sleeps
     NtWaitForSingleObject(pb_VBlankEvent, FALSE, NULL);
     return pb_vbl_counter; //allows caller to know if a frame has been missed
 }
@@ -1946,6 +2010,45 @@ void pb_end(uint32_t *pEnd)
 }
 
 
+/*
+ * pb_end without the kick: the block is queued (pb_Put moves on) but the Dma
+ * engine is told only once PB_DEFER_DWORDS have built up, at the next pb_end
+ * or pb_kick, or before pbkit waits on the GPU (pb_busy, pb_wait_for_flip,
+ * pb_wait_for_vbl, pb_reset, pb_finished). Each kick is a write-combining
+ * flush, a read-modify-write and spin on NV_PFB_WC_CACHE and the PUT write
+ * (pb_start): for a caller ending hundreds of small blocks a frame, most of
+ * their cost. A caller that waits on the GPU by other means (polling memory
+ * the GPU writes) calls pb_kick first.
+ */
+#define PB_DEFER_DWORDS 1024u
+
+void pb_end_deferred(uint32_t *pEnd)
+{
+#ifdef DBG
+    if (pEnd!=pb_PushNext)
+    {
+        debugPrint("pb_end_deferred: input pointer invalid or not following previous write addresses\n");
+        assert(false);
+    }
+    if (pb_BeginEndPair==0)
+    {
+        debugPrint("pb_end_deferred without a pb_begin\n");
+        assert(false);
+    }
+    pb_BeginEndPair=0;
+#endif
+
+    pb_Put=pEnd;
+    if (pb_trace_mode || !pb_Kicked || pb_Put<pb_Kicked || (DWORD)(pb_Put-pb_Kicked)>=PB_DEFER_DWORDS)
+        pb_start();
+}
+
+void pb_kick(void)
+{
+    if (pb_Put && pb_Put!=pb_Kicked)
+        pb_start();
+}
+
 void pb_push_to(DWORD subchannel, uint32_t *p, DWORD command, DWORD nparam)
 {
 #ifdef DBG
@@ -1979,6 +2082,7 @@ void pb_show_front_screen(void)
 
 void pb_show_debug_screen(void)
 {
+    if (pb_DebugScreenGone) return; //given back (pb_release_debug_screen): keep showing the scene
     VIDEOREG(PCRTC_START)=((DWORD)XVideoGetFB())&0x0FFFFFFF;
     pb_debug_screen_active=1;
 }
@@ -2091,7 +2195,8 @@ int pb_finished(void)
 
     //insert in push buffer the commands to trigger selection of next back buffer
     //(because previous ones may not have finished yet, so need to use 0x0100 call)
-    pb_back_index=(pb_back_index+1)%3;
+    pb_FramesFinished++;
+    pb_back_index=(pb_back_index+1)%pb_FrameBuffersCount;
     pb_target_back_buffer();
 
     return 0;
@@ -2234,7 +2339,8 @@ void pb_kill(void)
     VIDEOREG(NV_PFB_CFG1)=pb_OldFBConfig1;
     VIDEOREG(NV_PMC_ENABLE)=pb_OldMCEnable;
     VIDEOREG(NV_PMC_INTR_EN_0)=pb_OldMCInterrupt;
-    VIDEOREG(PCRTC_START)=pb_OldVideoStart;
+    //not back to a debug screen that was given back: the front buffer stays allocated and shown
+    if (!pb_DebugScreenGone) VIDEOREG(PCRTC_START)=pb_OldVideoStart;
 
     NtClose(pb_VBlankEvent);
 }
@@ -3091,8 +3197,11 @@ int pb_init(void)
     Width=vm.width;
     Height=vm.height;
 
-    BackBufferCount=2;          //triple buffering technic!
+    BackBufferCount=pb_BackBuffersWanted;   //2: triple buffering technic!
                         //allows dynamic details adjustment
+                        //1: double buffering, pb_wait_for_flip() before each frame
+    pb_FramesFinished=0;
+    pb_FramesShown=0;
 
     pb_FrameBuffersCount=BackBufferCount+1; //front buffer + back buffers
     pb_FrameBuffersWidth=Width;
