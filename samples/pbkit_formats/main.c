@@ -134,6 +134,10 @@ static void mount_e (void)
 static void log_file (const char *line)
 {
     FILE *f;
+#ifdef NO_FILE_LOG
+    (void)line;
+    return; /* experiment: no disk writes */
+#endif
     if (g_cycle > 0) {
         return;
     }
@@ -296,6 +300,7 @@ static void run_config (int index)
         Sleep(2000);
         return;
     }
+    log_file("step: XVideoSetMode ok");
 
     pb_set_color_format(cfg->color_fmt, false);
     pb_set_depth_format(cfg->depth_fmt);
@@ -308,13 +313,16 @@ static void run_config (int index)
         Sleep(2000);
         return;
     }
+    log_file("step: pb_init ok");
     pb_show_front_screen();
+    log_file("step: pb_show_front_screen ok");
 
     scale = pb_depth_scale();
     memcpy(&scale_bits, &scale, 4);
     g_results.depth_scale_bits = scale_bits;
 
     init_shader();
+    log_file("step: init_shader ok");
 
     alloc_vertices = MmAllocateContiguousMemoryEx(6 * sizeof(Vertex), 0, 0x3ffb000, 0, PAGE_READWRITE | PAGE_WRITECOMBINE);
     if (w) {
@@ -333,18 +341,23 @@ static void run_config (int index)
     fb_pitch = pb_back_buffer_pitch();
     ds = (uint8_t *)pb_depth_stencil_buffer();
     ds_pitch = pb_depth_stencil_pitch();
+    log_file("step: target back buffer ok");
 
     draw_scene(cfg);
+    log_file("step: draw_scene submitted");
     while (pb_busy()) {
     }
+    log_file("step: pb_busy idle");
     while (pb_finished()) {
     }
+    log_file("step: pb_finished ok");
     /* let the swap and the rendering fully complete */
     for (i = 0; i < 4; i++) {
         pb_wait_for_vbl();
     }
     while (pb_busy()) {
     }
+    log_file("step: idle after 4 vbl");
 
     /* Expectations */
     {
@@ -365,8 +378,17 @@ static void run_config (int index)
         depth_exp[3] = (uint32_t)(depth_b * scale);
 
         for (i = 0; i < 4; i++) {
+            char line[64];
             g_results.color[i] = read_color(cfg, fb, fb_pitch, px[i][0], px[i][1]);
+            snprintf(line, sizeof(line), "step: color read %d = %06lX", i, (unsigned long)g_results.color[i]);
+            log_file(line);
+#ifdef NO_DEPTH_READ
+            g_results.depth[i] = depth_exp[i]; /* experiment: no CPU read of the depth tile */
+#else
             g_results.depth[i] = read_depth(cfg, ds, ds_pitch, px[i][0], px[i][1]);
+#endif
+            snprintf(line, sizeof(line), "step: depth read %d = %06lX", i, (unsigned long)g_results.depth[i]);
+            log_file(line);
             g_results.color_expect[i] = color_exp[i];
             g_results.depth_expect[i] = depth_exp[i];
         }
@@ -421,7 +443,7 @@ static void run_config (int index)
     g_results.state = 1;
 
     /* Hold the frame with the report on screen */
-#ifdef CONFIG
+#if defined(CONFIG) && !defined(CHAIN)
     for (frame = 0;; frame++) {
 #else
     for (frame = 0; frame < HOLD_FRAMES; frame++) {
@@ -434,21 +456,70 @@ static void run_config (int index)
             pb_print("%s\n", status[i]);
         }
         pb_draw_text_screen();
+        if (frame == 0) {
+            log_file("hold frame 0 submitted");
+        }
         while (pb_busy()) {
         }
         while (pb_finished()) {
         }
         g_results.frame = frame;
+        if (frame < 3 || frame == HOLD_FRAMES - 1) {
+            char line[48];
+            snprintf(line, sizeof(line), "hold frame %d ok", frame);
+            log_file(line);
+        }
+#ifdef NO_FILE_LOG
+        if (0) {
+#else
+        if ((frame % 10) == 0 && g_cycle == 0) {
+#endif
+            /* E:\pbkit_progress.txt names the last frame that completed, for a hang */
+            FILE *pf;
+            mount_e();
+            pf = fopen("E:\\pbkit_progress.txt", "wb");
+            if (pf) {
+                fprintf(pf, "config %d frame %d\r\n", index, frame);
+                fclose(pf);
+            }
+        }
     }
+    log_file("hold done");
 
+#ifndef CHAIN
     MmFreeContiguousMemory(alloc_vertices);
     pb_kill();
+#endif
 }
 
 int main (void)
 {
 #ifdef CONFIG
+#ifdef CHAIN
+    /* One XBE per configuration: cfg0 (default.xbe) truncates the log, the
+     * others append; after the hold the next XBE is launched through the
+     * kernel instead of pb_kill/pb_init, the last one reboots. */
+    g_log_started = (CONFIG != 0);
     run_config(CONFIG);
+    if (CONFIG + 1 < (int)NUM_CONFIGS) {
+        char path[64];
+        snprintf(path, sizeof(path), "E:\\Games\\pbkit Formats\\cfg%d.xbe", CONFIG + 1);
+        {
+            char line[96];
+            snprintf(line, sizeof(line), "NEXT %s", path);
+            log_file(line);
+        }
+        XLaunchXBE(path);
+        log_file("XLaunchXBE returned");
+    } else {
+        log_file("DONE: rebooting to the dashboard");
+        XReboot();
+    }
+    while (1) {
+    }
+#else
+    run_config(CONFIG);
+#endif
 #else
     while (1) {
         unsigned int i;
