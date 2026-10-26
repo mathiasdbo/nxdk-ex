@@ -1760,7 +1760,7 @@ static void set_draw_buffer(DWORD buffer_addr)
     p=pb_push1_to(SUBCH_4,p,NV20_TCL_PRIMITIVE_3D_SET_OBJECT2,11);
     pb_end(p);
 
-    depth_stencil=1;
+    depth_stencil=pb_DSAddr?1:0; //0: no depth stencil buffer (PB_DEPTH_NONE)
 
     if (depth_stencil != -1 && pb_DepthStencilLast != depth_stencil) // stencil changed?
     {
@@ -1796,6 +1796,7 @@ static void set_draw_buffer(DWORD buffer_addr)
         p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_SET_OBJECT4,10);
         p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_DEPTH_TEST_ENABLE,flag); //ZEnable=TRUE or FALSE (But don't use W, see below)
         p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_STENCIL_ENABLE,(pb_DepthFmt==NV097_SET_SURFACE_FORMAT_ZETA_Z24S8)?1:0); //StencilEnable=TRUE (Z24S8 only)
+        if (!flag) p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_DEPTH_WRITE_ENABLE,0); //no depth buffer: ZWriteEnable=FALSE too
         pb_end(p);
 
         pb_DepthStencilLast=depth_stencil;
@@ -2089,6 +2090,7 @@ void pb_show_debug_screen(void)
 
 void pb_show_depth_screen(void)
 {
+    if (!pb_DSAddr) return; //no depth stencil buffer (PB_DEPTH_NONE)
     VIDEOREG(PCRTC_START)=pb_DSAddr&0x0FFFFFFF;
     pb_debug_screen_active=1;
 }
@@ -2153,6 +2155,8 @@ void pb_erase_depth_stencil_buffer(int x, int y, int w, int h)
     uint32_t    *p;
 
     int     x1,y1,x2,y2;
+
+    if (!pb_DSAddr) return; //no depth stencil buffer (PB_DEPTH_NONE)
 
     x1=x;
     y1=y;
@@ -2264,6 +2268,9 @@ void pb_kill(void)
     if (pb_ExtraBuffersCount) MmFreeContiguousMemory((PVOID)pb_EXAddr[0]);
     if (pb_DepthStencilAddr) MmFreeContiguousMemory((PVOID)pb_DepthStencilAddr);
     if (pb_FrameBuffersAddr) MmFreeContiguousMemory((PVOID)pb_FrameBuffersAddr);
+    pb_DepthStencilAddr=0;
+    pb_FrameBuffersAddr=0;
+    pb_DSAddr=0;
 
     if (pb_DmaBuffer8) MmFreeContiguousMemory(pb_DmaBuffer8);
     if (pb_DmaBuffer2) MmFreeContiguousMemory(pb_DmaBuffer2);
@@ -2355,7 +2362,7 @@ void pb_set_color_format(unsigned int fmt, bool swizzled)
 void pb_set_depth_format(unsigned int fmt)
 {
     assert(pb_running == 0); //the depth stencil buffer is allocated by pb_init
-    assert((fmt == NV097_SET_SURFACE_FORMAT_ZETA_Z16) || (fmt == NV097_SET_SURFACE_FORMAT_ZETA_Z24S8));
+    assert((fmt == PB_DEPTH_NONE) || (fmt == NV097_SET_SURFACE_FORMAT_ZETA_Z16) || (fmt == NV097_SET_SURFACE_FORMAT_ZETA_Z24S8));
     pb_DepthFmt = fmt;
 }
 
@@ -3178,6 +3185,9 @@ int pb_init(void)
 
     int DepthBpp = 0;
     switch(pb_DepthFmt) {
+    case PB_DEPTH_NONE:
+        DepthBpp = 0;   //no depth stencil buffer
+        break;
     case NV097_SET_SURFACE_FORMAT_ZETA_Z16:
         DepthBpp = 16;
         break;
@@ -3191,8 +3201,11 @@ int pb_init(void)
     pb_DepthBpp = DepthBpp;
     pb_ZScale = pb_depth_scale_for(pb_DepthFmt, pb_DepthFloat); //0xFFFFFF for Z24S8
 
-    // Activate pitched surface with chosen format
-    pb_GPUFrameBuffersFormat = 0x100 | (pb_DepthFmt << 4) | pb_ColorFmt;
+    // Activate pitched surface with chosen format. Without a depth buffer the zeta
+    // format field keeps Z24S8 (0 is not a valid zeta format); the zeta surface is
+    // never used because depth and stencil tests stay off (see set_draw_buffer).
+    pb_GPUFrameBuffersFormat = 0x100 |
+        (((pb_DepthFmt==PB_DEPTH_NONE)?NV097_SET_SURFACE_FORMAT_ZETA_Z24S8:pb_DepthFmt) << 4) | pb_ColorFmt;
 
     Width=vm.width;
     Height=vm.height;
@@ -3287,58 +3300,65 @@ int pb_init(void)
             );
 
 
-    //Depth stencil buffer (tile #1)
+    pb_DSAddr=0;            //stays 0 (NULL) without a depth stencil buffer
+    pb_DSSize=0;
+    pb_DepthStencilPitch=0;
 
-    //pitch is the gap between start of a pixel line and start of next pixel line
-    //(not necessarily the size of a pixel line, because of hardware optimization)
-
-    Pitch=(((DepthBpp*HSize)>>3)+0x3F)&0xFFFFFFC0; //64 units aligned
-    pb_DepthStencilPitch=Pitch;
-
-    //look for a standard listed pitch value greater or equal to theoretical one
-    for(i=0;i<16;i++)
+    if (DepthBpp)
     {
-        if (pb_TilePitches[i]>=Pitch)
+        //Depth stencil buffer (tile #1)
+
+        //pitch is the gap between start of a pixel line and start of next pixel line
+        //(not necessarily the size of a pixel line, because of hardware optimization)
+
+        Pitch=(((DepthBpp*HSize)>>3)+0x3F)&0xFFFFFFC0; //64 units aligned
+        pb_DepthStencilPitch=Pitch;
+
+        //look for a standard listed pitch value greater or equal to theoretical one
+        for(i=0;i<16;i++)
         {
-            Pitch=pb_TilePitches[i];
-            break;
+            if (pb_TilePitches[i]>=Pitch)
+            {
+                Pitch=pb_TilePitches[i];
+                break;
+            }
         }
+
+        Size=Pitch*VSize;
+
+        //verify 64 bytes alignment for size of a frame buffer
+        if (Size&(64-1)) debugPrint("pb_init: DSSize is not well aligned.\n");
+
+        pb_DSSize=Size;
+
+        // We use one shared depthbuffer
+        DSSize=Size;
+
+        //Huge alignment enforcement (16 Kb aligned!) for the global size
+        DSSize=(DSSize+0x3FFF)&0xFFFFC000;
+
+        DSAddr = (DWORD)MmAllocateContiguousMemoryEx(DSSize, 0, 0x03FFB000, 0x4000, PAGE_READWRITE | PAGE_WRITECOMBINE);
+
+        pb_DepthStencilAddr=DSAddr;
+        if (!DSAddr)
+        {
+            pb_kill();
+            return -11;
+        }
+
+        pb_DSAddr=DSAddr;
+
+        pb_assign_tile( 1,              //int   tile_index,
+                pb_DepthStencilAddr&0x03FFFFFF, //DWORD tile_addr,
+                DSSize,             //DWORD tile_size,
+                Pitch,              //DWORD tile_pitch,
+                0,              //DWORD tile_z_start_tag,
+                0,              //DWORD tile_z_offset,
+                (DepthBpp==32)?     //DWORD tile_flags: compressed depth buffer,
+                (PB_TILE_FLAGS_ZCOMPRESS|PB_TILE_FLAGS_Z32BITS|PB_TILE_FLAGS_ZBUFFER): //0x84000001 for Z24S8
+                (PB_TILE_FLAGS_ZCOMPRESS|PB_TILE_FLAGS_ZBUFFER)     //0x80000001 for Z16
+                );
     }
-
-    Size=Pitch*VSize;
-
-    //verify 64 bytes alignment for size of a frame buffer
-    if (Size&(64-1)) debugPrint("pb_init: DSSize is not well aligned.\n");
-
-    pb_DSSize=Size;
-
-    // We use one shared depthbuffer
-    DSSize=Size;
-
-    //Huge alignment enforcement (16 Kb aligned!) for the global size
-    DSSize=(DSSize+0x3FFF)&0xFFFFC000;
-
-    DSAddr = (DWORD)MmAllocateContiguousMemoryEx(DSSize, 0, 0x03FFB000, 0x4000, PAGE_READWRITE | PAGE_WRITECOMBINE);
-
-    pb_DepthStencilAddr=DSAddr;
-    if (!DSAddr)
-    {
-        pb_kill();
-        return -11;
-    }
-
-    pb_DSAddr=DSAddr;
-
-    pb_assign_tile( 1,              //int   tile_index,
-            pb_DepthStencilAddr&0x03FFFFFF, //DWORD tile_addr,
-            DSSize,             //DWORD tile_size,
-            Pitch,              //DWORD tile_pitch,
-            0,              //DWORD tile_z_start_tag,
-            0,              //DWORD tile_z_offset,
-            (DepthBpp==32)?     //DWORD tile_flags: compressed depth buffer,
-            (PB_TILE_FLAGS_ZCOMPRESS|PB_TILE_FLAGS_Z32BITS|PB_TILE_FLAGS_ZBUFFER): //0x84000001 for Z24S8
-            (PB_TILE_FLAGS_ZCOMPRESS|PB_TILE_FLAGS_ZBUFFER)     //0x80000001 for Z16
-            );
 
 
     if (pb_ExtraBuffersCount)
@@ -3547,7 +3567,7 @@ int pb_init(void)
     pb_end(p);
 
     memset((DWORD *)pb_FBAddr[0],0,pb_FBSize);
-    memset((DWORD *)pb_DSAddr,0,pb_DSSize);
+    if (pb_DSAddr) memset((DWORD *)pb_DSAddr,0,pb_DSSize);
 
     pb_back_index=1;        //frame buffer #1 is the back buffer for now
     pb_target_back_buffer();    //tells GPU what is the frame buffer target

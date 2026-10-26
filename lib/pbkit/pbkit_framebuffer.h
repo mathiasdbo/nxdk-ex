@@ -21,9 +21,17 @@ extern "C" {
 // Sets the framebuffer's color surface format (call it before pb_init).
 void pb_set_color_format (unsigned int fmt, bool swizzled);
 
-// Sets the depth stencil surface format, NV097_SET_SURFACE_FORMAT_ZETA_Z16 or
-// NV097_SET_SURFACE_FORMAT_ZETA_Z24S8 (default). Call it before pb_init, the
-// buffer is allocated there (Z16: 2 bytes/pixel, no stencil plane).
+// No depth stencil buffer at all (pb_set_depth_format(PB_DEPTH_NONE)): pb_init
+// allocates nothing and assigns no tile #1, depth and stencil tests are off,
+// pb_erase_depth_stencil_buffer and pb_show_depth_screen do nothing and
+// pb_depth_stencil_buffer() returns NULL. Do not enable the depth or stencil
+// test yourself in that mode (the GPU has no depth surface to use).
+#define PB_DEPTH_NONE 0
+
+// Sets the depth stencil surface format, NV097_SET_SURFACE_FORMAT_ZETA_Z16,
+// NV097_SET_SURFACE_FORMAT_ZETA_Z24S8 (default) or PB_DEPTH_NONE. Call it
+// before pb_init, the buffer is allocated there (Z16: 2 bytes/pixel, no
+// stencil plane).
 void pb_set_depth_format (unsigned int fmt);
 unsigned int pb_get_depth_format (void);
 
