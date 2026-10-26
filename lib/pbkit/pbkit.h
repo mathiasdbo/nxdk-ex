@@ -69,6 +69,8 @@ DWORD   *pb_back_buffer(void);      //returns normal rotating back buffer addres
 DWORD   pb_back_buffer_width(void);
 DWORD   pb_back_buffer_height(void);
 DWORD   pb_back_buffer_pitch(void);
+DWORD   *pb_depth_stencil_buffer(void); //returns the (shared) depth stencil buffer address (CPU side)
+DWORD   pb_depth_stencil_pitch(void);   //bytes between two lines of the depth stencil buffer
 
 void    pb_set_viewport(int dwx,int dwy,int width,int height,float zmin,float zmax);
 

@@ -60,6 +60,11 @@
 
 unsigned int pb_ColorFmt = NV097_SET_SURFACE_FORMAT_COLOR_LE_A8R8G8B8;
 static unsigned int pb_DepthFmt = NV097_SET_SURFACE_FORMAT_ZETA_Z24S8;
+static  int         pb_ColorBpp=32;     //bits per pixel of pb_ColorFmt (computed by pb_init)
+static  int         pb_DepthBpp=32;     //bits per pixel of pb_DepthFmt (computed by pb_init)
+static  int         pb_DepthFloat=0;    //NV097_SET_CONTROL0_Z_FORMAT: 0=fixed point depth, 1=floating point depth
+static  int         pb_WBuffer=1;       //NV097_SET_CONTROL0_Z_PERSPECTIVE_ENABLE: 1=depth is w (W-buffering), 0=depth is z
+                                        //(1 is what pbkit has always pushed in set_draw_buffer, see pb_control0)
 
 static  int         pb_running=0;
 
@@ -159,6 +164,8 @@ static  DWORD           pb_Viewport_width;
 static  DWORD           pb_Viewport_height;
 static  DWORD           pb_Viewport_zmin;
 static  DWORD           pb_Viewport_zmax;
+static  float           pb_Viewport_zminf;  //exact copies of zmin/zmax (needed to re-push the
+static  float           pb_Viewport_zmaxf;  //viewport when the depth scale changes)
 
 static  float           pb_XScale;
 static  float           pb_YScale;
@@ -1608,6 +1615,57 @@ DWORD *pb_extra_buffer(int buffer_index)
 }
 
 
+//NV097_SET_CONTROL0 (0x290, aka NV20_TCL_PRIMITIVE_3D_W_YUV_FPZ_FLAGS) value.
+//bit 0  (0x00000001) STENCIL_WRITE_ENABLE (only meaningful with Z24S8, Z16 has no stencil plane)
+//bit 12 (0x00001000) Z_FORMAT: 0=fixed point depth, 1=floating point depth
+//bit 16 (0x00010000) Z_PERSPECTIVE_ENABLE: depth is the interpolated w (W-buffering) instead of z
+//bit 20 (0x00100000) TEXTURE_PERSPECTIVE_ENABLE
+//bit 28 (0x10000000) COLOR_SPACE_CONVERT (YUV), not used
+//pbkit has always pushed 0x00110001 here (stencil write, W and perspective texturing on),
+//so with the default settings (Z24S8, fixed point, W-buffer on) the value is unchanged.
+static DWORD pb_control0(void)
+{
+    DWORD   control0;
+
+    control0=NV097_SET_CONTROL0_TEXTURE_PERSPECTIVE_ENABLE;
+    if (pb_DepthFmt==NV097_SET_SURFACE_FORMAT_ZETA_Z24S8) control0|=NV097_SET_CONTROL0_STENCIL_WRITE_ENABLE;
+    if (pb_DepthFloat) control0|=NV097_SET_CONTROL0_Z_FORMAT_FLOAT;
+    if (pb_WBuffer) control0|=NV097_SET_CONTROL0_Z_PERSPECTIVE_ENABLE;
+
+    return control0;
+}
+
+//Largest depth value of the current depth format, i.e. the value zmax=1.0f maps to
+//in pb_set_viewport (VIEWPORT_PX_DIV2 z scale and DEPTH_RANGE/NV097_SET_CLIP_MAX).
+//Fixed point: full scale of the integer (0xFFFFFF for Z24S8, 0xFFFF for Z16).
+//Floating point (NV097_SET_CONTROL0_Z_FORMAT=1): the values xemu uses as the top of
+//its depth clip range (hw/xbox/nv2a/pgraph/glsl/common.c, util.h):
+// - Z16   : 511.9375 = largest value of the 16 bits float (raw 0xFFFF, (raw<<11)+0x3C000000 as IEEE754)
+// - Z24S8 : 1.0E30, xemu's f24_max (the 24 bits float is raw<<7 as IEEE754, 3.4E38 max)
+//These two have not been verified on a console yet.
+static float pb_depth_scale_for(unsigned int fmt,int is_float)
+{
+    if (fmt==NV097_SET_SURFACE_FORMAT_ZETA_Z16) return is_float?511.9375f:(float)0xFFFF;
+    return is_float?1.0E30f:(float)0xFFFFFF;
+}
+
+//Raw value written in the depth plane by pb_erase_depth_stencil_buffer: zmax of the viewport
+//range, encoded in the current depth format (stencil, when present, is cleared to 0).
+static DWORD pb_depth_clear_value(void)
+{
+    DWORD   bits;
+
+    if (pb_DepthFloat)
+    {
+        *((float *)&bits)=pb_ZScale;
+        if (pb_DepthFmt==NV097_SET_SURFACE_FORMAT_ZETA_Z16) return (bits-0x3C000000)>>11; //0xFFFF
+        return (bits>>7)<<8; //f24(1.0E30)=0xE293E5, stencil=0
+    }
+
+    if (pb_DepthFmt==NV097_SET_SURFACE_FORMAT_ZETA_Z16) return 0xFFFF;
+    return 0xFFFFFF00; //(depth<<8)|stencil
+}
+
 static void set_draw_buffer(DWORD buffer_addr)
 {
     uint32_t        *p;
@@ -1702,7 +1760,7 @@ static void set_draw_buffer(DWORD buffer_addr)
         p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_FIRE_INTERRUPT,PB_SETOUTER);
         p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_SET_OBJECT4,10);
         p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_DEPTH_TEST_ENABLE,flag); //ZEnable=TRUE or FALSE (But don't use W, see below)
-        p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_STENCIL_ENABLE,1);   //StencilEnable=TRUE
+        p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_STENCIL_ENABLE,(pb_DepthFmt==NV097_SET_SURFACE_FORMAT_ZETA_Z24S8)?1:0); //StencilEnable=TRUE (Z24S8 only)
         pb_end(p);
 
         pb_DepthStencilLast=depth_stencil;
@@ -1711,11 +1769,10 @@ static void set_draw_buffer(DWORD buffer_addr)
     p=pb_begin();
     p=pb_push3(p,NV20_TCL_PRIMITIVE_3D_BUFFER_PITCH,(pitch_depth_stencil<<16)|(pitch&0xFFFF),0,0);
     p=pb_push2(p,NV20_TCL_PRIMITIVE_3D_VIEWPORT_HORIZ,width<<16,height<<16);
-    //Default (0x00100001)
-    //We use W (0x00010000)
-    //We don't enable YUV (0x10000000)
-    //We don't use floating point depth (0x00001000)
-    p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_W_YUV_FPZ_FLAGS,0x00110001);
+    //NV097_SET_CONTROL0, see pb_control0 (0x00110001 with the default settings:
+    //stencil write (0x00000001), W (0x00010000), perspective texturing (0x00100000),
+    //no YUV (0x10000000), no floating point depth (0x00001000))
+    p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_W_YUV_FPZ_FLAGS,pb_control0());
     p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_BUFFER_FORMAT,pb_GPUFrameBuffersFormat|pb_FBVFlag);
     pb_end(p);
 }
@@ -1953,6 +2010,8 @@ void pb_set_viewport(int dwx,int dwy,int width,int height,float zmin,float zmax)
     pb_Viewport_height=height;
     pb_Viewport_zmin=zmin;
     pb_Viewport_zmax=zmax;
+    pb_Viewport_zminf=zmin;
+    pb_Viewport_zmaxf=zmax;
 
     x=0.53125f+(float)dwx;
     y=0.53125f+(float)dwy;
@@ -1979,7 +2038,8 @@ void pb_set_viewport(int dwx,int dwy,int width,int height,float zmin,float zmax)
 //ALWAYS use this at beginning of frame or you may lose one third of performance because
 //automatic compression algorithm for tile #1 can't afford any garbage left behind...
 //Also, try to draw from closest distance to farest distance to help algorithm
-//Depth is set to max and stencil is set to 0. We assume D24S8 format is used.
+//Depth is set to max (see pb_depth_clear_value) and stencil, if any, is set to 0.
+//Z24S8: (0xFFFFFF<<8)|0, clears depth & stencil. Z16: 0xFFFF, clears depth only.
 //Implies that depth test function is set to "less or equal"
 void pb_erase_depth_stencil_buffer(int x, int y, int w, int h)
 {
@@ -1997,9 +2057,12 @@ void pb_erase_depth_stencil_buffer(int x, int y, int w, int h)
     *(p++)=((x2-1)<<16)|x1;
     *(p++)=((y2-1)<<16)|y1;
     pb_push(p++,NV20_TCL_PRIMITIVE_3D_CLEAR_VALUE_DEPTH,3);     //sets data used to fill in rectangle
-    *(p++)=0xffffff00;      //(depth<<8)|stencil
+    *(p++)=pb_depth_clear_value();  //(depth<<8)|stencil for Z24S8, depth for Z16
     *(p++)=0;           //color
-    *(p++)=0x03;            //triggers the HW rectangle fill (only on D&S)
+    if (pb_DepthFmt==NV097_SET_SURFACE_FORMAT_ZETA_Z24S8)
+        *(p++)=NV097_CLEAR_SURFACE_Z|NV097_CLEAR_SURFACE_STENCIL; //0x03: triggers the HW rectangle fill (only on D&S)
+    else
+        *(p++)=NV097_CLEAR_SURFACE_Z;   //0x01: no stencil plane in Z16
     pb_end(p);
 }
 
@@ -2178,6 +2241,71 @@ void pb_set_color_format(unsigned int fmt, bool swizzled)
 {
     pb_ColorFmt = fmt;
     assert(swizzled == false);
+}
+
+void pb_set_depth_format(unsigned int fmt)
+{
+    assert(pb_running == 0); //the depth stencil buffer is allocated by pb_init
+    assert((fmt == NV097_SET_SURFACE_FORMAT_ZETA_Z16) || (fmt == NV097_SET_SURFACE_FORMAT_ZETA_Z24S8));
+    pb_DepthFmt = fmt;
+}
+
+unsigned int pb_get_depth_format(void)
+{
+    return pb_DepthFmt;
+}
+
+//Recomputes pb_ZScale and, when the Dma engine is running, re-pushes everything that
+//depends on it or on NV097_SET_CONTROL0 (viewport z range, depth clip range, CONTROL0).
+static void pb_update_depth_state(void)
+{
+    uint32_t    *p;
+
+    pb_ZScale = pb_depth_scale_for(pb_DepthFmt, pb_DepthFloat);
+
+    if (pb_running == 0) return;
+
+    p = pb_begin();
+    p = pb_push1(p, NV20_TCL_PRIMITIVE_3D_W_YUV_FPZ_FLAGS, pb_control0());
+    pb_end(p);
+    pb_set_viewport(pb_Viewport_x, pb_Viewport_y, pb_Viewport_width, pb_Viewport_height, pb_Viewport_zminf, pb_Viewport_zmaxf);
+}
+
+void pb_set_depth_float(bool enable)
+{
+    pb_DepthFloat = enable ? 1 : 0;
+    pb_update_depth_state();
+}
+
+bool pb_get_depth_float(void)
+{
+    return pb_DepthFloat != 0;
+}
+
+void pb_set_w_buffer(bool enable)
+{
+    pb_WBuffer = enable ? 1 : 0;
+    pb_update_depth_state();
+}
+
+bool pb_get_w_buffer(void)
+{
+    return pb_WBuffer != 0;
+}
+
+float pb_depth_scale(void)
+{
+    return pb_ZScale;
+}
+
+DWORD *pb_depth_stencil_buffer(void)
+{
+    return (DWORD *)pb_DSAddr;
+}
+
+DWORD pb_depth_stencil_pitch(void)
+{
+    return pb_DepthStencilPitch;
 }
 
 /**
@@ -2917,9 +3045,22 @@ int pb_init(void)
         break;
     }
 
-    int DepthBpp = 32;
-    assert(pb_DepthFmt == NV097_SET_SURFACE_FORMAT_ZETA_Z24S8);
-    pb_ZScale = (float)0xFFFFFF;
+    pb_ColorBpp = ColorBpp;
+
+    int DepthBpp = 0;
+    switch(pb_DepthFmt) {
+    case NV097_SET_SURFACE_FORMAT_ZETA_Z16:
+        DepthBpp = 16;
+        break;
+    case NV097_SET_SURFACE_FORMAT_ZETA_Z24S8:
+        DepthBpp = 32;
+        break;
+    default:
+        assert(false);
+        break;
+    }
+    pb_DepthBpp = DepthBpp;
+    pb_ZScale = pb_depth_scale_for(pb_DepthFmt, pb_DepthFloat); //0xFFFFFF for Z24S8
 
     // Activate pitched surface with chosen format
     pb_GPUFrameBuffersFormat = 0x100 | (pb_DepthFmt << 4) | pb_ColorFmt;
@@ -3062,7 +3203,7 @@ int pb_init(void)
             Pitch,              //DWORD tile_pitch,
             0,              //DWORD tile_z_start_tag,
             0,              //DWORD tile_z_offset,
-            0x84000001          //DWORD tile_flags (0x04000000 for 32 bits)
+            (DepthBpp==32)?0x84000001:0x80000001 //DWORD tile_flags (0x04000000 for 32 bits)
             );
 
 
