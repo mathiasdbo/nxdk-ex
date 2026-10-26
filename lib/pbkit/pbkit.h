@@ -110,6 +110,35 @@ void    pb_kill(void);      //stops Dma engine and releases push buffer
 void    pb_target_extra_buffer(int n);  //to have rendering made into a static extra buffer
 void    pb_target_back_buffer(void);    //to have rendering made into normal rotating back buffer
 
+//Render to texture: pb_set_render_target points the GPU at an application buffer until the next
+//pb_target_back_buffer / pb_target_extra_buffer / pb_set_render_target (NULL: back buffer) or
+//pb_finished. Buffers: contiguous memory below 0x03FFB000 (MmAllocateContiguousMemoryEx), 64
+//bytes aligned. Returns 0, or -1 (nothing changed) for an invalid target.
+//- swizzled: width and height powers of two (<= 4096), Morton order (pb_swizzle_offset), the
+//  pitches are not used; sample it as a SZ_* texture of the same size.
+//- linear: pitch (and depth_pitch) >= width*Bpp, multiples of 64; sample it as a LU_IMAGE_*
+//  texture (texel coordinates). A tiled buffer needs a tile pitch (see pb_assign_tile).
+//- depth_addr NULL: no depth buffer, depth and stencil tests go off (back on, with depth writes,
+//  when a target with a depth buffer follows). Otherwise it has pbkit's depth format
+//  (pb_get_depth_format, Z24S8 with PB_DEPTH_NONE) and the color buffer's layout.
+//Coordinates and pb_set_viewport are in target pixels; the window clip is widened to 4096 for
+//a target larger than the screen. No pb_fill / pb_erase_depth_stencil_buffer (NV097_CLEAR_SURFACE)
+//on a swizzled target (xemu asserts): clear it with a quad. Push NV097_WAIT_FOR_IDLE before
+//sampling it, wait for the GPU (fence, pb_busy) before the CPU reads it.
+typedef struct {
+    DWORD        *addr;          //color buffer
+    DWORD        width;
+    DWORD        height;
+    unsigned int color_format;   //NV097_SET_SURFACE_FORMAT_COLOR_LE_*
+    bool         swizzled;
+    DWORD        pitch;          //linear only: bytes per line
+    DWORD        *depth_addr;    //NULL: no depth buffer
+    DWORD        depth_pitch;    //linear only
+} pb_render_target;
+int     pb_set_render_target(const pb_render_target *rt);
+//Byte offset of texel (x, y) in a swizzled w x h surface or texture (powers of two), for CPU access
+DWORD   pb_swizzle_offset(DWORD x, DWORD y, DWORD w, DWORD h, DWORD bytes_per_pixel);
+
 DWORD   *pb_extra_buffer(int n);    //returns a static extra buffer address
 DWORD   *pb_back_buffer(void);      //returns normal rotating back buffer address
 DWORD   pb_back_buffer_width(void);

@@ -1824,13 +1824,27 @@ static DWORD pb_depth_clear_value(void)
     return 0xFFFFFF00; //(depth<<8)|stencil
 }
 
-static void set_draw_buffer(DWORD buffer_addr)
+//Render target the GPU draws into (set_draw_target): pb_set_viewport clamps to its size
+static  DWORD           pb_TargetWidth;
+static  DWORD           pb_TargetHeight;
+static  DWORD           pb_DepthStencilLastAddr;    //zeta address and DMA limit channel 10 points at
+static  DWORD           pb_DepthStencilLastLimit;
+static  int             pb_WideClip=0;              //window clip widened for a render target larger than the screen
+
+//Points the GPU color (and zeta) surface at a buffer. All pbkit render targets go through here:
+//the rotating back buffers, extra buffers and pb_set_render_target.
+//- buffer_addr/zeta_addr: physical addresses (zeta_addr 0: no depth stencil buffer)
+//- width/height: surface clip (1x size, the GPU scales it for an anti-aliased surface)
+//- color_size/zeta_size: bytes the DMA contexts cover
+//- format: NV097_SET_SURFACE_FORMAT value (type, anti-aliasing, log2 size when swizzled)
+//The zeta DMA context and the depth/stencil test enables are only pushed when the depth
+//buffer changes (appears, disappears or moves), so the default back buffer path pushes
+//exactly what it always did.
+static void set_draw_target(DWORD buffer_addr, DWORD width, DWORD height, DWORD pitch, DWORD color_size,
+                            DWORD zeta_addr, DWORD zeta_pitch, DWORD zeta_size, DWORD format)
 {
     uint32_t        *p;
 
-    DWORD           width;
-    DWORD           height;
-    DWORD           pitch;
     DWORD           pitch_depth_stencil;
 
     DWORD           dma_flags;
@@ -1840,14 +1854,11 @@ static void set_draw_buffer(DWORD buffer_addr)
     int         flag;
     int         depth_stencil;
 
-    width=pb_FrameBuffersWidth;
-    height=pb_FrameBuffersHeight;
-    pitch=pb_FrameBuffersPitch;
-    pitch_depth_stencil=pb_DepthStencilPitch;
+    pitch_depth_stencil=zeta_pitch;
 
     //DMA channel 9 is used by GPU in order to render pixels
     dma_addr=buffer_addr;
-    dma_limit=height*pitch-1; //(last byte)
+    dma_limit=color_size-1; //(last byte)
     dma_flags=DMA_CLASS_3D|0x0000B000;
     dma_addr|=3;
 
@@ -1866,7 +1877,7 @@ static void set_draw_buffer(DWORD buffer_addr)
 
     //DMA channel 11 is used by GPU in order to bitblt images
     dma_addr=buffer_addr;
-    dma_limit=height*pitch-1; //(last byte)
+    dma_limit=color_size-1; //(last byte)
     dma_flags=DMA_CLASS_3D|0x0000B000;
     dma_addr|=3;
 
@@ -1883,15 +1894,15 @@ static void set_draw_buffer(DWORD buffer_addr)
     p=pb_push1_to(SUBCH_4,p,NV20_TCL_PRIMITIVE_3D_SET_OBJECT2,11);
     pb_end(p);
 
-    depth_stencil=pb_DSAddr?1:0; //0: no depth stencil buffer (PB_DEPTH_NONE)
+    depth_stencil=zeta_addr?1:0; //0: no depth stencil buffer (PB_DEPTH_NONE, render target without one)
 
-    if (depth_stencil != -1 && pb_DepthStencilLast != depth_stencil) // stencil changed?
+    if (pb_DepthStencilLast != depth_stencil) // depth stencil buffer appears or disappears?
     {
         //DMA channel 10 is used by GPU in order to render depth stencil
         if (depth_stencil)
         {
-            dma_addr=pb_DSAddr&0x03FFFFFF;
-            dma_limit=height*pitch_depth_stencil-1; //(last byte)
+            dma_addr=zeta_addr;
+            dma_limit=zeta_size-1; //(last byte)
             dma_flags=DMA_CLASS_3D|0x0000B000;
             dma_addr|=3;
             flag=1;
@@ -1918,11 +1929,37 @@ static void set_draw_buffer(DWORD buffer_addr)
         p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_FIRE_INTERRUPT,PB_SETOUTER);
         p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_SET_OBJECT4,10);
         p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_DEPTH_TEST_ENABLE,flag); //ZEnable=TRUE or FALSE (But don't use W, see below)
-        p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_STENCIL_ENABLE,(pb_DepthFmt==NV097_SET_SURFACE_FORMAT_ZETA_Z24S8)?1:0); //StencilEnable=TRUE (Z24S8 only)
+        p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_STENCIL_ENABLE,(flag&&(pb_DepthFmt==NV097_SET_SURFACE_FORMAT_ZETA_Z24S8))?1:0); //StencilEnable=TRUE (Z24S8 only)
         if (!flag) p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_DEPTH_WRITE_ENABLE,0); //no depth buffer: ZWriteEnable=FALSE too
+        else if (pb_DepthStencilLast==0) p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_DEPTH_WRITE_ENABLE,1); //back from a target without one
         pb_end(p);
 
         pb_DepthStencilLast=depth_stencil;
+        pb_DepthStencilLastAddr=zeta_addr;
+        pb_DepthStencilLastLimit=depth_stencil?(zeta_size-1):0;
+    }
+    else if (depth_stencil && ((zeta_addr!=pb_DepthStencilLastAddr)||(zeta_size-1!=pb_DepthStencilLastLimit)))
+    {
+        //another depth stencil buffer (a render target with its own one): move DMA channel 10 only
+        dma_addr=zeta_addr|3;
+        dma_limit=zeta_size-1;
+        dma_flags=DMA_CLASS_3D|0x0000B000;
+
+        p=pb_begin();
+        p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_WAIT_MAKESPACE,0);
+        p=pb_push2(p,NV20_TCL_PRIMITIVE_3D_PARAMETER_A,NV_PRAMIN+(pb_DmaChID10Inst<<4)+0x08,dma_addr);
+        p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_FIRE_INTERRUPT,PB_SETOUTER);
+        p=pb_push2(p,NV20_TCL_PRIMITIVE_3D_PARAMETER_A,NV_PRAMIN+(pb_DmaChID10Inst<<4)+0x0C,dma_addr);
+        p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_FIRE_INTERRUPT,PB_SETOUTER);
+        p=pb_push2(p,NV20_TCL_PRIMITIVE_3D_PARAMETER_A,NV_PRAMIN+(pb_DmaChID10Inst<<4)+0x00,dma_flags);
+        p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_FIRE_INTERRUPT,PB_SETOUTER);
+        p=pb_push2(p,NV20_TCL_PRIMITIVE_3D_PARAMETER_A,NV_PRAMIN+(pb_DmaChID10Inst<<4)+0x04,dma_limit);
+        p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_FIRE_INTERRUPT,PB_SETOUTER);
+        p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_SET_OBJECT4,10);
+        pb_end(p);
+
+        pb_DepthStencilLastAddr=zeta_addr;
+        pb_DepthStencilLastLimit=zeta_size-1;
     }
 
     p=pb_begin();
@@ -1932,10 +1969,39 @@ static void set_draw_buffer(DWORD buffer_addr)
     //stencil write (0x00000001), W (0x00010000), perspective texturing (0x00100000),
     //no YUV (0x10000000), no floating point depth (0x00001000))
     p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_W_YUV_FPZ_FLAGS,pb_control0());
-    p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_BUFFER_FORMAT,pb_GPUFrameBuffersFormat|pb_FBVFlag);
+    p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_BUFFER_FORMAT,format);
     pb_end(p);
+
+    //pb_init's window clip (scissor) covers the screen: widen it for a larger render target,
+    //narrow it back afterwards (only then: the default path pushes nothing here)
+    flag=((width>pb_FrameBuffersWidth)||(height>pb_FrameBuffersHeight))?1:0;
+    if (flag!=pb_WideClip)
+    {
+        int i;
+        DWORD w=flag?4096:pb_FrameBuffersWidth;
+        DWORD h=flag?4096:pb_FrameBuffersHeight;
+        p=pb_begin();
+        for(i=0;i<8;i++)
+        {
+            p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_VIEWPORT_CLIP_HORIZ(i),0|((w-1)<<16));
+            p=pb_push1(p,NV20_TCL_PRIMITIVE_3D_VIEWPORT_CLIP_VERT(i),0|((h-1)<<16));
+        }
+        pb_end(p);
+        pb_WideClip=flag;
+    }
+
+    pb_TargetWidth=width;
+    pb_TargetHeight=height;
 }
 
+//The rotating back buffers, extra buffers (scan-out size, pbkit's depth stencil buffer)
+static void set_draw_buffer(DWORD buffer_addr)
+{
+    set_draw_target(buffer_addr,pb_FrameBuffersWidth,pb_FrameBuffersHeight,pb_FrameBuffersPitch,
+                    pb_FrameBuffersHeight*pb_FrameBuffersPitch,
+                    pb_DSAddr&0x03FFFFFF,pb_DepthStencilPitch,pb_FrameBuffersHeight*pb_DepthStencilPitch,
+                    pb_GPUFrameBuffersFormat|pb_FBVFlag);
+}
 
 void pb_target_back_buffer(void)
 {
@@ -1951,6 +2017,134 @@ void pb_target_extra_buffer(int buffer_index)
     }
 
     set_draw_buffer(pb_EXAddr[buffer_index]&0x03FFFFFF);
+}
+
+//Byte offset of texel (x,y) in a swizzled (Morton order) w x h surface or texture, w and h
+//powers of two: x and y bits interleave (x in bit 0) while both have bits left, then the
+//remaining bits of the larger one follow.
+DWORD pb_swizzle_offset(DWORD x, DWORD y, DWORD w, DWORD h, DWORD bytes_per_pixel)
+{
+    DWORD   offset=0;
+    DWORD   bit=1;
+    DWORD   mx=1;
+    DWORD   my=1;
+
+    while ((mx<w)||(my<h))
+    {
+        if (mx<w)
+        {
+            if (x&mx) offset|=bit;
+            bit<<=1;
+            mx<<=1;
+        }
+        if (my<h)
+        {
+            if (y&my) offset|=bit;
+            bit<<=1;
+            my<<=1;
+        }
+    }
+    return offset*bytes_per_pixel;
+}
+
+//bytes per pixel of a NV097_SET_SURFACE_FORMAT_COLOR_* format, 0 if unknown
+static int pb_color_bytes(unsigned int fmt)
+{
+    switch(fmt)
+    {
+        case NV097_SET_SURFACE_FORMAT_COLOR_LE_B8:
+            return 1;
+        case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
+        case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_O1R5G5B5:
+        case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5:
+        case NV097_SET_SURFACE_FORMAT_COLOR_LE_G8B8:
+            return 2;
+        case NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_Z8R8G8B8:
+        case NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_O8R8G8B8:
+        case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1A7R8G8B8_Z1A7R8G8B8:
+        case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1A7R8G8B8_O1A7R8G8B8:
+        case NV097_SET_SURFACE_FORMAT_COLOR_LE_A8R8G8B8:
+            return 4;
+    }
+    return 0;
+}
+
+static DWORD pb_log2(DWORD v)
+{
+    DWORD n=0;
+    while ((1u<<n)<v) n++;
+    return n;
+}
+
+//1 if [addr, addr+size) is mapped 1:1 below 0x03FFB000 (first byte checked: the buffer must be
+//contiguous memory, MmAllocateContiguousMemoryEx)
+static int pb_target_memory_ok(DWORD addr, DWORD size)
+{
+    return (MmGetPhysicalAddress((PVOID)addr)==(addr&0x03FFFFFF))&&((addr&0x03FFFFFF)+size<=0x03FFB000);
+}
+
+int pb_set_render_target(const pb_render_target *rt)
+{
+    DWORD           addr,zeta,pitch,zeta_pitch,size,zeta_size,format,zeta_fmt;
+    int             bytes,zeta_bytes;
+
+    if (!rt)
+    {
+        pb_target_back_buffer();
+        return 0;
+    }
+
+    bytes=pb_color_bytes(rt->color_format);
+    //a render target's depth buffer has pbkit's depth format (Z24S8 with PB_DEPTH_NONE)
+    zeta_fmt=(pb_DepthFmt==PB_DEPTH_NONE)?NV097_SET_SURFACE_FORMAT_ZETA_Z24S8:pb_DepthFmt;
+    zeta_bytes=(zeta_fmt==NV097_SET_SURFACE_FORMAT_ZETA_Z16)?2:4;
+    addr=(DWORD)rt->addr;
+    zeta=(DWORD)rt->depth_addr;
+
+    if ((bytes==0)||(addr==0)||(addr&0x3F)||(zeta&0x3F)||(rt->width==0)||(rt->height==0)||
+        (rt->width>4096)||(rt->height>4096))
+    {
+        debugPrint("pb_set_render_target: invalid format, address or size\n");
+        return -1;
+    }
+
+    if (rt->swizzled)
+    {
+        //power of two sizes, Morton order: the GPU takes log2 width/height, no pitch
+        if ((rt->width&(rt->width-1))||(rt->height&(rt->height-1)))
+        {
+            debugPrint("pb_set_render_target: a swizzled target needs power of two sizes\n");
+            return -1;
+        }
+        pitch=rt->width*bytes;
+        zeta_pitch=rt->width*zeta_bytes;
+        format=(NV097_SET_SURFACE_FORMAT_TYPE_SWIZZLE<<8)|(pb_log2(rt->width)<<16)|(pb_log2(rt->height)<<24);
+    }
+    else
+    {
+        pitch=rt->pitch;
+        zeta_pitch=rt->depth_pitch;
+        if ((pitch<rt->width*bytes)||(pitch&0x3F)||(pitch>0xFFC0)||
+            (zeta&&((zeta_pitch<rt->width*zeta_bytes)||(zeta_pitch&0x3F)||(zeta_pitch>0xFFC0))))
+        {
+            debugPrint("pb_set_render_target: pitches must be >= width*Bpp and multiples of 64\n");
+            return -1;
+        }
+        format=NV097_SET_SURFACE_FORMAT_TYPE_PITCH<<8;
+    }
+    format|=(zeta_fmt<<4)|rt->color_format;
+    size=pitch*rt->height;
+    zeta_size=zeta?(zeta_pitch*rt->height):0;
+
+    if (!pb_target_memory_ok(addr,size)||(zeta&&!pb_target_memory_ok(zeta,zeta_size)))
+    {
+        debugPrint("pb_set_render_target: buffers must be contiguous memory below 0x03FFB000\n");
+        return -1;
+    }
+
+    set_draw_target(addr&0x03FFFFFF,rt->width,rt->height,pitch,size,
+                    zeta&0x03FFFFFF,zeta?zeta_pitch:0,zeta_size,format);
+    return 0;
 }
 
 DWORD pb_get_vbl_counter(void)
@@ -2364,8 +2558,9 @@ void pb_set_viewport(int dwx,int dwy,int width,int height,float zmin,float zmax)
 
     if (dwx<0) dwx=0;
     if (dwy<0) dwy=0;
-    if (dwx+width>pb_FrameBuffersWidth) width=pb_FrameBuffersWidth-dwx;
-    if (dwy+height>pb_FrameBuffersHeight) height=pb_FrameBuffersHeight-dwy;
+    //clamped to the current render target (the screen before pb_init has set one)
+    if (dwx+width>(pb_TargetWidth?pb_TargetWidth:pb_FrameBuffersWidth)) width=(pb_TargetWidth?pb_TargetWidth:pb_FrameBuffersWidth)-dwx;
+    if (dwy+height>(pb_TargetHeight?pb_TargetHeight:pb_FrameBuffersHeight)) height=(pb_TargetHeight?pb_TargetHeight:pb_FrameBuffersHeight)-dwy;
 
     pb_Viewport_x=dwx;
     pb_Viewport_y=dwy;
@@ -3423,6 +3618,11 @@ int pb_init(void)
     pb_FrameBuffersAddr=0;
     pb_DepthStencilAddr=0;
     pb_DepthStencilLast=-2;
+    pb_DepthStencilLastAddr=0;
+    pb_DepthStencilLastLimit=0;
+    pb_WideClip=0;
+    pb_TargetWidth=0;
+    pb_TargetHeight=0;
 
     vm=XVideoGetMode();
 
