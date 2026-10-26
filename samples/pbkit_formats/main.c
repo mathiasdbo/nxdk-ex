@@ -8,10 +8,16 @@
  * can find in memory.
  *
  * Build with make CONFIG=n to run a single configuration without pb_kill.
+ *
+ * On a console the same lines go to E:\pbkit_formats.txt during the first
+ * pass (a START line before each pb_init, so a freeze names its config); after
+ * LOG_CYCLES passes the cycling build reboots to the dashboard so the file can
+ * be fetched over FTP.
  */
 #include <hal/debug.h>
 #include <hal/video.h>
 #include <hal/xbox.h>
+#include <nxdk/mount.h>
 #include <pbkit/pbkit.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -111,6 +117,36 @@ static Vertex *alloc_vertices;
 static int status_lines;
 static char status[12][64];
 
+#define LOGFILE    "E:\\pbkit_formats.txt"
+#define LOG_CYCLES 2 /* cycling build: passes over configs[] before XReboot */
+static int g_cycle;        /* passes over configs[] completed */
+static bool g_log_started; /* the first write truncates the file */
+
+static void mount_e (void)
+{
+    if (!nxIsDriveMounted('E')) {
+        nxMountDrive('E', "\\Device\\Harddisk0\\Partition1\\");
+    }
+}
+
+/* Appends one line to E:\pbkit_formats.txt during the first pass (on xemu
+ * without an E: partition fopen just fails) */
+static void log_file (const char *line)
+{
+    FILE *f;
+    if (g_cycle > 0) {
+        return;
+    }
+    mount_e();
+    f = fopen(LOGFILE, g_log_started ? "ab" : "wb");
+    g_log_started = true;
+    if (f) {
+        fputs(line, f);
+        fputs("\r\n", f);
+        fclose(f);
+    }
+}
+
 static void init_shader (void);
 static void set_attrib_pointer (unsigned int index, unsigned int format, unsigned int size, unsigned int stride,
                                 const void *data);
@@ -126,6 +162,7 @@ static void log_line (const char *fmt, ...)
     vsnprintf(status[status_lines], sizeof(status[0]), fmt, ap);
     va_end(ap);
     DbgPrint("pbkit_formats: %s\n", status[status_lines]);
+    log_file(status[status_lines]);
     status_lines++;
 }
 
@@ -242,6 +279,11 @@ static void run_config (int index)
     bool w = cfg->w_buffer;
 
     status_lines = 0;
+    {
+        char line[96];
+        snprintf(line, sizeof(line), "START config %d (%s) cycle %d", index, cfg->name, g_cycle);
+        log_file(line);
+    }
     g_results.config = index;
     g_results.frame = 0;
     g_results.state = 0;
@@ -250,6 +292,7 @@ static void run_config (int index)
 
     if (!XVideoSetMode(WIDTH, HEIGHT, cfg->bpp, REFRESH_DEFAULT)) {
         debugPrint("XVideoSetMode %d bpp failed\n", cfg->bpp);
+        log_file("XVideoSetMode failed");
         Sleep(2000);
         return;
     }
@@ -261,6 +304,7 @@ static void run_config (int index)
 
     if ((status_code = pb_init())) {
         debugPrint("pb_init Error %d\n", status_code);
+        log_file("pb_init failed");
         Sleep(2000);
         return;
     }
@@ -410,6 +454,11 @@ int main (void)
         unsigned int i;
         for (i = 0; i < NUM_CONFIGS; i++) {
             run_config(i);
+        }
+        g_cycle++;
+        if (g_cycle == LOG_CYCLES) {
+            log_file("DONE: rebooting to the dashboard");
+            XReboot();
         }
     }
 #endif
