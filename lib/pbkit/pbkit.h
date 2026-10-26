@@ -139,6 +139,27 @@ int     pb_set_render_target(const pb_render_target *rt);
 //Byte offset of texel (x, y) in a swizzled w x h surface or texture (powers of two), for CPU access
 DWORD   pb_swizzle_offset(DWORD x, DWORD y, DWORD w, DWORD h, DWORD bytes_per_pixel);
 
+//Multisampling (call before pb_init). PB_MS_2X: 2 samples per pixel side by side
+//(NV097_SET_SURFACE_FORMAT_ANTI_ALIASING_CENTER_CORNER_2), PB_MS_4X: 2x2 (SQUARE_OFFSET_4).
+//pb_init allocates a sample buffer (width*2 x height, 4X: width*2 x height*2, tile #3) and the
+//depth stencil buffer at that size; pb_target_back_buffer draws into the sample buffer and
+//pb_finished resolves it on the GPU into the back buffer (box filter: the bilinear average of
+//each pixel's samples) before queuing the flip. All coordinates (vertices, viewport, clears,
+//pb_fill) stay in screen pixels: the GPU scales them. The frame buffers keep the screen size.
+//The resolve changes GPU state: transform program start (slot 134, set back to 0), execution
+//mode (program), slots 134-135 of the transform program, texture stages (0 disabled again,
+//1-3 disabled), shader stage program, combiners, blending, alpha test, logic op, color mask,
+//polygon modes, vertex attributes 0 and 9 (inline values); depth/stencil tests and depth writes
+//and culling are back on. Set your own state again after pb_finished.
+//pb_target_extra_buffer draws at screen size without depth buffer when multisampling.
+#define PB_MS_NONE  0
+#define PB_MS_2X    1
+#define PB_MS_4X    2
+void    pb_set_multisample(int mode);
+int     pb_get_multisample(void);
+DWORD   *pb_multisample_buffer(void);   //after pb_init: the sample buffer (NULL without multisampling)
+DWORD   pb_multisample_pitch(void);
+
 DWORD   *pb_extra_buffer(int n);    //returns a static extra buffer address
 DWORD   *pb_back_buffer(void);      //returns normal rotating back buffer address
 DWORD   pb_back_buffer_width(void);
