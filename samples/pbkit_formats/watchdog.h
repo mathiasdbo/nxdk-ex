@@ -106,6 +106,42 @@ static DWORD WINAPI watchdog_thread (LPVOID arg)
 }
 
 /* Starts the watchdog thread; call once, after E: is mounted. */
+/* Read-only probe of the disk's sector 0 (the F: partition table, which has
+ * been lost three times around these tests): writes "sector0 <when>: table
+ * yes|NO, bytes ..." into line, so the log shows when it changes. */
+static void watchdog_sector0 (const char *when, char *line, size_t size)
+{
+    ANSI_STRING name;
+    OBJECT_ATTRIBUTES attr;
+    IO_STATUS_BLOCK io;
+    LARGE_INTEGER off;
+    HANDLE h;
+    NTSTATUS st;
+    unsigned char *s = MmAllocateContiguousMemory(4096);
+
+    if (!s) {
+        snprintf(line, size, "sector0 %s: no memory", when);
+        return;
+    }
+    RtlInitAnsiString(&name, "\Device\Harddisk0\Partition0");
+    InitializeObjectAttributes(&attr, &name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    st = NtOpenFile(&h, SYNCHRONIZE | GENERIC_READ, &attr, &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    FILE_SYNCHRONOUS_IO_NONALERT | FILE_NO_INTERMEDIATE_BUFFERING);
+    if (st >= 0) {
+        off.QuadPart = 0;
+        st = NtReadFile(h, NULL, NULL, NULL, &io, s, 4096, &off);
+        NtClose(h);
+    }
+    if (st < 0) {
+        snprintf(line, size, "sector0 %s: read failed %08lX", when, (unsigned long)st);
+    } else {
+        snprintf(line, size, "sector0 %s: table %s, bytes %02X %02X %02X %02X %02X %02X %02X %02X, boot count %02X",
+                 when, memcmp(s, "****PARTINFO****", 16) == 0 ? "yes" : "NO", s[0], s[1], s[2], s[3], s[4], s[5],
+                 s[6], s[7], s[3 * 512 + 4]);
+    }
+    MmFreeContiguousMemory(s);
+}
+
 static void watchdog_start (void)
 {
     HANDLE t;
