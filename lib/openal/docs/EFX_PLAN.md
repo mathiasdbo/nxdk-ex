@@ -87,9 +87,9 @@ cause: `apu_gp.c` `wait_frames()` gave up after 40000 register reads (about 20 m
 had passed, so on a GP this slow the code was rewritten under a kernel still in its frame. It now waits up to 250 ms
 by `KeTickCount` and refuses the load instead: 3 of 3 xemu runs then reached the `XReboot()`, no abort.
 
-**Console (2026-10-27):** 44 of 45 checks passed, the GP ran about 1500 frames a second with every kernel, and
-the rotation ran 5 minutes without an underrun, a padded buffer or a slip. The one failure was the test's: 6j's
-floor was measured while the reverb's tail still rang (fixed, rerun pending).
+**Console (2026-10-27):** 45 of 45 checks passed on the second run (the first, 44 of 45, measured 6j's floor while
+the reverb's tail still rang; it now waits 3 s and reads -102.5 dB). The GP ran about 1500 frames a second with
+every kernel, and the rotation ran 5 minutes without an underrun, a padded buffer or a slip, both runs.
 
 | Section | Check | Expected (simulator), tolerance | xemu | Console |
 |---|---|---|---|---|
@@ -107,7 +107,7 @@ floor was measured while the reverb's tail still rang (fixed, rerun pending).
 | 6i GP load | ring modulator, distortion, equalizer (one band), compressor, autowah | simulator 3,500 / 4,500 / 2,400 / 1,800 / 7,200 instructions a frame | 0 % (not modelled) | 0 / 8 / 3 / 3 / 12 % (reverb 34 %, echo 2-3 %, chorus 0 %: the meter reads 0 for the ring modulator and the chorus, to look into) |
 | 6j four slots | reverb + equalizer (4 bands) + distortion + autowah attach | `AL_NO_ERROR` each | PASS | PASS |
 | | all four busy 2 s: GP load peak, AC97 padded | below 100 % (about 87 % by the reverb's console scale, 27,500 instructions), 0 padded | 0 %, padded +188 (not modelled) | 56 %, peak 57 %; padded +0, underruns +0, PASS |
-| | each slot alone: 1 kHz against the dry ear; 3 kHz against 1 kHz | at least -30 dB and 20 over the floor; H3 at least -30 dB on the distortion only | silent | reverb -4.5, equalizer +4.6, distortion +7.6, autowah +3.1 dB; H3 -70.6 / -80.5 / -6.6 / -96.9: PASS but the reverb (FAIL: the floor, measured 300 ms after its sends, was the reverb's own tail at -22.1 dB; the floor now waits 3 s) |
+| | each slot alone: 1 kHz against the dry ear; 3 kHz against 1 kHz | at least -30 dB and 20 over the floor; H3 at least -30 dB on the distortion only | silent | reverb -4.5, equalizer +4.6, distortion +7.6, autowah +3.1 dB; H3 -70.6 / -80.5 / -6.6 / -96.9: PASS (run 1 failed the reverb: its floor, measured 300 ms after the sends, was the reverb's own tail at -22.1 dB; run 2 waits 3 s, floor -102.5 dB, reverb -4.4 dB) |
 | | a second reverb on slot 4 | `AL_INVALID_OPERATION`, slot unchanged | PASS | PASS |
 | | GP restarts | 0 | 0, PASS | 0, PASS |
 | 7 rotation | 11 settings (reverb, echo, chorus, ring modulator, distortion, flanger, equalizer, compressor, autowah), 15 s each, 5 min, then `XReboot()` | 0 underruns / padded / slips, no AL error | no AL error, 0 restarts; slips not modelled | 0 underruns / padded / slips each minute, no AL error, 0 restarts, about 1500 GP frames/s, GP load peak 35 %, `XReboot()`, PASS |
