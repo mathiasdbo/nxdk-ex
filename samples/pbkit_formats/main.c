@@ -79,6 +79,15 @@ static const config_t configs[] = {
 #define COLOR_A     0xFF0000
 #define COLOR_B     0x0000FF
 #define COLOR_CLEAR 0x404040
+#define COLOR_PROBE 0x00FF00 /* mid-depth quad drawn after the readback */
+#define PROBE_Z     0.5f
+#define PROBE_W     0.5f
+
+#ifdef NO_ZCOMP /* experiment: the depth tile without Z compression */
+#define CHAIN_DIR "pbkit Formats nozcomp"
+#else
+#define CHAIN_DIR "pbkit Formats"
+#endif
 
 static const float tri_a[3][2] = {{100.0f, 100.0f}, {420.0f, 100.0f}, {260.0f, 400.0f}};
 static const float tri_b[3][2] = {{220.0f, 100.0f}, {540.0f, 100.0f}, {380.0f, 400.0f}};
@@ -117,7 +126,7 @@ static volatile results_t g_results __attribute__((aligned(16))) = {"PBFMTRES"};
 
 static Vertex *alloc_vertices;
 static int status_lines;
-static char status[12][64];
+static char status[20][64];
 
 #define LOGFILE    "E:\\pbkit_formats.txt"
 #define LOG_CYCLES 2 /* cycling build: passes over configs[] before XReboot */
@@ -169,7 +178,7 @@ static void draw_arrays (unsigned int mode, int start, int count);
 static void log_line (const char *fmt, ...)
 {
     va_list ap;
-    if (status_lines >= 12) {
+    if (status_lines >= (int)(sizeof(status) / sizeof(status[0]))) {
         return;
     }
     va_start(ap, fmt);
@@ -316,6 +325,9 @@ static void run_config (int index)
     pb_set_depth_format(cfg->depth_fmt);
     pb_set_depth_float(cfg->depth_float);
     pb_set_w_buffer(cfg->w_buffer);
+#ifdef NO_ZCOMP
+    pb_set_depth_compression(false);
+#endif
 
     if ((status_code = pb_init())) {
         debugPrint("pb_init Error %d\n", status_code);
@@ -350,13 +362,20 @@ static void run_config (int index)
     init_shader();
     log_file("step: init_shader ok");
 
-    alloc_vertices = MmAllocateContiguousMemoryEx(6 * sizeof(Vertex), 0, 0x3ffb000, 0, PAGE_READWRITE | PAGE_WRITECOMBINE);
+    alloc_vertices = MmAllocateContiguousMemoryEx(12 * sizeof(Vertex), 0, 0x3ffb000, 0, PAGE_READWRITE | PAGE_WRITECOMBINE);
     if (w) {
         fill_triangle(&alloc_vertices[0], tri_a, A_Z, A_W, COLOR_A, scale);
         fill_triangle(&alloc_vertices[3], tri_b, B_Z, B_W, COLOR_B, scale);
     } else {
         fill_triangle(&alloc_vertices[0], tri_b, B_Z, B_W, COLOR_B, scale);
         fill_triangle(&alloc_vertices[3], tri_a, A_Z, A_W, COLOR_A, scale);
+    }
+    {
+        /* vertices 6-11: a full screen quad between the two depths (GPU probe) */
+        static const float q0[3][2] = {{0.0f, 0.0f}, {WIDTH, 0.0f}, {0.0f, HEIGHT}};
+        static const float q1[3][2] = {{WIDTH, 0.0f}, {WIDTH, HEIGHT}, {0.0f, HEIGHT}};
+        fill_triangle(&alloc_vertices[6], q0, PROBE_Z, PROBE_W, COLOR_PROBE, scale);
+        fill_triangle(&alloc_vertices[9], q1, PROBE_Z, PROBE_W, COLOR_PROBE, scale);
     }
 
     /* Frame 1: render and read back */
@@ -462,6 +481,41 @@ static void run_config (int index)
         }
     }
 
+    /* GPU probe: a quad at a depth between A and B, depth tested against what
+     * the GPU holds. It must cover the clear area and the far triangle's own
+     * area and nothing else, whatever the CPU read back (Z compression). */
+    {
+        const int px[4][2] = {{PX_CLEAR_X, PX_CLEAR_Y}, {PX_BOTH_X, PX_BOTH_Y}, {PX_A_X, PX_A_Y}, {PX_B_X, PX_B_Y}};
+        static const char *names[4] = {"clear", "overlap", "A only", "B only"};
+        uint32_t exp[4], got;
+        bool gpu_ok = true;
+        exp[0] = pack_color(cfg->color_fmt, COLOR_PROBE);
+        exp[1] = pack_color(cfg->color_fmt, w ? COLOR_A : COLOR_B);
+        exp[2] = pack_color(cfg->color_fmt, w ? COLOR_A : COLOR_PROBE);
+        exp[3] = pack_color(cfg->color_fmt, w ? COLOR_PROBE : COLOR_B);
+        uint8_t *pfb;
+        /* its own frame: the scene again, then the quad, read before the swap */
+        pb_wait_for_vbl();
+        pb_reset();
+        pb_target_back_buffer();
+        pfb = (uint8_t *)pb_back_buffer();
+        draw_scene(cfg);
+        draw_arrays(NV097_SET_BEGIN_END_OP_TRIANGLES, 6, 6);
+        while (pb_busy()) {
+        }
+        for (i = 0; i < 4; i++) {
+            got = read_color(cfg, pfb, fb_pitch, px[i][0], px[i][1]);
+            if (!color_matches(cfg->color_fmt, got, exp[i])) {
+                gpu_ok = false;
+            }
+            log_line("gpu probe %-7s %06X exp %06X %s", names[i], got, exp[i],
+                     color_matches(cfg->color_fmt, got, exp[i]) ? "ok" : "FAIL");
+        }
+        log_line("GPU DEPTH: %s", gpu_ok ? "correct (probe as expected)" : "WRONG (probe differs)");
+        while (pb_finished()) {
+        }
+    }
+
     pass = (fails == 0);
     log_line("RESULT: %s (fails 0x%02X)", pass ? "PASS" : "FAIL", fails);
     g_results.fails = fails;
@@ -541,7 +595,7 @@ int main (void)
     run_config(CONFIG);
     if (CONFIG + 1 < (int)NUM_CONFIGS) {
         char path[64];
-        snprintf(path, sizeof(path), "E:\\Games\\pbkit Formats\\cfg%d.xbe", CONFIG + 1);
+        snprintf(path, sizeof(path), "E:\\Games\\%s\\cfg%d.xbe", CHAIN_DIR, CONFIG + 1);
         {
             char line[96];
             snprintf(line, sizeof(line), "NEXT %s", path);
