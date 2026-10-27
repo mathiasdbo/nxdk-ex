@@ -87,6 +87,7 @@ static  int         pb_ColorBpp=32;     //bits per pixel of pb_ColorFmt (compute
 static  int         pb_DepthBpp=32;     //bits per pixel of pb_DepthFmt (computed by pb_init)
 static  int         pb_DepthFloat=0;    //NV097_SET_CONTROL0_Z_FORMAT: 0=fixed point depth, 1=floating point depth
 static  int         pb_DepthCompress=1; //PB_TILE_FLAGS_ZCOMPRESS on the depth tile (pb_set_depth_compression)
+static  int         pb_DepthTileMode=0; //pb_set_depth_tile_mode: 0 Z tile, 1 plain tile (no Z flags), 2 no tile
 static  int         pb_WBuffer=1;       //NV097_SET_CONTROL0_Z_PERSPECTIVE_ENABLE: 1=depth is w (W-buffering), 0=depth is z
                                         //(1 is what pbkit has always pushed in set_draw_buffer, see pb_control0)
 static  int         pb_Dither=-1;       //NV097_SET_DITHER_ENABLE: -1=auto (on for 16 bits color formats), 0=off, 1=on
@@ -3154,6 +3155,11 @@ void pb_set_w_buffer(bool enable)
     pb_update_depth_state();
 }
 
+void pb_set_depth_tile_mode(int mode)
+{
+    pb_DepthTileMode = mode;
+}
+
 void pb_set_depth_compression(bool enable)
 {
     pb_DepthCompress = enable ? 1 : 0;
@@ -4161,7 +4167,7 @@ int pb_init(void)
             //(640 wide Z16: 1280 -> 1536; Z24S8: 2560, already a tile pitch).
             TilePitch=pb_tile_pitch_at_least(Pitch);
             if (TilePitch) Pitch=TilePitch;
-            pb_DSTiled=(TilePitch!=0);
+            pb_DSTiled=(TilePitch!=0)&&(pb_DepthTileMode!=2);
             pb_DepthStencilPitch=Pitch;
 
             Size=Pitch*VSize*pb_MSScaleY;
@@ -4200,6 +4206,7 @@ int pb_init(void)
                 (PB_TILE_FLAGS_ZCOMPRESS|PB_TILE_FLAGS_Z32BITS|PB_TILE_FLAGS_ZBUFFER): //0x84000001 for Z24S8
                 (PB_TILE_FLAGS_ZCOMPRESS|PB_TILE_FLAGS_ZBUFFER))     //0x80000001 for Z16
                 &(pb_DepthCompress?0xFFFFFFFF:~PB_TILE_FLAGS_ZCOMPRESS)
+                &(pb_DepthTileMode==1?0:0xFFFFFFFF)
                 );
     }
     else if (pb_AppDSAddr)

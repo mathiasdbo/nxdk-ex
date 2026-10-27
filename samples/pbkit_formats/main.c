@@ -85,6 +85,10 @@ static const config_t configs[] = {
 
 #ifdef NO_ZCOMP /* experiment: the depth tile without Z compression */
 #define CHAIN_DIR "pbkit Formats nozcomp"
+#elif defined(ZTILE_PLAIN) /* experiment: depth tiled like a color buffer */
+#define CHAIN_DIR "pbkit Formats ztplain"
+#elif defined(ZTILE_NONE) /* experiment: depth not tiled */
+#define CHAIN_DIR "pbkit Formats ztnone"
 #else
 #define CHAIN_DIR "pbkit Formats"
 #endif
@@ -327,6 +331,12 @@ static void run_config (int index)
     pb_set_w_buffer(cfg->w_buffer);
 #ifdef NO_ZCOMP
     pb_set_depth_compression(false);
+#endif
+#ifdef ZTILE_PLAIN
+    pb_set_depth_tile_mode(1);
+#endif
+#ifdef ZTILE_NONE
+    pb_set_depth_tile_mode(2);
 #endif
 
     if ((status_code = pb_init())) {
