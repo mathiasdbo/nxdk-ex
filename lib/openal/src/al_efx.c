@@ -3,9 +3,12 @@
  * effects, filters, auxiliary effect slots, and the EFX source / listener
  * parameters. Storage and validation only; nothing reaches the APU yet.
  *
- * Supported: effect types AL_EFFECT_NULL, AL_EFFECT_REVERB and
- * AL_EFFECT_EAXREVERB (every other type is AL_INVALID_VALUE, as the extension
- * allows), filter types AL_FILTER_NULL and AL_FILTER_LOWPASS (the voice filter;
+ * Supported: effect types AL_EFFECT_NULL, AL_EFFECT_REVERB, AL_EFFECT_EAXREVERB,
+ * and on the library's own GP kernels AL_EFFECT_ECHO, AL_EFFECT_CHORUS,
+ * AL_EFFECT_FLANGER, AL_EFFECT_RING_MODULATOR, AL_EFFECT_DISTORTION,
+ * AL_EFFECT_EQUALIZER, AL_EFFECT_COMPRESSOR and AL_EFFECT_AUTOWAH (the
+ * frequency shifter, vocal morpher and pitch shifter are AL_INVALID_VALUE, as
+ * the extension allows), filter types AL_FILTER_NULL and AL_FILTER_LOWPASS (the voice filter;
  * highpass and bandpass are AL_INVALID_VALUE), AL_EFX_MAX_SLOTS slots, each
  * with its own GP kernel (phase9-04: an attach fails only when the GP's shared
  * budgets are full), and up to AL_EFX_MAX_SENDS sends per source.
@@ -23,8 +26,13 @@
 
 #include "al_buffer.h"   /* alSetError */
 #include "al_source.h"   /* al_source_effects_changed */
+#include "gp_kefx_autowah.h"
 #include "gp_kefx_chorus.h"
+#include "gp_kefx_compressor.h"
+#include "gp_kefx_distortion.h"
 #include "gp_kefx_echo.h"
+#include "gp_kefx_equalizer.h"
+#include "gp_kefx_ringmod.h"
 
 /* ------------------------------------------------------------------ parameter tables */
 
@@ -152,25 +160,109 @@ static const param_desc_t s_flanger_params[] = {
       AL_FLANGER_DEFAULT_DELAY },
 };
 
-static const param_desc_t *find_param(ALenum type, ALenum param) {
-    const param_desc_t *t = NULL;
-    size_t i, n = 0;
-    if (type == AL_EFFECT_REVERB) {
-        t = s_reverb_params;
-        n = COUNT(s_reverb_params);
-    } else if (type == AL_EFFECT_EAXREVERB) {
-        t = s_eaxreverb_params;
-        n = COUNT(s_eaxreverb_params);
-    } else if (type == AL_EFFECT_ECHO) {
-        t = s_echo_params;
-        n = COUNT(s_echo_params);
-    } else if (type == AL_EFFECT_CHORUS) {
-        t = s_chorus_params;
-        n = COUNT(s_chorus_params);
-    } else if (type == AL_EFFECT_FLANGER) {
-        t = s_flanger_params;
-        n = COUNT(s_flanger_params);
+static const param_desc_t s_ringmod_params[] = {
+    { AL_RING_MODULATOR_FREQUENCY, P_FLOAT, RV(ringmod_frequency), AL_RING_MODULATOR_MIN_FREQUENCY,
+      AL_RING_MODULATOR_MAX_FREQUENCY, AL_RING_MODULATOR_DEFAULT_FREQUENCY },
+    { AL_RING_MODULATOR_HIGHPASS_CUTOFF, P_FLOAT, RV(ringmod_highpass_cutoff), AL_RING_MODULATOR_MIN_HIGHPASS_CUTOFF,
+      AL_RING_MODULATOR_MAX_HIGHPASS_CUTOFF, AL_RING_MODULATOR_DEFAULT_HIGHPASS_CUTOFF },
+    { AL_RING_MODULATOR_WAVEFORM, P_INT, RV(ringmod_waveform), AL_RING_MODULATOR_MIN_WAVEFORM,
+      AL_RING_MODULATOR_MAX_WAVEFORM, AL_RING_MODULATOR_DEFAULT_WAVEFORM },
+};
+
+static const param_desc_t s_distortion_params[] = {
+    { AL_DISTORTION_EDGE, P_FLOAT, RV(distortion_edge), AL_DISTORTION_MIN_EDGE, AL_DISTORTION_MAX_EDGE,
+      AL_DISTORTION_DEFAULT_EDGE },
+    { AL_DISTORTION_GAIN, P_FLOAT, RV(distortion_gain), AL_DISTORTION_MIN_GAIN, AL_DISTORTION_MAX_GAIN,
+      AL_DISTORTION_DEFAULT_GAIN },
+    { AL_DISTORTION_LOWPASS_CUTOFF, P_FLOAT, RV(distortion_lowpass_cutoff), AL_DISTORTION_MIN_LOWPASS_CUTOFF,
+      AL_DISTORTION_MAX_LOWPASS_CUTOFF, AL_DISTORTION_DEFAULT_LOWPASS_CUTOFF },
+    { AL_DISTORTION_EQCENTER, P_FLOAT, RV(distortion_eq_center), AL_DISTORTION_MIN_EQCENTER,
+      AL_DISTORTION_MAX_EQCENTER, AL_DISTORTION_DEFAULT_EQCENTER },
+    { AL_DISTORTION_EQBANDWIDTH, P_FLOAT, RV(distortion_eq_bandwidth), AL_DISTORTION_MIN_EQBANDWIDTH,
+      AL_DISTORTION_MAX_EQBANDWIDTH, AL_DISTORTION_DEFAULT_EQBANDWIDTH },
+};
+
+static const param_desc_t s_equalizer_params[] = {
+    { AL_EQUALIZER_LOW_GAIN, P_FLOAT, RV(eq_low_gain), AL_EQUALIZER_MIN_LOW_GAIN, AL_EQUALIZER_MAX_LOW_GAIN,
+      AL_EQUALIZER_DEFAULT_LOW_GAIN },
+    { AL_EQUALIZER_LOW_CUTOFF, P_FLOAT, RV(eq_low_cutoff), AL_EQUALIZER_MIN_LOW_CUTOFF, AL_EQUALIZER_MAX_LOW_CUTOFF,
+      AL_EQUALIZER_DEFAULT_LOW_CUTOFF },
+    { AL_EQUALIZER_MID1_GAIN, P_FLOAT, RV(eq_mid1_gain), AL_EQUALIZER_MIN_MID1_GAIN, AL_EQUALIZER_MAX_MID1_GAIN,
+      AL_EQUALIZER_DEFAULT_MID1_GAIN },
+    { AL_EQUALIZER_MID1_CENTER, P_FLOAT, RV(eq_mid1_center), AL_EQUALIZER_MIN_MID1_CENTER,
+      AL_EQUALIZER_MAX_MID1_CENTER, AL_EQUALIZER_DEFAULT_MID1_CENTER },
+    { AL_EQUALIZER_MID1_WIDTH, P_FLOAT, RV(eq_mid1_width), AL_EQUALIZER_MIN_MID1_WIDTH, AL_EQUALIZER_MAX_MID1_WIDTH,
+      AL_EQUALIZER_DEFAULT_MID1_WIDTH },
+    { AL_EQUALIZER_MID2_GAIN, P_FLOAT, RV(eq_mid2_gain), AL_EQUALIZER_MIN_MID2_GAIN, AL_EQUALIZER_MAX_MID2_GAIN,
+      AL_EQUALIZER_DEFAULT_MID2_GAIN },
+    { AL_EQUALIZER_MID2_CENTER, P_FLOAT, RV(eq_mid2_center), AL_EQUALIZER_MIN_MID2_CENTER,
+      AL_EQUALIZER_MAX_MID2_CENTER, AL_EQUALIZER_DEFAULT_MID2_CENTER },
+    { AL_EQUALIZER_MID2_WIDTH, P_FLOAT, RV(eq_mid2_width), AL_EQUALIZER_MIN_MID2_WIDTH, AL_EQUALIZER_MAX_MID2_WIDTH,
+      AL_EQUALIZER_DEFAULT_MID2_WIDTH },
+    { AL_EQUALIZER_HIGH_GAIN, P_FLOAT, RV(eq_high_gain), AL_EQUALIZER_MIN_HIGH_GAIN, AL_EQUALIZER_MAX_HIGH_GAIN,
+      AL_EQUALIZER_DEFAULT_HIGH_GAIN },
+    { AL_EQUALIZER_HIGH_CUTOFF, P_FLOAT, RV(eq_high_cutoff), AL_EQUALIZER_MIN_HIGH_CUTOFF,
+      AL_EQUALIZER_MAX_HIGH_CUTOFF, AL_EQUALIZER_DEFAULT_HIGH_CUTOFF },
+};
+
+static const param_desc_t s_compressor_params[] = {
+    { AL_COMPRESSOR_ONOFF, P_INT, RV(compressor_onoff), AL_COMPRESSOR_MIN_ONOFF, AL_COMPRESSOR_MAX_ONOFF,
+      AL_COMPRESSOR_DEFAULT_ONOFF },
+};
+
+static const param_desc_t s_autowah_params[] = {
+    { AL_AUTOWAH_ATTACK_TIME, P_FLOAT, RV(autowah_attack_time), AL_AUTOWAH_MIN_ATTACK_TIME,
+      AL_AUTOWAH_MAX_ATTACK_TIME, AL_AUTOWAH_DEFAULT_ATTACK_TIME },
+    { AL_AUTOWAH_RELEASE_TIME, P_FLOAT, RV(autowah_release_time), AL_AUTOWAH_MIN_RELEASE_TIME,
+      AL_AUTOWAH_MAX_RELEASE_TIME, AL_AUTOWAH_DEFAULT_RELEASE_TIME },
+    { AL_AUTOWAH_RESONANCE, P_FLOAT, RV(autowah_resonance), AL_AUTOWAH_MIN_RESONANCE, AL_AUTOWAH_MAX_RESONANCE,
+      AL_AUTOWAH_DEFAULT_RESONANCE },
+    { AL_AUTOWAH_PEAK_GAIN, P_FLOAT, RV(autowah_peak_gain), AL_AUTOWAH_MIN_PEAK_GAIN, AL_AUTOWAH_MAX_PEAK_GAIN,
+      AL_AUTOWAH_DEFAULT_PEAK_GAIN },
+};
+
+/* Each effect type's parameters (NULL, 0 for none) */
+static const param_desc_t *type_params(ALenum type, size_t *n) {
+    switch (type) {
+        case AL_EFFECT_REVERB:
+            *n = COUNT(s_reverb_params);
+            return s_reverb_params;
+        case AL_EFFECT_EAXREVERB:
+            *n = COUNT(s_eaxreverb_params);
+            return s_eaxreverb_params;
+        case AL_EFFECT_ECHO:
+            *n = COUNT(s_echo_params);
+            return s_echo_params;
+        case AL_EFFECT_CHORUS:
+            *n = COUNT(s_chorus_params);
+            return s_chorus_params;
+        case AL_EFFECT_FLANGER:
+            *n = COUNT(s_flanger_params);
+            return s_flanger_params;
+        case AL_EFFECT_RING_MODULATOR:
+            *n = COUNT(s_ringmod_params);
+            return s_ringmod_params;
+        case AL_EFFECT_DISTORTION:
+            *n = COUNT(s_distortion_params);
+            return s_distortion_params;
+        case AL_EFFECT_EQUALIZER:
+            *n = COUNT(s_equalizer_params);
+            return s_equalizer_params;
+        case AL_EFFECT_COMPRESSOR:
+            *n = COUNT(s_compressor_params);
+            return s_compressor_params;
+        case AL_EFFECT_AUTOWAH:
+            *n = COUNT(s_autowah_params);
+            return s_autowah_params;
+        default:
+            *n = 0;
+            return NULL;
     }
+}
+
+static const param_desc_t *find_param(ALenum type, ALenum param) {
+    size_t i, n;
+    const param_desc_t *t = type_params(type, &n);
     for (i = 0; i < n; i++) {
         if (t[i].param == param) return &t[i];
     }
@@ -206,6 +298,11 @@ static void reverb_defaults(al_efx_reverb_t *r) {
     table_defaults(r, s_echo_params, COUNT(s_echo_params));
     table_defaults(r, s_chorus_params, COUNT(s_chorus_params));
     table_defaults(r, s_flanger_params, COUNT(s_flanger_params));
+    table_defaults(r, s_ringmod_params, COUNT(s_ringmod_params));
+    table_defaults(r, s_distortion_params, COUNT(s_distortion_params));
+    table_defaults(r, s_equalizer_params, COUNT(s_equalizer_params));
+    table_defaults(r, s_compressor_params, COUNT(s_compressor_params));
+    table_defaults(r, s_autowah_params, COUNT(s_autowah_params));
 }
 
 static bool in_range(ALfloat v, const param_desc_t *d) {
@@ -412,41 +509,270 @@ static void chorus_params(ALint wave, ALint phase, float rate, float depth, floa
     p[5] = (uint32_t)wave;
 }
 
-static void builtin_params(const al_efx_effect_props_t *e, uint32_t *p) {
-    const al_efx_reverb_t *r = &e->reverb;
-    if (e->type == AL_EFFECT_ECHO) {
-        echo_params(r, p);
-    } else if (e->type == AL_EFFECT_CHORUS) {
-        chorus_params(r->chorus_waveform, r->chorus_phase, r->chorus_rate, r->chorus_depth, r->chorus_feedback,
-                      r->chorus_delay, p);
-    } else {
-        chorus_params(r->flanger_waveform, r->flanger_phase, r->flanger_rate, r->flanger_depth, r->flanger_feedback,
-                      r->flanger_delay, p);
+/* ---- the on-chip effects (SOFT_GAP_PLAN.md phase9-07): OpenAL Soft's algorithms, docs/GP_KERNELS.md 10 */
+
+#define AL_EFX_RATE 48000.0
+#define AL_EFX_PI 3.14159265358979323846
+
+enum { BQ_LOWPASS, BQ_HIGHPASS, BQ_BANDPASS, BQ_PEAKING, BQ_LOWSHELF, BQ_HIGHSHELF };
+
+static double dmin(double a, double b) {
+    return (a < b) ? a : b;
+}
+
+/* A Q23 word from a double (rounded, saturated) */
+static uint32_t q23d(double v) {
+    double s = floor(v * 8388608.0 + 0.5);
+    if (s > 8388607.0) s = 8388607.0;
+    if (s < -8388608.0) s = -8388608.0;
+    return (uint32_t)(int32_t)s & 0xFFFFFFu;
+}
+
+/* OpenAL Soft's biquad design (its BiquadFilter: rcpQFromSlope, rcpQFromBandwidth, setParams) */
+static double rcpq_from_slope(double gain, double slope) {
+    return sqrt((gain + 1.0 / gain) * (1.0 / slope - 1.0) + 2.0);
+}
+
+static double rcpq_from_bandwidth(double f0norm, double bw) {
+    double w0 = 2.0 * AL_EFX_PI * f0norm;
+    return 2.0 * sinh(log(2.0) / 2.0 * bw * w0 / sin(w0));
+}
+
+/* c = b0 b1 b2 a1 a2, normalised by a0 */
+static void biquad(int kind, double f0norm, double g, double rcpq, double c[5]) {
+    double w0 = 2.0 * AL_EFX_PI * f0norm, cw = cos(w0), al = sin(w0) / 2.0 * rcpq, s = 2.0 * sqrt(g) * al;
+    double a[3], b[3];
+    int i;
+    switch (kind) {
+        case BQ_HIGHSHELF:
+            b[0] = g * ((g + 1.0) + (g - 1.0) * cw + s);
+            b[1] = -2.0 * g * ((g - 1.0) + (g + 1.0) * cw);
+            b[2] = g * ((g + 1.0) + (g - 1.0) * cw - s);
+            a[0] = (g + 1.0) - (g - 1.0) * cw + s;
+            a[1] = 2.0 * ((g - 1.0) - (g + 1.0) * cw);
+            a[2] = (g + 1.0) - (g - 1.0) * cw - s;
+            break;
+        case BQ_LOWSHELF:
+            b[0] = g * ((g + 1.0) - (g - 1.0) * cw + s);
+            b[1] = 2.0 * g * ((g - 1.0) - (g + 1.0) * cw);
+            b[2] = g * ((g + 1.0) - (g - 1.0) * cw - s);
+            a[0] = (g + 1.0) + (g - 1.0) * cw + s;
+            a[1] = -2.0 * ((g - 1.0) + (g + 1.0) * cw);
+            a[2] = (g + 1.0) + (g - 1.0) * cw - s;
+            break;
+        case BQ_PEAKING:
+            b[0] = 1.0 + al * g;
+            b[1] = -2.0 * cw;
+            b[2] = 1.0 - al * g;
+            a[0] = 1.0 + al / g;
+            a[1] = -2.0 * cw;
+            a[2] = 1.0 - al / g;
+            break;
+        case BQ_LOWPASS:
+            b[0] = (1.0 - cw) / 2.0;
+            b[1] = 1.0 - cw;
+            b[2] = (1.0 - cw) / 2.0;
+            a[0] = 1.0 + al;
+            a[1] = -2.0 * cw;
+            a[2] = 1.0 - al;
+            break;
+        case BQ_HIGHPASS:
+            b[0] = (1.0 + cw) / 2.0;
+            b[1] = -(1.0 + cw);
+            b[2] = (1.0 + cw) / 2.0;
+            a[0] = 1.0 + al;
+            a[1] = -2.0 * cw;
+            a[2] = 1.0 - al;
+            break;
+        default:   /* BQ_BANDPASS */
+            b[0] = al;
+            b[1] = 0.0;
+            b[2] = -al;
+            a[0] = 1.0 + al;
+            a[1] = -2.0 * cw;
+            a[2] = 1.0 - al;
+            break;
+    }
+    for (i = 0; i < 3; i++) {
+        c[i] = b[i] / a[0];
+    }
+    c[3] = a[1] / a[0];
+    c[4] = a[2] / a[0];
+}
+
+/* A kernel's 5 words for a biquad: b0 b1 b2 -a1 -a2 times `scale` (1/2 or 1/4), the b's times `gain` too */
+static void biquad_words(const double c[5], double gain, double scale, uint32_t *w) {
+    w[0] = q23d(c[0] * gain * scale);
+    w[1] = q23d(c[1] * gain * scale);
+    w[2] = q23d(c[2] * gain * scale);
+    w[3] = q23d(-c[3] * scale);
+    w[4] = q23d(-c[4] * scale);
+}
+
+/* AL_EFFECT_RING_MODULATOR -> gp_kefx_ringmod's words: the phase step (2^24 a cycle; 0: no modulation),
+ * the waveform (3: none), the highpass (slope 0.75, halved; the identity below 1 Hz, as OpenAL Soft's
+ * 0 Hz is; at most 0.49 fs) */
+static void ringmod_params(const al_efx_reverb_t *r, uint32_t *p) {
+    double step = floor((double)r->ringmod_frequency / AL_EFX_RATE * 16777216.0 + 0.5), c[5];
+    p[0] = (uint32_t)dmin(step, 16777215.0);
+    p[1] = (p[0] == 0u) ? 3u : (uint32_t)r->ringmod_waveform;
+    if (r->ringmod_highpass_cutoff < 1.0f) {
+        p[2] = q23d(0.5);
+        return;
+    }
+    biquad(BQ_HIGHPASS, dmin(r->ringmod_highpass_cutoff / AL_EFX_RATE, 0.49), 1.0, rcpq_from_slope(1.0, 0.75), c);
+    biquad_words(c, 1.0, 0.5, &p[2]);
+}
+
+/* AL_EFFECT_DISTORTION -> gp_kefx_distortion's words: the lowpass and the bandpass at 48 kHz with the Q
+ * OpenAL Soft's 4x-oversampled design gives them (halved; the bandpass's b's times the EFX gain and the
+ * slot's; at most 0.45 fs, 1 / Q at most 20), and d of the folded waveshaper,
+ * d = ((1 - e) / (1 + e))^3, e = min(sin(pi/2 EDGE), 0.99) */
+static void distortion_params(const al_efx_reverb_t *r, float slot_gain, uint32_t *p) {
+    double lpc = r->distortion_lowpass_cutoff, eqc = r->distortion_eq_center, c[5];
+    double e = dmin(sin(AL_EFX_PI / 2.0 * r->distortion_edge), 0.99), d = pow((1.0 - e) / (1.0 + e), 3.0);
+    double bw = dmin(r->distortion_eq_bandwidth / (eqc * 0.67), 20.0);
+    biquad(BQ_LOWPASS, dmin(lpc / AL_EFX_RATE, 0.45), 1.0,
+           rcpq_from_bandwidth(lpc / AL_EFX_RATE / 4.0, (lpc / 2.0) / (lpc * 0.67)), c);
+    biquad_words(c, 1.0, 0.5, &p[0]);
+    biquad(BQ_BANDPASS, dmin(eqc / AL_EFX_RATE, 0.45), 1.0,
+           dmin(rcpq_from_bandwidth(eqc / AL_EFX_RATE / 4.0, bw), 20.0), c);
+    biquad_words(c, (double)r->distortion_gain * slot_gain, 0.5, &p[5]);
+    p[10] = q23d(d);
+    p[11] = q23d(1.0 - d);
+    if (p[11] > 0x7FFFFFu - p[10]) {
+        p[11] = 0x7FFFFFu - p[10];   /* D = d + (1 - d) u stays below 1 */
     }
 }
 
-static bool builtin_kernel(ALenum type, apu_gp_kernel_t *k) {
-    static apu_gp_kernel_t echo, chorus;
-    static bool echo_ok, chorus_ok;
-    if (type == AL_EFFECT_ECHO) {
-        if (!echo_ok) {
-            echo_ok = apu_gp_kernel_parse(gp_kefx_echo_image, GP_KEFX_ECHO_IMAGE_WORDS, &echo) == 0;
-        }
-        if (echo_ok && k) *k = echo;
-        return echo_ok;
+/* AL_EFFECT_EQUALIZER -> gp_kefx_equalizer's words: the bands not at gain 1 (the identity there in
+ * OpenAL Soft too), low shelf, mid 1, mid 2, high shelf in that order, each designed with the square root
+ * of its gain (slope 0.75 for the shelves, the width in octaves for the peaks), quartered */
+static void equalizer_band(int kind, double f0norm, float gain, double width, uint32_t *p) {
+    double g = sqrt(gain), c[5];
+    biquad(kind, f0norm, g, (kind == BQ_PEAKING) ? rcpq_from_bandwidth(f0norm, width) : rcpq_from_slope(g, 0.75), c);
+    biquad_words(c, 1.0, 0.25, &p[1u + 5u * p[0]]);
+    p[0]++;
+}
+
+static void equalizer_params(const al_efx_reverb_t *r, uint32_t *p) {
+    p[0] = 0u;
+    if (r->eq_low_gain != 1.0f) {
+        equalizer_band(BQ_LOWSHELF, r->eq_low_cutoff / AL_EFX_RATE, r->eq_low_gain, 0.0, p);
     }
-    if (type == AL_EFFECT_CHORUS || type == AL_EFFECT_FLANGER) {
-        if (!chorus_ok) {
-            chorus_ok = apu_gp_kernel_parse(gp_kefx_chorus_image, GP_KEFX_CHORUS_IMAGE_WORDS, &chorus) == 0;
+    if (r->eq_mid1_gain != 1.0f) {
+        equalizer_band(BQ_PEAKING, r->eq_mid1_center / AL_EFX_RATE, r->eq_mid1_gain, r->eq_mid1_width, p);
+    }
+    if (r->eq_mid2_gain != 1.0f) {
+        equalizer_band(BQ_PEAKING, r->eq_mid2_center / AL_EFX_RATE, r->eq_mid2_gain, r->eq_mid2_width, p);
+    }
+    if (r->eq_high_gain != 1.0f) {
+        equalizer_band(BQ_HIGHSHELF, r->eq_high_cutoff / AL_EFX_RATE, r->eq_high_gain, 0.0, p);
+    }
+}
+
+/* AL_EFFECT_COMPRESSOR -> gp_kefx_compressor's words: on, OpenAL Soft's fixed rates (the envelope from
+ * 1/2 to 2 in 0.1 s, back in 0.2 s) as A - 1 and R, the slot's gain */
+static void compressor_params(const al_efx_reverb_t *r, float slot_gain, uint32_t *p) {
+    p[0] = (uint32_t)r->compressor_onoff;
+    p[1] = q23d(pow(2.0 / 0.5, 1.0 / (AL_EFX_RATE * 0.1)) - 1.0);
+    p[2] = q23d(pow(0.5 / 2.0, 1.0 / (AL_EFX_RATE * 0.2)));
+    p[3] = q23d(slot_gain);
+}
+
+/* AL_EFFECT_AUTOWAH -> gp_kefx_autowah's words: OpenAL Soft's derived values (1 - the attack and release
+ * rates, the release at least 1 ms; the peak gain 1 - log10(PEAK_GAIN / 31621), / 16; 20 .. 2500 Hz; the
+ * resonance's gain sqrt(10 log10(RESONANCE) / 3), / 4 and its reciprocal), the slot's gain */
+static void autowah_params(const al_efx_reverb_t *r, float slot_gain, uint32_t *p) {
+    double rel = r->autowah_release_time, res = sqrt(log10(r->autowah_resonance) * 10.0 / 3.0);
+    if (rel < 0.001) rel = 0.001;
+    p[0] = q23d(1.0 - exp(-1.0 / (r->autowah_attack_time * AL_EFX_RATE)));
+    p[1] = q23d(1.0 - exp(-1.0 / (rel * AL_EFX_RATE)));
+    p[2] = q23d((1.0 - log10(r->autowah_peak_gain / 31621.0)) / 16.0);
+    p[3] = q23d(16.0 * (2500.0 - 20.0) / AL_EFX_RATE);
+    p[4] = q23d(20.0 / AL_EFX_RATE);
+    p[5] = q23d(res / 4.0);
+    p[6] = q23d(1.0 / res);
+    p[7] = q23d(slot_gain);
+}
+
+bool al_efx_slot_gain_in_kernel(const al_efx_slot_t *slot) {
+    return slot && (slot->props.type == AL_EFFECT_DISTORTION || slot->props.type == AL_EFFECT_COMPRESSOR ||
+                    slot->props.type == AL_EFFECT_AUTOWAH);
+}
+
+static void builtin_params(const al_efx_slot_t *slot, uint32_t *p) {
+    const al_efx_reverb_t *r = &slot->props.reverb;
+    memset(p, 0, AL_EFX_GP_PARAMS * sizeof(uint32_t));
+    switch (slot->props.type) {
+        case AL_EFFECT_ECHO:
+            echo_params(r, p);
+            break;
+        case AL_EFFECT_CHORUS:
+            chorus_params(r->chorus_waveform, r->chorus_phase, r->chorus_rate, r->chorus_depth, r->chorus_feedback,
+                          r->chorus_delay, p);
+            break;
+        case AL_EFFECT_FLANGER:
+            chorus_params(r->flanger_waveform, r->flanger_phase, r->flanger_rate, r->flanger_depth,
+                          r->flanger_feedback, r->flanger_delay, p);
+            break;
+        case AL_EFFECT_RING_MODULATOR:
+            ringmod_params(r, p);
+            break;
+        case AL_EFFECT_DISTORTION:
+            distortion_params(r, slot->gain, p);
+            break;
+        case AL_EFFECT_EQUALIZER:
+            equalizer_params(r, p);
+            break;
+        case AL_EFFECT_COMPRESSOR:
+            compressor_params(r, slot->gain, p);
+            break;
+        default:   /* AL_EFFECT_AUTOWAH */
+            autowah_params(r, slot->gain, p);
+            break;
+    }
+}
+
+/* The library's kernels, one image per effect type (the chorus's runs the flanger too) */
+static const struct {
+    ALenum type;
+    const uint32_t *image;
+    uint32_t words;
+} s_builtins[] = {
+    { AL_EFFECT_ECHO, gp_kefx_echo_image, GP_KEFX_ECHO_IMAGE_WORDS },
+    { AL_EFFECT_CHORUS, gp_kefx_chorus_image, GP_KEFX_CHORUS_IMAGE_WORDS },
+    { AL_EFFECT_FLANGER, gp_kefx_chorus_image, GP_KEFX_CHORUS_IMAGE_WORDS },
+    { AL_EFFECT_RING_MODULATOR, gp_kefx_ringmod_image, GP_KEFX_RINGMOD_IMAGE_WORDS },
+    { AL_EFFECT_DISTORTION, gp_kefx_distortion_image, GP_KEFX_DISTORTION_IMAGE_WORDS },
+    { AL_EFFECT_EQUALIZER, gp_kefx_equalizer_image, GP_KEFX_EQUALIZER_IMAGE_WORDS },
+    { AL_EFFECT_COMPRESSOR, gp_kefx_compressor_image, GP_KEFX_COMPRESSOR_IMAGE_WORDS },
+    { AL_EFFECT_AUTOWAH, gp_kefx_autowah_image, GP_KEFX_AUTOWAH_IMAGE_WORDS },
+};
+
+static bool builtin_kernel(ALenum type, apu_gp_kernel_t *k) {
+    static apu_gp_kernel_t parsed[COUNT(s_builtins)];
+    static int8_t state[COUNT(s_builtins)];   /* 0: not parsed yet, 1: good, -1: bad */
+    size_t i;
+    for (i = 0; i < COUNT(s_builtins); i++) {
+        if (s_builtins[i].type != type) {
+            continue;
         }
-        if (chorus_ok && k) *k = chorus;
-        return chorus_ok;
+        if (state[i] == 0) {
+            state[i] = (apu_gp_kernel_parse(s_builtins[i].image, s_builtins[i].words, &parsed[i]) == 0) ? 1 : -1;
+        }
+        if (state[i] > 0 && k) *k = parsed[i];
+        return state[i] > 0;
     }
     return false;
 }
 
 static bool is_builtin_kernel(ALenum type) {
-    return type == AL_EFFECT_ECHO || type == AL_EFFECT_CHORUS || type == AL_EFFECT_FLANGER;
+    size_t i;
+    for (i = 0; i < COUNT(s_builtins); i++) {
+        if (s_builtins[i].type == type) return true;
+    }
+    return false;
 }
 
 bool al_efx_slot_is_kernel(const al_efx_slot_t *slot) {
@@ -493,7 +819,7 @@ bool al_efx_slot_kernel(const al_efx_slot_t *slot, apu_gp_kernel_t *k, const uin
         if (!builtin_kernel(slot->props.type, k)) {
             return false;
         }
-        builtin_params(&slot->props, p);
+        builtin_params(slot, p);
         if (params) *params = p;
         return true;
     }

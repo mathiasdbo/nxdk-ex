@@ -318,8 +318,10 @@ alSource3i(src, AL_AUXILIARY_SEND_FILTER, (ALint)slot, 0, AL_FILTER_NULL);   /* 
   - `ALC_EXT_EFX` 1.0 in the device's extension string. Every EFX function is available through
     `alGetProcAddress`.
   - Effect types: `AL_EFFECT_NULL`, `AL_EFFECT_REVERB`, `AL_EFFECT_EAXREVERB`, `AL_EFFECT_ECHO`,
-    `AL_EFFECT_CHORUS`, `AL_EFFECT_FLANGER` (below) and `AL_EFFECT_XBOX_GP_PROGRAM` (3.13). Other types give
-    `AL_INVALID_VALUE`, as the extension allows.
+    `AL_EFFECT_CHORUS`, `AL_EFFECT_FLANGER`, `AL_EFFECT_RING_MODULATOR`, `AL_EFFECT_DISTORTION`,
+    `AL_EFFECT_EQUALIZER`, `AL_EFFECT_COMPRESSOR`, `AL_EFFECT_AUTOWAH` (below) and `AL_EFFECT_XBOX_GP_PROGRAM`
+    (3.13). The frequency shifter, vocal morpher and pitch shifter give `AL_INVALID_VALUE`, as the extension
+    allows.
   - **`AL_EFFECT_ECHO`** runs on a library kernel on the GP, with every EFX echo parameter: two taps at `DELAY`
     and `DELAY + LRDELAY` from one delay line, panned by `SPREAD` (constant power), the second tap fed back
     by `FEEDBACK` through a one-pole lowpass set by `DAMPING`, so each repeat is darker. The input is the
@@ -332,13 +334,31 @@ alSource3i(src, AL_AUXILIARY_SEND_FILTER, (ALint)slot, 0, AL_FILTER_NULL);   /* 
     the taps' average goes back into the line by `FEEDBACK`. The input is the slot's sends summed to mono.
     The line is all of the GP's Y RAM (2048 samples), so the kernel needs no scratch memory and no DMA;
     about 4900 instructions a frame (about 10 % of the GP). `AL_EFFECTSLOT_GAIN` scales the sends into it.
+  - **The on-chip effects** (phase9-07) follow OpenAL Soft's algorithms, each on a library kernel with every
+    EFX parameter, no scratch memory and no DMA (`GP_KERNELS.md` 10 has the details and costs):
+    - `AL_EFFECT_RING_MODULATOR`: each channel highpassed, then multiplied by a sine, sawtooth or square at
+      `FREQUENCY` (0: no modulation).
+    - `AL_EFFECT_DISTORTION`: the sends summed to mono, lowpassed, shaped (`EDGE`), bandpassed (`EQCENTER`,
+      `EQBANDWIDTH`) and scaled by `GAIN`, on both sides. Unlike OpenAL Soft it runs at 48 kHz, not 4x
+      oversampled, so a hard edge on high notes aliases a little.
+    - `AL_EFFECT_EQUALIZER`: a low shelf, two peaks and a high shelf on each channel; a band at gain 1 is left
+      out and costs nothing.
+    - `AL_EFFECT_COMPRESSOR`: OpenAL Soft's automatic gain: quiet passages up to twice as loud, loud ones as
+      they are, following the level in 0.1 s up and 0.2 s down.
+    - `AL_EFFECT_AUTOWAH`: a resonant peak (20..2500 Hz, up to +20 dB by `RESONANCE`) that follows the level
+      (`PEAK_GAIN`, `ATTACK_TIME`, `RELEASE_TIME`), on each channel.
+    - For the distortion, the compressor and the autowah `AL_EFFECTSLOT_GAIN` scales their output, as in OpenAL
+      Soft (their sound depends on the input's level); for the others it scales the sends into them.
+    - Every stage is limited to full scale: keep the sends' level moderate into a +18 dB equalizer band or the
+      autowah's +20 dB peak.
   - Filters: `AL_FILTER_NULL` and `AL_FILTER_LOWPASS` (below). Highpass and bandpass give `AL_INVALID_VALUE`.
   - Up to 4 slots and 256 effects and filters. `ALC_MAX_AUXILIARY_SENDS` is 2 (the default; larger requests are
     clamped).
 - **One effect per slot, several at once** (phase9-04). Each slot runs its own GP kernel: a reverb, an echo and
-  a chorus play together. Attaching an effect gives `AL_INVALID_OPERATION` only when it does not fit the GP
-  beside the other slots' (two reverbs or two choruses do not), or while `AL_XBOX_REVERB` (3.7) is on. Empty
-  slots are legal and silent.
+  a chorus play together, or the reverb and any three on-chip effects. Attaching an effect gives
+  `AL_INVALID_OPERATION` only when it does not fit the GP beside the other slots' (two reverbs or two choruses
+  do not), or while `AL_XBOX_REVERB` (3.7) is on. Empty slots are legal and silent. The GP's time is shared
+  too: watch `AL_XBOX_GP_LOAD_PEAK` with the heaviest set your game uses (`GP_KERNELS.md` 7).
 - **Sends:**
   - A send's level is the source's gain with distance attenuation by `AL_ROOM_ROLLOFF_FACTOR`, plus the
     reverb's own room rolloff; the cone too when `AL_AUXILIARY_SEND_FILTER_GAIN_AUTO` is on.
