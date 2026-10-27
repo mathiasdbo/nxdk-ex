@@ -46,6 +46,8 @@ bool pb_get_depth_float (void);
 // it, so the default is on; pass false for a plain Z-buffer. Any time.
 void pb_set_w_buffer (bool enable);
 bool pb_get_w_buffer (void);
+/* Z compression of the tiled depth buffer (on by default; takes effect at pb_init) */
+void pb_set_depth_compression (bool enable);
 
 // The depth value 1.0f maps to in pb_set_viewport: 0xFFFFFF (Z24S8), 0xFFFF
 // (Z16), 1.0E30 (Z24S8 float), 511.9375 (Z16 float). Valid after pb_init.

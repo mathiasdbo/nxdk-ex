@@ -86,6 +86,7 @@ static unsigned int pb_DepthFmt = NV097_SET_SURFACE_FORMAT_ZETA_Z24S8;
 static  int         pb_ColorBpp=32;     //bits per pixel of pb_ColorFmt (computed by pb_init)
 static  int         pb_DepthBpp=32;     //bits per pixel of pb_DepthFmt (computed by pb_init)
 static  int         pb_DepthFloat=0;    //NV097_SET_CONTROL0_Z_FORMAT: 0=fixed point depth, 1=floating point depth
+static  int         pb_DepthCompress=1; //PB_TILE_FLAGS_ZCOMPRESS on the depth tile (pb_set_depth_compression)
 static  int         pb_WBuffer=1;       //NV097_SET_CONTROL0_Z_PERSPECTIVE_ENABLE: 1=depth is w (W-buffering), 0=depth is z
                                         //(1 is what pbkit has always pushed in set_draw_buffer, see pb_control0)
 static  int         pb_Dither=-1;       //NV097_SET_DITHER_ENABLE: -1=auto (on for 16 bits color formats), 0=off, 1=on
@@ -3153,6 +3154,11 @@ void pb_set_w_buffer(bool enable)
     pb_update_depth_state();
 }
 
+void pb_set_depth_compression(bool enable)
+{
+    pb_DepthCompress = enable ? 1 : 0;
+}
+
 bool pb_get_w_buffer(void)
 {
     return pb_WBuffer != 0;
@@ -4190,9 +4196,10 @@ int pb_init(void)
                 Pitch,              //DWORD tile_pitch (= surface pitch)
                 0,              //DWORD tile_z_start_tag,
                 0,              //DWORD tile_z_offset,
-                (DepthBpp==32)?     //DWORD tile_flags: compressed depth buffer,
+                ((DepthBpp==32)?     //DWORD tile_flags: compressed depth buffer,
                 (PB_TILE_FLAGS_ZCOMPRESS|PB_TILE_FLAGS_Z32BITS|PB_TILE_FLAGS_ZBUFFER): //0x84000001 for Z24S8
-                (PB_TILE_FLAGS_ZCOMPRESS|PB_TILE_FLAGS_ZBUFFER)     //0x80000001 for Z16
+                (PB_TILE_FLAGS_ZCOMPRESS|PB_TILE_FLAGS_ZBUFFER))     //0x80000001 for Z16
+                &(pb_DepthCompress?0xFFFFFFFF:~PB_TILE_FLAGS_ZCOMPRESS)
                 );
     }
     else if (pb_AppDSAddr)
