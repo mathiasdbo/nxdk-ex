@@ -5,7 +5,8 @@
  * source to slot s feeds GP slot s - 1 (bins 2+2k / 3+2k), and a playing
  * voice's send moves to another slot's bins with a volume ramp. Null backend:
  * the loader is tests/test_apu_gp.c [7]-[9], three kernels running together
- * tests/test_gp_programs.py [10].
+ * tests/test_gp_programs.py [10]; the on-chip effects (phase9-07) beside the
+ * reverb and each other [4], their kernels together tests/test_gp_onchip_slots.py.
  */
 #define AL_ALEXT_PROTOTYPES
 #include <assert.h>
@@ -21,6 +22,11 @@
 #include "apu_voice.h"
 #include "apu_vp.h"
 #include "../dsp/gp_kecho.h"
+#include "gp_kefx_autowah.h"
+#include "gp_kefx_compressor.h"
+#include "gp_kefx_distortion.h"
+#include "gp_kefx_equalizer.h"
+#include "gp_kefx_ringmod.h"
 
 static ALuint s_fx[6], s_slot[4];
 
@@ -173,6 +179,118 @@ static void test_routing(void) {
            "a stopped voice moves at once [PASS]\n");
 }
 
+/* An ABI 2 image of `code` words (nop ..., rts) with an X block of `x_words` */
+static ALuint *filler_image(uint32_t code, uint32_t x_words, ALsizei *count) {
+    static ALuint img[7u + 0x700u];
+    uint32_t i;
+    img[0] = AL_XBOX_GP_IMAGE_MAGIC;
+    img[1] = 2u;
+    img[2] = 0u;            /* scratch */
+    img[3] = 0u;            /* descriptors */
+    img[4] = x_words;
+    img[5] = 0u;            /* Y */
+    img[6] = 0u;            /* relocs */
+    for (i = 0; i < code; i++) {
+        img[7u + i] = (i + 1u < code) ? 0x000000u : 0x00000Cu;
+    }
+    *count = (ALsizei)(7u + code);
+    return img;
+}
+
+static void test_onchip(void) {
+    static const ALenum types[5] = { AL_EFFECT_RING_MODULATOR, AL_EFFECT_DISTORTION, AL_EFFECT_EQUALIZER,
+                                     AL_EFFECT_COMPRESSOR, AL_EFFECT_AUTOWAH };
+    static const uint32_t x_words[5] = { GP_KEFX_RINGMOD_K_XWORDS, GP_KEFX_DISTORTION_K_XWORDS,
+                                         GP_KEFX_EQUALIZER_K_XWORDS, GP_KEFX_COMPRESSOR_K_XWORDS,
+                                         GP_KEFX_AUTOWAH_K_XWORDS };
+    const apu_gp_kernel_t *rv = apu_gp_reverb_kernel();
+    ALuint fx[6];
+    ALsizei n;
+    const ALuint *img;
+    uint32_t a, b, c, d, combos = 0, s;
+
+    printf("[4] the on-chip effects: any three beside the reverb, any four together; refused when full\n");
+    for (s = 0; s < 4; s++) {
+        attach(s, 0, AL_NO_ERROR);
+    }
+    alGenEffects(6, fx);
+    for (a = 0; a < 5; a++) {
+        alEffecti(fx[a], AL_EFFECT_TYPE, types[a]);
+    }
+    alEffecti(fx[5], AL_EFFECT_TYPE, AL_EFFECT_XBOX_GP_PROGRAM);
+    assert(alGetError() == AL_NO_ERROR);
+
+    /* the reverb in slot 0 and every three of the five in slots 1-3 */
+    attach(0, s_fx[0], AL_NO_ERROR);
+    for (a = 0; a < 5; a++) {
+        for (b = a + 1; b < 5; b++) {
+            for (c = b + 1; c < 5; c++) {
+                attach(1, fx[a], AL_NO_ERROR);
+                attach(2, fx[b], AL_NO_ERROR);
+                attach(3, fx[c], AL_NO_ERROR);
+                assert(al_source_debug_gp_slot(0, NULL, NULL, NULL) == AL_GP_REVERB);
+                for (s = 1; s < 4; s++) {
+                    assert(al_source_debug_gp_slot(s, NULL, NULL, NULL) == AL_GP_KERNEL);
+                }
+                for (s = 1; s < 4; s++) {
+                    attach(s, 0, AL_NO_ERROR);
+                }
+                combos++;
+            }
+        }
+    }
+    attach(0, 0, AL_NO_ERROR);
+    /* every four of the five */
+    for (d = 0; d < 5; d++) {
+        for (a = 0, s = 0; a < 5; a++) {
+            if (a != d) attach(s++, fx[a], AL_NO_ERROR);
+        }
+        for (s = 0; s < 4; s++) {
+            assert(al_source_debug_gp_slot(s, NULL, NULL, NULL) == AL_GP_KERNEL);
+            attach(s, 0, AL_NO_ERROR);
+        }
+        combos++;
+    }
+    assert(combos == 15u);
+
+    /* X: the reverb, a program that leaves room for exactly the ring modulator and the compressor;
+     * then the equalizer does not fit (nothing changes), in the ring modulator's own slot it does */
+    img = filler_image(1u, APU_GP_KERNEL_MAX_XWORDS - rv->x_words - x_words[0] - x_words[3], &n);
+    alXboxEffectProgram(fx[5], img, n, 0);
+    assert(alGetError() == AL_NO_ERROR);
+    attach(0, s_fx[0], AL_NO_ERROR);
+    attach(1, fx[5], AL_NO_ERROR);
+    attach(2, fx[0], AL_NO_ERROR);
+    attach(3, fx[2], AL_INVALID_OPERATION);
+    assert(al_source_debug_gp_slot(3, NULL, NULL, NULL) == AL_GP_NONE);
+    attach(3, fx[3], AL_NO_ERROR);
+    attach(2, fx[2], AL_NO_ERROR);                                  /* $44 where the $53 was */
+    attach(3, fx[0], AL_INVALID_OPERATION);
+    assert(al_source_debug_gp_slot(3, NULL, NULL, NULL) == AL_GP_KERNEL);   /* the compressor stays */
+    for (s = 0; s < 4; s++) {
+        attach(s, 0, AL_NO_ERROR);
+    }
+    /* P ($700 words): the reverb, the autowah and a program filling the rest; one more refused */
+    img = filler_image(APU_GP_KERNEL_MAX_WORDS - rv->words - GP_KEFX_AUTOWAH_WORDS, 0x28u, &n);
+    alXboxEffectProgram(fx[5], img, n, 0);
+    assert(alGetError() == AL_NO_ERROR);
+    attach(0, s_fx[0], AL_NO_ERROR);
+    attach(1, fx[4], AL_NO_ERROR);
+    attach(2, fx[5], AL_NO_ERROR);
+    for (a = 0; a < 4; a++) {
+        attach(3, fx[a], AL_INVALID_OPERATION);
+    }
+    for (s = 0; s < 4; s++) {
+        attach(s, 0, AL_NO_ERROR);
+    }
+    alDeleteEffects(6, fx);
+    assert(alGetError() == AL_NO_ERROR);
+    printf("    -> %u sets fit (the five use no Y, scratch or descriptors; X $%X..$%X, P %u..%u words); "
+           "X and P full: AL_INVALID_OPERATION, the slot unchanged [PASS]\n",
+           (unsigned)combos, (unsigned)GP_KEFX_COMPRESSOR_K_XWORDS, (unsigned)GP_KEFX_RINGMOD_K_XWORDS,
+           (unsigned)GP_KEFX_EQUALIZER_WORDS, (unsigned)GP_KEFX_AUTOWAH_WORDS);
+}
+
 int main(void) {
     ALCdevice *dev = alcOpenDevice(NULL);
     ALCcontext *ctx;
@@ -186,6 +304,7 @@ int main(void) {
     assert(alGetError() == AL_NO_ERROR && s_slot[0] == 1u && s_slot[3] == 4u);
     test_budgets();
     test_routing();
+    test_onchip();
     alDeleteAuxiliaryEffectSlots(4, s_slot);
     alDeleteEffects(6, s_fx);
     assert(alGetError() == AL_NO_ERROR);

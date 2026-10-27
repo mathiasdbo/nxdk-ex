@@ -84,6 +84,9 @@ Toolchain note: nxdk's pdclib `lrint*()` is an `assert(0)` stub; round by hand.
   the kernels' P (0x700 words), X ($B20), Y (2048), scratch (512 KiB less the bootstrap image) and 60
   descriptors, summed, and while the GP runs, the loader's own first fit (no compaction). A refused attach
   changes nothing. `AL_XBOX_REVERB` stays exclusive with EFX effects; an ABI 1 kernel runs only alone.
+- **As built (phase9-05..07):** the echo, the chorus / flanger and the on-chip effects (ring modulator,
+  distortion, equalizer, compressor, autowah) are library kernels a slot loads like a custom one
+  (`GP_KERNELS.md` 10); the frequency shifter, vocal morpher and pitch shifter stay `AL_INVALID_VALUE`.
 
 ### 3.2 Slots, bins and sends
 
