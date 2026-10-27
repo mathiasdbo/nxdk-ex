@@ -7,10 +7,16 @@
  * the interface every EFX application already uses.
  *
  * On the MCPX APU (lib/openal/docs/EFX_PLAN.md):
- *   effect types      AL_EFFECT_NULL, AL_EFFECT_REVERB and AL_EFFECT_EAXREVERB are
- *                     accepted; the other types give AL_INVALID_VALUE
- *   filter types      AL_FILTER_NULL only for now (the VP filter is being measured)
- *   effect slots      4; one of them can hold an effect at a time (the GP runs one)
+ *   effect types      AL_EFFECT_NULL, AL_EFFECT_REVERB, AL_EFFECT_EAXREVERB, and on
+ *                     the library's GP kernels AL_EFFECT_ECHO, AL_EFFECT_CHORUS,
+ *                     AL_EFFECT_FLANGER, AL_EFFECT_RING_MODULATOR,
+ *                     AL_EFFECT_DISTORTION, AL_EFFECT_EQUALIZER,
+ *                     AL_EFFECT_COMPRESSOR and AL_EFFECT_AUTOWAH; the frequency
+ *                     shifter, vocal morpher and pitch shifter give
+ *                     AL_INVALID_VALUE
+ *   filter types      AL_FILTER_NULL and AL_FILTER_LOWPASS
+ *   effect slots      4, each with its own GP kernel (an attach fails with
+ *                     AL_INVALID_OPERATION only when the GP's budgets are full)
  *   sends per source  ALC_MAX_AUXILIARY_SENDS, at most 2
  *
  * The entry points are fetched with alGetProcAddress("alGenEffects") and so on.
@@ -121,6 +127,22 @@ extern "C" {
 #define AL_DISTORTION_EQCENTER                   0x0004
 #define AL_DISTORTION_EQBANDWIDTH                0x0005
 
+#define AL_DISTORTION_MIN_EDGE                   (0.0f)
+#define AL_DISTORTION_MAX_EDGE                   (1.0f)
+#define AL_DISTORTION_DEFAULT_EDGE               (0.2f)
+#define AL_DISTORTION_MIN_GAIN                   (0.01f)
+#define AL_DISTORTION_MAX_GAIN                   (1.0f)
+#define AL_DISTORTION_DEFAULT_GAIN               (0.05f)
+#define AL_DISTORTION_MIN_LOWPASS_CUTOFF         (80.0f)
+#define AL_DISTORTION_MAX_LOWPASS_CUTOFF         (24000.0f)
+#define AL_DISTORTION_DEFAULT_LOWPASS_CUTOFF     (8000.0f)
+#define AL_DISTORTION_MIN_EQCENTER               (80.0f)
+#define AL_DISTORTION_MAX_EQCENTER               (24000.0f)
+#define AL_DISTORTION_DEFAULT_EQCENTER           (3600.0f)
+#define AL_DISTORTION_MIN_EQBANDWIDTH            (80.0f)
+#define AL_DISTORTION_MAX_EQBANDWIDTH            (24000.0f)
+#define AL_DISTORTION_DEFAULT_EQBANDWIDTH        (3600.0f)
+
 /* Echo */
 #define AL_ECHO_DELAY                            0x0001
 #define AL_ECHO_LRDELAY                          0x0002
@@ -195,14 +217,44 @@ extern "C" {
 #define AL_RING_MODULATOR_HIGHPASS_CUTOFF        0x0002
 #define AL_RING_MODULATOR_WAVEFORM               0x0003
 
+#define AL_RING_MODULATOR_MIN_FREQUENCY          (0.0f)
+#define AL_RING_MODULATOR_MAX_FREQUENCY          (8000.0f)
+#define AL_RING_MODULATOR_DEFAULT_FREQUENCY      (440.0f)
+#define AL_RING_MODULATOR_MIN_HIGHPASS_CUTOFF    (0.0f)
+#define AL_RING_MODULATOR_MAX_HIGHPASS_CUTOFF    (24000.0f)
+#define AL_RING_MODULATOR_DEFAULT_HIGHPASS_CUTOFF (800.0f)
+#define AL_RING_MODULATOR_SINUSOID               (0)
+#define AL_RING_MODULATOR_SAWTOOTH               (1)
+#define AL_RING_MODULATOR_SQUARE                 (2)
+#define AL_RING_MODULATOR_MIN_WAVEFORM           (0)
+#define AL_RING_MODULATOR_MAX_WAVEFORM           (2)
+#define AL_RING_MODULATOR_DEFAULT_WAVEFORM       (0)
+
 /* Autowah */
 #define AL_AUTOWAH_ATTACK_TIME                   0x0001
 #define AL_AUTOWAH_RELEASE_TIME                  0x0002
 #define AL_AUTOWAH_RESONANCE                     0x0003
 #define AL_AUTOWAH_PEAK_GAIN                     0x0004
 
+#define AL_AUTOWAH_MIN_ATTACK_TIME               (0.0001f)
+#define AL_AUTOWAH_MAX_ATTACK_TIME               (1.0f)
+#define AL_AUTOWAH_DEFAULT_ATTACK_TIME           (0.06f)
+#define AL_AUTOWAH_MIN_RELEASE_TIME              (0.0001f)
+#define AL_AUTOWAH_MAX_RELEASE_TIME              (1.0f)
+#define AL_AUTOWAH_DEFAULT_RELEASE_TIME          (0.06f)
+#define AL_AUTOWAH_MIN_RESONANCE                 (2.0f)
+#define AL_AUTOWAH_MAX_RESONANCE                 (1000.0f)
+#define AL_AUTOWAH_DEFAULT_RESONANCE             (1000.0f)
+#define AL_AUTOWAH_MIN_PEAK_GAIN                 (0.00003f)
+#define AL_AUTOWAH_MAX_PEAK_GAIN                 (31621.0f)
+#define AL_AUTOWAH_DEFAULT_PEAK_GAIN             (11.22f)
+
 /* Compressor */
 #define AL_COMPRESSOR_ONOFF                      0x0001
+
+#define AL_COMPRESSOR_MIN_ONOFF                  (0)
+#define AL_COMPRESSOR_MAX_ONOFF                  (1)
+#define AL_COMPRESSOR_DEFAULT_ONOFF              (1)
 
 /* Equalizer */
 #define AL_EQUALIZER_LOW_GAIN                    0x0001
@@ -215,6 +267,37 @@ extern "C" {
 #define AL_EQUALIZER_MID2_WIDTH                  0x0008
 #define AL_EQUALIZER_HIGH_GAIN                   0x0009
 #define AL_EQUALIZER_HIGH_CUTOFF                 0x000A
+
+#define AL_EQUALIZER_MIN_LOW_GAIN                (0.126f)
+#define AL_EQUALIZER_MAX_LOW_GAIN                (7.943f)
+#define AL_EQUALIZER_DEFAULT_LOW_GAIN            (1.0f)
+#define AL_EQUALIZER_MIN_LOW_CUTOFF              (50.0f)
+#define AL_EQUALIZER_MAX_LOW_CUTOFF              (800.0f)
+#define AL_EQUALIZER_DEFAULT_LOW_CUTOFF          (200.0f)
+#define AL_EQUALIZER_MIN_MID1_GAIN               (0.126f)
+#define AL_EQUALIZER_MAX_MID1_GAIN               (7.943f)
+#define AL_EQUALIZER_DEFAULT_MID1_GAIN           (1.0f)
+#define AL_EQUALIZER_MIN_MID1_CENTER             (200.0f)
+#define AL_EQUALIZER_MAX_MID1_CENTER             (3000.0f)
+#define AL_EQUALIZER_DEFAULT_MID1_CENTER         (500.0f)
+#define AL_EQUALIZER_MIN_MID1_WIDTH              (0.01f)
+#define AL_EQUALIZER_MAX_MID1_WIDTH              (1.0f)
+#define AL_EQUALIZER_DEFAULT_MID1_WIDTH          (1.0f)
+#define AL_EQUALIZER_MIN_MID2_GAIN               (0.126f)
+#define AL_EQUALIZER_MAX_MID2_GAIN               (7.943f)
+#define AL_EQUALIZER_DEFAULT_MID2_GAIN           (1.0f)
+#define AL_EQUALIZER_MIN_MID2_CENTER             (1000.0f)
+#define AL_EQUALIZER_MAX_MID2_CENTER             (8000.0f)
+#define AL_EQUALIZER_DEFAULT_MID2_CENTER         (3000.0f)
+#define AL_EQUALIZER_MIN_MID2_WIDTH              (0.01f)
+#define AL_EQUALIZER_MAX_MID2_WIDTH              (1.0f)
+#define AL_EQUALIZER_DEFAULT_MID2_WIDTH          (1.0f)
+#define AL_EQUALIZER_MIN_HIGH_GAIN               (0.126f)
+#define AL_EQUALIZER_MAX_HIGH_GAIN               (7.943f)
+#define AL_EQUALIZER_DEFAULT_HIGH_GAIN           (1.0f)
+#define AL_EQUALIZER_MIN_HIGH_CUTOFF             (4000.0f)
+#define AL_EQUALIZER_MAX_HIGH_CUTOFF             (16000.0f)
+#define AL_EQUALIZER_DEFAULT_HIGH_CUTOFF         (6000.0f)
 
 /* Effect type */
 #define AL_EFFECT_FIRST_PARAMETER                0x0000

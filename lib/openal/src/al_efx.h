@@ -45,6 +45,15 @@ typedef struct {
     ALfloat chorus_rate, chorus_depth, chorus_feedback, chorus_delay;
     ALint flanger_waveform, flanger_phase;                                        /* AL_EFFECT_FLANGER */
     ALfloat flanger_rate, flanger_depth, flanger_feedback, flanger_delay;
+    ALfloat ringmod_frequency, ringmod_highpass_cutoff;                           /* AL_EFFECT_RING_MODULATOR */
+    ALint ringmod_waveform;
+    ALfloat distortion_edge, distortion_gain, distortion_lowpass_cutoff;          /* AL_EFFECT_DISTORTION */
+    ALfloat distortion_eq_center, distortion_eq_bandwidth;
+    ALfloat eq_low_gain, eq_low_cutoff, eq_mid1_gain, eq_mid1_center, eq_mid1_width;   /* AL_EFFECT_EQUALIZER */
+    ALfloat eq_mid2_gain, eq_mid2_center, eq_mid2_width, eq_high_gain, eq_high_cutoff;
+    ALint compressor_onoff;                                                       /* AL_EFFECT_COMPRESSOR */
+    ALfloat autowah_attack_time, autowah_release_time, autowah_resonance;         /* AL_EFFECT_AUTOWAH */
+    ALfloat autowah_peak_gain;
 } al_efx_reverb_t;
 
 /* An effect's state: what an effect object holds and what a slot copies */
@@ -145,6 +154,14 @@ ALfloat al_efx_room_rolloff(const al_efx_source_t *s, const al_efx_slot_t *slot)
  */
 bool al_efx_slot_is_kernel(const al_efx_slot_t *slot);
 bool al_efx_slot_kernel(const al_efx_slot_t *slot, apu_gp_kernel_t *k, const uint32_t **params);
+
+/**
+ * True when the slot's kernel applies AL_EFFECTSLOT_GAIN itself, at its output
+ * (a word of its parameters): the effects that are not linear (distortion,
+ * compressor, autowah), as OpenAL Soft applies it. Every other kernel has its
+ * input scaled by the slot's gain instead (al_source.c).
+ */
+bool al_efx_slot_gain_in_kernel(const al_efx_slot_t *slot);
 
 /** Send the queued alXboxEffectSlotAtSample changes the GP can take now (every update). */
 void al_efx_timed_service(void);
