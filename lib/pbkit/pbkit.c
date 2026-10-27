@@ -96,6 +96,16 @@ static  DWORD           pb_vbl_counter=0;
 
 //Batch 3 (sync): VBlank/swap callbacks, presentation interval, fences
 static  void            (*volatile pb_VBlankCallback)(DWORD vbl_count)=NULL;
+
+//overlay registers queued by pb_overlay_update / pb_overlay_disable, programmed at the VBlank
+#define PB_OVL_REGS 11
+static  const DWORD     pb_OverlayRegAddr[PB_OVL_REGS]={
+    NV_PVIDEO_BASE_0,NV_PVIDEO_LIMIT_0,NV_PVIDEO_OFFSET_0,NV_PVIDEO_SIZE_IN_0,NV_PVIDEO_POINT_IN_0,
+    NV_PVIDEO_DS_DX_0,NV_PVIDEO_DT_DY_0,NV_PVIDEO_POINT_OUT_0,NV_PVIDEO_SIZE_OUT_0,NV_PVIDEO_FORMAT_0,
+    NV_PVIDEO_COLOR_KEY };
+static  volatile DWORD  pb_OverlayReg[PB_OVL_REGS];
+static  volatile int    pb_OverlayPending=0;    //0 none, 1 update, 2 disable
+static  volatile DWORD  pb_OverlayLastVBL=0;
 static  void            (*volatile pb_SwapCallback)(DWORD frame, DWORD vbl_count)=NULL;
 static  volatile int    pb_PresentInterval=PB_PRESENT_INTERVAL_ONE;
 static  volatile DWORD  pb_LastFlipVBL;     //pb_vbl_counter when a frame was last put on screen
@@ -343,6 +353,24 @@ static void pb_flip_now(void)
         swap_cb=pb_SwapCallback;
         if (swap_cb) swap_cb(pb_FramesShown,pb_vbl_counter);
     }
+}
+
+//programs the queued overlay update (called at the VBlank, or directly without pbkit's interrupt)
+static void pb_overlay_apply(DWORD vbl)
+{
+    int i;
+    int what=pb_OverlayPending;
+
+    if (what==0) return;
+    if (what==1)
+    {
+        for(i=0;i<PB_OVL_REGS;i++) VIDEOREG(pb_OverlayRegAddr[i])=pb_OverlayReg[i];
+        VIDEOREG(NV_PVIDEO_STOP)=0;
+        VIDEOREG(NV_PVIDEO_BUFFER)=NV_PVIDEO_BUFFER_0_USE;
+    }
+    else VIDEOREG(NV_PVIDEO_STOP)=NV_PVIDEO_STOP_OVERLAY;
+    pb_OverlayLastVBL=vbl;
+    pb_OverlayPending=0;
 }
 
 static void pb_vbl_handler(void)
@@ -944,6 +972,9 @@ static BOOLEAN __stdcall ISR(PKINTERRUPT Interrupt, PVOID ServiceContext)
     //is it the VBlank event? (if so, proceed screen swapping immediately & in DPC)
     if (VIDEOREG(NV_PMC_INTR_0)&NV_PMC_INTR_0_PCRTC_PENDING)
     {
+        //queued overlay update (pb_vbl_counter+1 is the VBlank being handled)
+        if (pb_OverlayPending) pb_overlay_apply(pb_vbl_counter+1);
+
         //Need to show next back buffer to show up? (do it now, it's urgent)
         if (pb_PresentInterval==PB_PRESENT_INTERVAL_ONE)
         {
@@ -2201,6 +2232,63 @@ DWORD pb_multisample_pitch(void)
     return pb_MSAddr?pb_MSPitch:0;
 }
 
+int pb_overlay_update(const pb_overlay *ov)
+{
+    DWORD phys,fmt,end;
+
+    if (ov==NULL||ov->surface==NULL) return -1;
+    if ((ov->format!=PB_OVERLAY_UYVY)&&(ov->format!=PB_OVERLAY_YUY2)) return -1;
+    if ((ov->pitch==0)||(ov->pitch&63)||(ov->pitch>NV_PVIDEO_FORMAT_PITCH)) return -1;
+    if ((ov->src_width==0)||(ov->src_height==0)||(ov->dst_width==0)||(ov->dst_height==0)) return -1;
+    if ((ov->src_x&1)||(ov->src_width&1)||(ov->src_x+ov->src_width>2046)||(ov->src_y+ov->src_height>2047)) return -1;
+    if ((ov->dst_x>4095)||(ov->dst_y>4095)||(ov->dst_width>4095)||(ov->dst_height>4095)) return -1;
+    if ((ov->dst_width*8<ov->src_width)||(ov->dst_height*8<ov->src_height)) return -1;
+    if ((ov->src_x+ov->src_width)*2>ov->pitch) return -1;
+    phys=(DWORD)MmGetPhysicalAddress((PVOID)ov->surface);
+    end=phys+ov->pitch*(ov->src_y+ov->src_height);
+    if ((phys&63)||(end>0x04000000)) return -1;
+
+    fmt=ov->pitch;
+    if (ov->format==PB_OVERLAY_YUY2) fmt|=NV_PVIDEO_FORMAT_COLOR_LE_CR8YB8CB8YA8;
+    if (ov->color_key_enable) fmt|=NV_PVIDEO_FORMAT_DISPLAY_COLOR_KEY;
+    if (ov->bt709) fmt|=NV_PVIDEO_FORMAT_MATRIX_ITURBT709;
+
+    pb_OverlayPending=0;    //the VBlank interrupt leaves the registers alone while they change
+    __asm__ __volatile__("" ::: "memory");
+    pb_OverlayReg[0]=0;                                                 //BASE
+    pb_OverlayReg[1]=0x03FFFFFF;                                        //LIMIT (64 Mb)
+    pb_OverlayReg[2]=phys;                                              //OFFSET
+    pb_OverlayReg[3]=((ov->src_y+ov->src_height)<<16)|(ov->src_x+ov->src_width); //SIZE_IN
+    pb_OverlayReg[4]=(ov->src_y<<20)|(ov->src_x<<4);                    //POINT_IN (12.4 fixed point)
+    pb_OverlayReg[5]=(ov->src_width<<20)/ov->dst_width;                 //DS_DX
+    pb_OverlayReg[6]=(ov->src_height<<20)/ov->dst_height;               //DT_DY
+    pb_OverlayReg[7]=(ov->dst_y<<16)|ov->dst_x;                         //POINT_OUT
+    pb_OverlayReg[8]=(ov->dst_height<<16)|ov->dst_width;                //SIZE_OUT
+    pb_OverlayReg[9]=fmt;                                               //FORMAT
+    pb_OverlayReg[10]=ov->color_key&0xFFFFFF;                           //COLOR_KEY
+    __asm__ __volatile__("" ::: "memory");
+    pb_OverlayPending=1;
+
+    if (!pb_running) pb_overlay_apply(pb_vbl_counter);
+    return 0;
+}
+
+void pb_overlay_disable(void)
+{
+    pb_OverlayPending=2;
+    if (!pb_running) pb_overlay_apply(pb_vbl_counter);
+}
+
+int pb_overlay_update_pending(void)
+{
+    return pb_OverlayPending!=0;
+}
+
+DWORD pb_overlay_last_vbl(void)
+{
+    return pb_OverlayLastVBL;
+}
+
 DWORD pb_get_vbl_counter(void)
 {
     return pb_vbl_counter; //allows caller to know if a frame has been missed
@@ -2884,6 +2972,10 @@ void pb_kill(void)
 
     pb_running=0;
     pb_uninstall_gpu_interrupt();
+
+    //stop the overlay now (its surface may be freed after pb_kill)
+    pb_OverlayPending=2;
+    pb_overlay_apply(pb_vbl_counter);
     KeRemoveQueueDpc(&pb_DPCObject);
 
     if (pb_ExtraBuffersCount) MmFreeContiguousMemory((PVOID)pb_EXAddr[0]);
@@ -2970,8 +3062,10 @@ void pb_kill(void)
     VIDEOREG(NV_PFB_CFG1)=pb_OldFBConfig1;
     VIDEOREG(NV_PMC_ENABLE)=pb_OldMCEnable;
     VIDEOREG(NV_PMC_INTR_EN_0)=pb_OldMCInterrupt;
+    //a persisted display (XVideoPersistDisplay) stays on screen across XLaunchXBE
+    if (pSavedData) VIDEOREG(PCRTC_START)=(DWORD)MmGetPhysicalAddress(pSavedData)&0x03FFFFFF;
     //not back to a debug screen that was given back: the front buffer stays allocated and shown
-    if (!pb_DebugScreenGone) VIDEOREG(PCRTC_START)=pb_OldVideoStart;
+    else if (!pb_DebugScreenGone) VIDEOREG(PCRTC_START)=pb_OldVideoStart;
 
     NtClose(pb_VBlankEvent);
 }

@@ -16,6 +16,12 @@ Batch 4 (quality): render to texture (swizzled and linear render targets) and
 multisampling (2x / 4x with a GPU resolve). Validated on xemu with
 `samples/pbkit_quality`, see [Batch 4](#batch-4-quality).
 
+Batch 5 (display): present flags (`XVideoSetModeEx`: interlaced / progressive,
+widescreen, 10:11 pixel aspect ratio), the dashboard video flags, the TV
+filters, a YUY2 / UYVY video overlay on NV_PVIDEO, and a persisted display
+across `XLaunchXBE`. Validated on xemu with `samples/pbkit_display`, see
+[Batch 5](#batch-5-display).
+
 The points a console must still confirm are listed at the end of each batch.
 
 ## API added (all additive, nothing existing changed signature)
@@ -695,3 +701,247 @@ halves that rate (34.9 -> 17.4).
    way): not exercised by the sample.
 7. Tile #3 for the sample buffer (tiled color surface at pitch 5120) and the
    scaled compressed depth buffer: xemu ignores tiling.
+
+## Batch 5: display
+
+Present flags, dashboard video flags, TV filters, video overlay and persisted
+display. Validated on xemu with `samples/pbkit_display`.
+
+### API added
+
+`hal/video.h` (`XVideoSetMode` is unchanged; it now also records the AV mode
+and scan type it set)
+
+| Function | What |
+| --- | --- |
+| `BOOL XVideoSetModeEx(w, h, bpp, refresh, flags)` | `XVideoSetMode` with `XVIDEO_FLAG_*`; flags 0 is `XVideoSetMode`. FALSE when no mode matches (with flags, the current mode is kept). |
+| `XVIDEO_FLAG_WIDESCREEN` 0x10, `_INTERLACED` 0x20, `_PROGRESSIVE` 0x40, `_FIELD` 0x80, `_10X11PIXELASPECTRATIO` 0x100 | the values of the XDK `D3DPRESENTFLAG_*`. |
+| `DWORD XVideoGetModeFlags(void)` | flags of the current mode: the requested WIDESCREEN / 10X11 plus the scan type of the mode (INTERLACED or PROGRESSIVE). |
+| `DWORD XVideoGetAvMode(void)` | the kernel AV mode word of the current mode. |
+| `DWORD XVideoGetVideoFlags(void)` | the dashboard settings, EEPROM `XC_VIDEO` (`ExQueryNonVolatileSetting`): `VIDEO_WIDESCREEN` 0x10000, `VIDEO_MODE_720P` 0x20000, `VIDEO_MODE_1080I` 0x40000, `VIDEO_MODE_480P` 0x80000, `VIDEO_LETTERBOX` 0x100000, `VIDEO_60Hz` 0x400000 (PAL 60). 0 when unset or unreadable. |
+| `BOOL XVideoPersistDisplay(void)` | keeps the picture across `XLaunchXBE` (see below). |
+| `XVIDEO_AV_MODE_OUT_MASK` 0xC0000000, `_SCART` 0x20000000, `_WSS` 0x10000000 | AV mode word fields. |
+
+`pbkit.h`
+
+| Function | What |
+| --- | --- |
+| `int pb_overlay_update(const pb_overlay *ov)` | checks the description and queues it; pbkit's VBlank interrupt programs PVIDEO buffer 0 at the next VBlank (the last update queued before a VBlank wins). 0, or -1 (nothing queued). |
+| `pb_overlay` | `surface`, `pitch`, `format` (`PB_OVERLAY_UYVY` 0 / `PB_OVERLAY_YUY2` 1), `src_x/y/width/height`, `dst_x/y/width/height`, `color_key_enable`, `color_key` (0xRRGGBB), `bt709`. |
+| `void pb_overlay_disable(void)` | STOP at the next VBlank (`pb_kill` stops it at once). |
+| `int pb_overlay_update_pending(void)` | 1 while a queued update / disable waits for its VBlank (the D3D `GetOverlayUpdateStatus` role). |
+| `DWORD pb_overlay_last_vbl(void)` | VBlank count at which the last update / disable was programmed. |
+
+`pb_kill` keeps the CRTC on a persisted display (`AvGetSavedDataAddress()`
+set) instead of restoring the `XVideoSetMode` frame buffer.
+
+### Present flags
+
+The AV mode word (`AvSetDisplayMode`, `AV_OPTION_QUERY_MODE`): bits 31:30
+output (0 / 1 SDTV, 2 HDTV, 3 VGA), bit 29 SCART (RGB), bit 28 WSS (16:9
+wide screen signalling), bits 27:24 DAC disables, bits 23:16 register table,
+15:8 CRTC table, 6:0 TV table index. Layout, mode values and the
+`AV_FLAGS_*` / `AV_OPTION_*` numbers: Cxbx-Reloaded
+`src/core/kernel/exports/EmuKrnlAvModes.h` and
+`src/core/kernel/common/xbox.h`, cross-checked with nxdk's own `vidModes`
+table (same words).
+
+- INTERLACED / PROGRESSIVE pick from the mode table by scan type: SDTV
+  outputs are interlaced, HDTV output is interlaced only for TV index 3
+  (1080i), VGA is progressive. With the HDTV pack at 480 lines this selects
+  480i YPrPb (0x0801010D NTSC) or 480p (0x88070701). The HDTV modes still need
+  their dashboard flag (480p / 720p / 1080i); a scan type the pack cannot
+  output fails. No flag: the mode `XVideoSetMode` picks (480p preferred when
+  enabled).
+- WIDESCREEN ORs bit 28 into SDTV and 480i YPrPb modes, the kernel's
+  `AV_MODE_*_16x9` modes. HDTV progressive and VGA modes have no 16:9 variant
+  in the kernel table (the display mode table in Cxbx-Reloaded's
+  `EmuKrnlAvModes.h` maps widescreen 480p / 720p / 1080i to the same mode
+  words): the flag only tells the game to render anamorphic. It is not checked against the dashboard flag
+  (`XVideoGetVideoFlags() & VIDEO_WIDESCREEN` is the game's decision, as in the
+  XDK).
+- 10X11PIXELASPECTRATIO maps a 640x480 mode to the kernel's FPAR mode with the
+  same output bits: register / CRTC / TV indices 0F/0D/0F (NTSC-M), 0F/0D/10
+  (NTSC-J), 0F/0D/11 (PAL-60), 0F/0D/12 (480i YPrPb), 10/0E/13 (PAL-I),
+  10/0E/18 (PAL-I YPrPb), 0F/0D/1B (PAL-60 YPrPb), 11/0F/01 (480p). Other
+  sizes and VGA fail. The frame buffer stays 640x480; how the FPAR timings
+  look on a TV is console-only.
+- FIELD fails. Field rendering (the XDK's 640x240 / 720x240 / 1920x540 modes
+  with `AV_FLAGS_FIELD`, same AV mode word as the interlaced mode) needs a
+  half height frame buffer scanned out once per field with the field parity
+  driving which buffer is shown: a CRTC set up for line doubling or a field
+  start offset, which no reachable source documents, plus a flip per VBlank
+  matched to `pb_get_display_field_status`. Left out.
+
+### TV filters
+
+No new code: `XVideoSetFlickerFilter(0..5)` (`AV_OPTION_FLICKER_FILTER`, 11)
+and `XVideoSetSoftenFilter(BOOL)` (`AV_OPTION_ENABLE_LUMA_FILTER`, 14) pass
+the value to the kernel, which programs the encoder over SMBus. The encoder
+depends on the board: Conexant CX25871 (SMBus 0x45, write address 0x8A;
+1.0-1.3), Focus FS454 (0x6A / 0xD4; 1.4-1.5), Xcalibur (0x70 / 0xE0; 1.6)
+(xboxdevwiki "SMBus", "Xbox Hardware Revisions"). The kernel's mapping of the
+levels per encoder is not documented in a reachable source; xemu emulates the
+Conexant register file only (writes are stored and read back, no filter is
+applied, `hw/xbox/smbus_cx25871.c`), so the sample records what the kernel
+(4627, the BIOS xemu runs here) writes there:
+
+| Setting | Conexant registers written (value after) |
+| --- | --- |
+| flicker 0 | 0xC8 = 0xC0 (0x34 stays 0x80) |
+| flicker 1 | 0x34 = 0x00, 0xC8 = 0x89 |
+| flicker 2 | 0xC8 = 0x92 |
+| flicker 3 | 0xC8 = 0x9B |
+| flicker 4 | 0xC8 = 0x80 |
+| flicker 5 (XVideoInit default) | 0x34 = 0x80 (0xC8 stays 0x80) |
+| soften on | 0x96 = 0x16 |
+| soften off | 0x96 = 0x06 |
+
+`AV_QUERY_ENCODER_TYPE` (16) returns 0 there (Conexant; the values for Focus
+and Xcalibur are unknown). The effect of each level (vertical filter taps,
+luma low-pass) and the Focus / Xcalibur programming are console-only.
+
+### Video overlay (NV_PVIDEO)
+
+Registers (offsets in the GPU MMIO, buffer 1 at +4): BUFFER 0x8700 (bit 0
+buffer 0 in use, bit 4 buffer 1), STOP 0x8704 (bit 0 stops), BASE 0x8900,
+LIMIT 0x8908, LUMINANCE 0x8910, CHROMINANCE 0x8918, OFFSET 0x8920, SIZE_IN
+0x8928 (height << 16 | width), POINT_IN 0x8930 (t << 20 | s << 4, 12.4
+fixed point), DS_DX 0x8938 / DT_DY 0x8940 (src / dst << 20; 1 << 20 =
+unity), POINT_OUT 0x8948 (y << 16 | x), SIZE_OUT 0x8950, FORMAT 0x8958
+(pitch bits 12:0, bit 16 color LE_CR8YB8CB8YA8 = YUY2 / 0 = UYVY, bit 20
+color key, bit 24 BT.709 matrix), COLOR_KEY 0x8B00. Sources: nouveau
+`drivers/gpu/drm/nouveau/dispnv04/nvreg.h` and `overlay.c`
+(`nv10_update_plane`, `nv10_disable_plane`), the nouveau X driver
+`nv10_xv_ovl.c` (POINT_IN, color key), xemu `hw/xbox/nv2a/nv2a_regs.h`,
+`pvideo.c`, `pgraph/gl/display.c`. pbkit's `pb_init` already sets
+LUMINANCE / CHROMINANCE to unity and SIZE_IN to 0xFFFFFFFF.
+
+`pb_overlay_update` programs BASE 0, LIMIT 0x03FFFFFF, OFFSET = the
+surface's physical address, SIZE_IN = the source rectangle's far corner,
+POINT_IN its origin, DS_DX / DT_DY, POINT_OUT, SIZE_OUT, FORMAT, COLOR_KEY,
+then STOP 0 and BUFFER = 1, from the VBlank interrupt (ISR, next to the flip).
+Checks: 2 bytes per pixel surface in contiguous memory below 64 Mb, 64 byte
+aligned, pitch a multiple of 64 (the X driver's rounding) up to 8128, even
+source x / width, source within 2046 x 2047 (SIZE_IN fields), destination
+fields below 4096, at most 8x downscale (nouveau's `verify_scaling` for
+NV1x/NV2x). Only buffer 0 is used: xemu displays buffer 0 only, and the
+application double buffers its surfaces instead (write the hidden surface,
+update, reuse the old one once `pb_overlay_update_pending()` is 0).
+
+xemu emulates PVIDEO (checked): the overlay is composited when xemu
+presents the frame (`pgraph/gl/display.c`), so it shows in the xemu window
+but not in the frame buffer, nor in a CRTC capture or a GPU / CPU readback.
+Limits there: buffer 0 only, YUY2 only (a UYVY surface aborts xemu:
+`Assertion failed: in_color == NV_PVIDEO_FORMAT_COLOR_LE_CR8YB8CB8YA8`,
+seen with `make CONFIG=1 OV_UYVY=1`), BT.601 studio range always
+(LUMINANCE / CHROMINANCE and the BT.709 bit are ignored), exact color key
+compare, SIZE_IN 0xFFFFFFFF hides the overlay, STOP reads 0 and a STOP
+write with bit 0 clears BUFFER; registers read back as written. With the
+bilinear filter and repeat wrap of its texture, the overlay's first line
+and column show a sliver of the opposite edge.
+
+### Persisted display
+
+`XVideoPersistDisplay` copies the frame buffer the CRTC shows
+(`NV_PCRTC_START`; pitch from CR13, CR19 bits 7:5 and CR25 bit 5 in 8 byte
+units, the way `AvSetDisplayMode` writes it) into a new contiguous
+allocation, points the CRTC at the copy, `MmPersistContiguousMemory(TRUE)`,
+`AvSetSavedDataAddress(copy)`. A previous persisted copy of the same title is
+freed first. The receiver is the existing `XVideoInit`: it frees the saved
+buffer on the next title's first mode set. Cxbx-Reloaded documents the same
+steps for the XDK's `D3DDevice_PersistDisplay` (`Direct3D9.cpp`). Flow with
+pbkit: last frame on screen (nothing queued), `XVideoPersistDisplay()`,
+`pb_kill()`, `XLaunchXBE` / `XLaunchXBEEx`.
+
+Observed on xemu (4627 kernel), the sample relaunching its own image:
+
+- the copy (0x83850000, physical 0x03850000) is on screen before the reboot;
+- after the reboot `AvGetSavedDataAddress()` returns 0x8003D000 (physical
+  0x0003D000, right after the kernel image): the kernel moved the persisted
+  pages. The pixels are intact except dword 1, which the kernel overwrote
+  with 0xFC7DD000;
+- the CRTC then scans out 0x007DD000 (black), not the saved buffer: the
+  picture is not kept through the reboot by the kernel. The receiving title
+  can show the saved buffer again (the sample points `NV_PCRTC_START` at it
+  until its first mode set) and `XVideoSetMode` frees it
+  (`AvGetSavedDataAddress()` NULL afterwards).
+
+The overwritten dword and the moved CRTC suggest the kernel reads the saved
+block as a structure with a frame buffer address in its second dword (the
+XDK's surface header?). Its layout is not documented in a reachable source,
+so `XVideoPersistDisplay` hands over the raw frame buffer and the black gap
+during the reboot is left as found.
+
+### samples/pbkit_display
+
+Four configurations: `make CONFIG=n` runs one (delete `main.obj`,
+`bin/default.xbe` and the ISO first); the cycling ISO starts with 3 (it
+relaunches itself) and then cycles 0, 1, 2. 640x480 32 bpp, A8R8G8B8, Z24S8,
+double buffering. Results: `pb_print`, `DbgPrint` and a `PBDISPRS` tagged
+block in `.data` (0x37010 in this build) with one summary row per
+configuration.
+
+- **0 mode flags**: eleven `XVideoSetModeEx` calls (flags 0, I, P, W, I+W,
+  10X11, 10X11+W+I, FIELD, 10X11 at 720x480, I+P, unknown 0x200) against the
+  pack and dashboard flags: set or refused as expected, kernel AV mode =
+  `XVideoGetAvMode()`, scan type, WSS bit with WIDESCREEN only, FPAR CRTC
+  index, a refused call keeps the current mode. Then the widescreen mode is
+  shown and the field status is sampled over 16 VBlanks.
+- **1 overlay**: 160x120 YUY2 100 % color bars (BT.601 studio range) scaled 2x
+  to 320x240 at (160, 216) into a magenta (0xFF00FF) keyed rectangle; a static
+  green quad and a moving yellow bar inside the rectangle hide it. Six invalid
+  descriptions rejected, register readback against the expected values,
+  update latency in VBlanks, 20 double buffered swaps (bar order reversed and
+  a moving marker), the frame buffer under the overlay still magenta.
+- **2 TV filters**: flicker 0..5, soften on / off, 1.5 s each on one pixel
+  lines and an 8 pixel checkerboard; SMBus probe of the three encoders,
+  `AV_QUERY_ENCODER_TYPE`, Conexant registers changed per step. Pass = the
+  calls return (the filters are visible on a TV only).
+- **3 persist display**: four colored quadrants and a white center square,
+  `XVideoPersistDisplay`, `pb_kill`, `XLaunchXBEEx(<own image path>, data)`;
+  the second run checks `AvGetSavedDataAddress()` is set, the pixels at five
+  points and a checksum of the buffer it points to (dword 1 excluded) against
+  the launch data, records the CRTC at boot, shows the saved buffer for 25 s,
+  then `XVideoSetMode` must free it.
+
+xemu v0.8.139, 2026-10-26, HDTV pack, NTSC-M, dashboard video flags 0 (no
+480p / 720p / 1080i, no widescreen), one `CONFIG=n` ISO per row, then the
+cycling ISO:
+
+| # | Config | xemu result | Verdict |
+| --- | --- | --- | --- |
+| 0 | mode flags | 0: 0x0801010D (480i YPrPb) I; I: 0x0801010D; P: refused (480p off in the dashboard); W: 0x1801010D; I+W: 0x1801010D; 10X11: 0x080F0D12; 10X11+W+I: 0x180F0D12; FIELD, 10X11 720x480, I+P, 0x200: refused, mode kept. Shown 0x1801010D, field 0101010101010101 | PASS |
+| 1 | overlay YUY2 2x key | reject mask 0x3F; latency 1 VBlank (20 swaps: 1..1); BUFFER 1, STOP 0, BASE 0, LIMIT 0x03FFFFFF, OFFSET 0x03972000, SIZE_IN 0x007800A0, POINT_IN 0, DS_DX / DT_DY 0x80000, POINT_OUT 0x00D800A0, SIZE_OUT 0x00F00140, FORMAT 0x00110140, COLOR_KEY 0xFF00FF; frame buffer under it 0xFF00FF. Window capture: bars 2x inside the magenta rectangle, hidden under the green quad and the yellow bar; CRTC capture: magenta only | PASS |
+| 2 | TV filters | Conexant only answers on SMBus, encoder type 0, register writes in the table above | PASS (on-screen only) |
+| 3 | persist display | first run: copy shown, CRTC = copy; second run: saved 0x8003D000 (sent 0x83850000), pixels FF0000 00FF00 0000FF FFFF00 FFFFFF equal, checksum 0x7D395350 equal, CRTC at boot 0x007DD000 (black), saved buffer shown again (window and CRTC captures: the quadrants), NULL after `XVideoSetMode` | PASS |
+
+The cycling ISO ran 3 (relaunch included), 0, 1, 2 with all four summary
+rows PASS and went on into the second round. `UYVY` (`OV_UYVY=1`) stops xemu
+with the assertion quoted above. `samples/pbkit_sync` cycling with this
+batch's library (the VBlank interrupt now also services the overlay): the
+batch 3 summary rows again (60.06 / 1.000 / 0, 59.96 / 0.500 / 0, 68.19 /
+1.875 / 994 with only the known xemu VBlank rate failure, 60.56 / 0.717 / 0,
+59.98 / 0.723 / 997).
+
+### What xemu cannot prove (console checks)
+
+1. The encoder side of every flag: WSS signalling with WIDESCREEN on a 4:3 /
+   16:9 TV, the FPAR modes' 10:11 pixels, 480p through the HDTV pack with the
+   dashboard flag set (refused on this xemu EEPROM, so the progressive path ran
+   only as a refusal), PAL 50 Hz and SCART RGB variants. xemu emulates no
+   encoder; it only stores the mode word.
+2. Field rendering (not implemented, see above).
+3. The TV filters: flicker levels and soften on a TV, the Conexant register
+   meaning, and what the kernel writes on Focus (1.4-1.5) and Xcalibur (1.6)
+   boards; `AV_QUERY_ENCODER_TYPE` values there.
+4. The overlay on hardware: UYVY, the BT.709 bit, LUMINANCE / CHROMINANCE,
+   color key compare in the 32 bit frame buffer, scaling filter quality, the
+   8x downscale limit, whether the hardware latches buffer 0's registers at
+   the VBlank by itself (pbkit writes them in the VBlank ISR, so tearing is
+   avoided either way), BUFFER / STOP readback, overlay bandwidth with 3D
+   load, and the overlay in 720p / 1080i modes.
+5. The persisted display on retail kernels (other than the 4627 BIOS xemu
+   runs here): the relocation, the overwritten dword, and whether the
+   picture stays on screen through the reboot when the saved block has the
+   layout the XDK uses.
