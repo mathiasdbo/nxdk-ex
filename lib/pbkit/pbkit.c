@@ -86,6 +86,7 @@ static unsigned int pb_DepthFmt = NV097_SET_SURFACE_FORMAT_ZETA_Z24S8;
 static  int         pb_ColorBpp=32;     //bits per pixel of pb_ColorFmt (computed by pb_init)
 static  int         pb_DepthBpp=32;     //bits per pixel of pb_DepthFmt (computed by pb_init)
 static  int         pb_DepthFloat=0;    //NV097_SET_CONTROL0_Z_FORMAT: 0=fixed point depth, 1=floating point depth
+static  int         pb_DepthTileMode=PB_DEPTH_TILE_Z; //pb_set_depth_tile_mode (tile region of the depth buffer)
 static  int         pb_WBuffer=1;       //NV097_SET_CONTROL0_Z_PERSPECTIVE_ENABLE: 1=depth is w (W-buffering), 0=depth is z
                                         //(1 is what pbkit has always pushed in set_draw_buffer, see pb_control0)
 static  int         pb_Dither=-1;       //NV097_SET_DITHER_ENABLE: -1=auto (on for 16 bits color formats), 0=off, 1=on
@@ -484,6 +485,9 @@ static void pb_subprog(DWORD subprogID, DWORD paramA, DWORD paramB)
 
 
 
+static bool pb_GpuErrorHalt=true; //pb_set_gpu_error_halt
+static volatile pb_gpu_error pb_GpuError; //last PGRAPH error (pb_get_gpu_error)
+
 static DWORD pb_gr_handler(void)
 {
     DWORD           status;
@@ -572,6 +576,24 @@ static DWORD pb_gr_handler(void)
                         }
                         else
                         {
+                            pb_GpuError.nsource=nsource;
+                            pb_GpuError.address=trapped_address;
+                            pb_GpuError.data_low=DataLow;
+                            pb_GpuError.data_high=VIDEOREG(NV_PGRAPH_TRAPPED_DATA_HIGH);
+                            pb_GpuError.param_a=VIDEOREG(NV_PGRAPH_PARAMETER_A);
+                            pb_GpuError.param_b=VIDEOREG(NV_PGRAPH_PARAMETER_B);
+                            pb_GpuError.limit_details=VIDEOREG(0x00400800);
+                            pb_GpuError.count++;
+
+                            if (!pb_GpuErrorHalt)
+                            {
+                                //recorded only: the application reads pb_get_gpu_error() at passive level
+                                //(this runs in the DPC, where a halt loop freezes every thread)
+                                VIDEOREG(NV_PGRAPH_INTR)=NV_PGRAPH_INTR_ERROR_RESET;
+                                VIDEOREG(NV_PGRAPH_FIFO)=NV_PGRAPH_FIFO_ACCESS_ENABLE;
+                                return VIDEOREG(NV_PGRAPH_INTR);
+                            }
+
                             pb_show_debug_screen();
 
                             debugPrint("\n");
@@ -2314,6 +2336,16 @@ void pb_set_presentation_interval(int interval)
     pb_PresentInterval=interval;
 }
 
+void pb_set_gpu_error_halt(bool halt)
+{
+    pb_GpuErrorHalt=halt;
+}
+
+const volatile pb_gpu_error *pb_get_gpu_error(void)
+{
+    return &pb_GpuError;
+}
+
 int pb_get_presentation_interval(void)
 {
     return pb_PresentInterval;
@@ -3120,6 +3152,16 @@ void pb_set_w_buffer(bool enable)
 {
     pb_WBuffer = enable ? 1 : 0;
     pb_update_depth_state();
+}
+
+void pb_set_depth_tile_mode(int mode)
+{
+    pb_DepthTileMode = mode;
+}
+
+int pb_get_depth_tile_mode(void)
+{
+    return pb_DepthTileMode;
 }
 
 bool pb_get_w_buffer(void)
@@ -4124,7 +4166,7 @@ int pb_init(void)
             //(640 wide Z16: 1280 -> 1536; Z24S8: 2560, already a tile pitch).
             TilePitch=pb_tile_pitch_at_least(Pitch);
             if (TilePitch) Pitch=TilePitch;
-            pb_DSTiled=(TilePitch!=0);
+            pb_DSTiled=(TilePitch!=0)&&(pb_DepthTileMode!=PB_DEPTH_TILE_NONE);
             pb_DepthStencilPitch=Pitch;
 
             Size=Pitch*VSize*pb_MSScaleY;
@@ -4159,7 +4201,8 @@ int pb_init(void)
                 Pitch,              //DWORD tile_pitch (= surface pitch)
                 0,              //DWORD tile_z_start_tag,
                 0,              //DWORD tile_z_offset,
-                (DepthBpp==32)?     //DWORD tile_flags: compressed depth buffer,
+                (pb_DepthTileMode==PB_DEPTH_TILE_LINEAR)?0: //DWORD tile_flags: a plain tile, linear for the CPU
+                (DepthBpp==32)?     //else a compressed Z tile (the CPU sees the GPU's Z layout),
                 (PB_TILE_FLAGS_ZCOMPRESS|PB_TILE_FLAGS_Z32BITS|PB_TILE_FLAGS_ZBUFFER): //0x84000001 for Z24S8
                 (PB_TILE_FLAGS_ZCOMPRESS|PB_TILE_FLAGS_ZBUFFER)     //0x80000001 for Z16
                 );

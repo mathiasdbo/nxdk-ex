@@ -7,11 +7,25 @@
  * sent to DbgPrint and kept in a magic tagged block (g_results) that a debugger
  * can find in memory.
  *
+ * The depth buffer uses PB_DEPTH_TILE_LINEAR, the tile mode the CPU reads
+ * linearly on a console (pbkit's default Z tile shows the GPU's internal Z
+ * layout instead; make EXP=ZTILE_Z keeps it, chained through E:\Games\pbkit
+ * Formats ztile). Two more checks per configuration, both in the log: runs of
+ * equal depth along rows 150 and 300 (what the CPU sees), and a GPU probe, a
+ * full screen quad between the two depths read back as colors (what the
+ * GPU's depth test holds, whatever the CPU reads).
+ *
  * Build with make CONFIG=n to run a single configuration without pb_kill.
+ *
+ * On a console the same lines go to E:\pbkit_formats.txt during the first
+ * pass (a START line before each pb_init, so a freeze names its config); after
+ * LOG_CYCLES passes the cycling build reboots to the dashboard so the file can
+ * be fetched over FTP.
  */
 #include <hal/debug.h>
 #include <hal/video.h>
 #include <hal/xbox.h>
+#include <nxdk/mount.h>
 #include <pbkit/pbkit.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -21,6 +35,8 @@
 #include <strings.h>
 #include <windows.h>
 #include <xboxkrnl/xboxkrnl.h>
+
+#include "watchdog.h"
 
 #define MASK(mask, val) (((val) << (ffs(mask) - 1)) & (mask))
 
@@ -71,6 +87,15 @@ static const config_t configs[] = {
 #define COLOR_A     0xFF0000
 #define COLOR_B     0x0000FF
 #define COLOR_CLEAR 0x404040
+#define COLOR_PROBE 0x00FF00 /* mid-depth quad drawn after the readback */
+#define PROBE_Z     0.5f
+#define PROBE_W     0.5f
+
+#ifdef ZTILE_Z /* experiment: pbkit's default Z tile, which the CPU does not read linearly */
+#define CHAIN_DIR "pbkit Formats ztile"
+#else
+#define CHAIN_DIR "pbkit Formats"
+#endif
 
 static const float tri_a[3][2] = {{100.0f, 100.0f}, {420.0f, 100.0f}, {260.0f, 400.0f}};
 static const float tri_b[3][2] = {{220.0f, 100.0f}, {540.0f, 100.0f}, {380.0f, 400.0f}};
@@ -109,7 +134,49 @@ static volatile results_t g_results __attribute__((aligned(16))) = {"PBFMTRES"};
 
 static Vertex *alloc_vertices;
 static int status_lines;
-static char status[12][64];
+static char status[20][64];
+
+#define LOGFILE    "E:\\pbkit_formats.txt"
+#define LOG_CYCLES 2 /* cycling build: passes over configs[] before XReboot */
+static int g_cycle;        /* passes over configs[] completed */
+static bool g_log_started; /* the first write truncates the file */
+
+static void mount_e (void)
+{
+    if (!nxIsDriveMounted('E')) {
+        nxMountDrive('E', "\\Device\\Harddisk0\\Partition1\\");
+    }
+}
+
+static char g_last_step[96]; /* the watchdog names the last line logged */
+
+/* Appends one line to E:\pbkit_formats.txt during the first pass (on xemu
+ * without an E: partition CreateFile just fails) and bumps the watchdog */
+static void log_file (const char *line)
+{
+    HANDLE h;
+    DWORD written;
+
+    strncpy(g_last_step, line, sizeof(g_last_step) - 1);
+    watchdog_kick(g_last_step);
+#ifdef NO_FILE_LOG
+    return; /* experiment: no disk writes */
+#endif
+    if (g_cycle > 0) {
+        return;
+    }
+    mount_e();
+    /* write-through, so a reset or a power-off keeps every line already logged */
+    h = CreateFileA(LOGFILE, GENERIC_WRITE, 0, NULL, g_log_started ? OPEN_ALWAYS : CREATE_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
+    g_log_started = true;
+    if (h != INVALID_HANDLE_VALUE) {
+        SetFilePointer(h, 0, NULL, FILE_END);
+        WriteFile(h, line, (DWORD)strlen(line), &written, NULL);
+        WriteFile(h, "\r\n", 2, &written, NULL);
+        CloseHandle(h);
+    }
+}
 
 static void init_shader (void);
 static void set_attrib_pointer (unsigned int index, unsigned int format, unsigned int size, unsigned int stride,
@@ -119,13 +186,14 @@ static void draw_arrays (unsigned int mode, int start, int count);
 static void log_line (const char *fmt, ...)
 {
     va_list ap;
-    if (status_lines >= 12) {
+    if (status_lines >= (int)(sizeof(status) / sizeof(status[0]))) {
         return;
     }
     va_start(ap, fmt);
     vsnprintf(status[status_lines], sizeof(status[0]), fmt, ap);
     va_end(ap);
     DbgPrint("pbkit_formats: %s\n", status[status_lines]);
+    log_file(status[status_lines]);
     status_lines++;
 }
 
@@ -242,6 +310,11 @@ static void run_config (int index)
     bool w = cfg->w_buffer;
 
     status_lines = 0;
+    {
+        char line[96];
+        snprintf(line, sizeof(line), "START config %d (%s) cycle %d", index, cfg->name, g_cycle);
+        log_file(line);
+    }
     g_results.config = index;
     g_results.frame = 0;
     g_results.state = 0;
@@ -250,35 +323,68 @@ static void run_config (int index)
 
     if (!XVideoSetMode(WIDTH, HEIGHT, cfg->bpp, REFRESH_DEFAULT)) {
         debugPrint("XVideoSetMode %d bpp failed\n", cfg->bpp);
+        log_file("XVideoSetMode failed");
         Sleep(2000);
         return;
     }
+    log_file("step: XVideoSetMode ok");
 
     pb_set_color_format(cfg->color_fmt, false);
     pb_set_depth_format(cfg->depth_fmt);
     pb_set_depth_float(cfg->depth_float);
     pb_set_w_buffer(cfg->w_buffer);
+#ifndef ZTILE_Z
+    /* the depth readback needs a buffer the CPU sees linearly (pbkit_framebuffer.h) */
+    pb_set_depth_tile_mode(PB_DEPTH_TILE_LINEAR);
+#endif
 
     if ((status_code = pb_init())) {
         debugPrint("pb_init Error %d\n", status_code);
+        log_file("pb_init failed");
         Sleep(2000);
         return;
     }
+    log_file("step: pb_init ok");
+#ifdef GPU_ERROR
+    /* experiment: a depth clear four times the buffer's height, past its DMA
+     * limit; on a console this raises a zeta limit error for the watchdog */
+    log_file("EXP GPU_ERROR: oversized depth clear");
+    pb_erase_depth_stencil_buffer(0, 0, WIDTH, HEIGHT * 4);
+    while (pb_busy()) {
+    }
+    log_file("EXP GPU_ERROR: clear done without an error");
+#endif
+#ifdef HANG
+    /* experiment: a hang at passive level, for the watchdog */
+    log_file("EXP HANG: spinning");
+    for (;;) {
+        __asm__ volatile("");
+    }
+#endif
     pb_show_front_screen();
+    log_file("step: pb_show_front_screen ok");
 
     scale = pb_depth_scale();
     memcpy(&scale_bits, &scale, 4);
     g_results.depth_scale_bits = scale_bits;
 
     init_shader();
+    log_file("step: init_shader ok");
 
-    alloc_vertices = MmAllocateContiguousMemoryEx(6 * sizeof(Vertex), 0, 0x3ffb000, 0, PAGE_READWRITE | PAGE_WRITECOMBINE);
+    alloc_vertices = MmAllocateContiguousMemoryEx(12 * sizeof(Vertex), 0, 0x3ffb000, 0, PAGE_READWRITE | PAGE_WRITECOMBINE);
     if (w) {
         fill_triangle(&alloc_vertices[0], tri_a, A_Z, A_W, COLOR_A, scale);
         fill_triangle(&alloc_vertices[3], tri_b, B_Z, B_W, COLOR_B, scale);
     } else {
         fill_triangle(&alloc_vertices[0], tri_b, B_Z, B_W, COLOR_B, scale);
         fill_triangle(&alloc_vertices[3], tri_a, A_Z, A_W, COLOR_A, scale);
+    }
+    {
+        /* vertices 6-11: a full screen quad between the two depths (GPU probe) */
+        static const float q0[3][2] = {{0.0f, 0.0f}, {WIDTH, 0.0f}, {0.0f, HEIGHT}};
+        static const float q1[3][2] = {{WIDTH, 0.0f}, {WIDTH, HEIGHT}, {0.0f, HEIGHT}};
+        fill_triangle(&alloc_vertices[6], q0, PROBE_Z, PROBE_W, COLOR_PROBE, scale);
+        fill_triangle(&alloc_vertices[9], q1, PROBE_Z, PROBE_W, COLOR_PROBE, scale);
     }
 
     /* Frame 1: render and read back */
@@ -289,18 +395,23 @@ static void run_config (int index)
     fb_pitch = pb_back_buffer_pitch();
     ds = (uint8_t *)pb_depth_stencil_buffer();
     ds_pitch = pb_depth_stencil_pitch();
+    log_file("step: target back buffer ok");
 
     draw_scene(cfg);
+    log_file("step: draw_scene submitted");
     while (pb_busy()) {
     }
+    log_file("step: pb_busy idle");
     while (pb_finished()) {
     }
+    log_file("step: pb_finished ok");
     /* let the swap and the rendering fully complete */
     for (i = 0; i < 4; i++) {
         pb_wait_for_vbl();
     }
     while (pb_busy()) {
     }
+    log_file("step: idle after 4 vbl");
 
     /* Expectations */
     {
@@ -321,8 +432,17 @@ static void run_config (int index)
         depth_exp[3] = (uint32_t)(depth_b * scale);
 
         for (i = 0; i < 4; i++) {
+            char line[64];
             g_results.color[i] = read_color(cfg, fb, fb_pitch, px[i][0], px[i][1]);
+            snprintf(line, sizeof(line), "step: color read %d = %06lX", i, (unsigned long)g_results.color[i]);
+            log_file(line);
+#ifdef NO_DEPTH_READ
+            g_results.depth[i] = depth_exp[i]; /* experiment: no CPU read of the depth tile */
+#else
             g_results.depth[i] = read_depth(cfg, ds, ds_pitch, px[i][0], px[i][1]);
+#endif
+            snprintf(line, sizeof(line), "step: depth read %d = %06lX", i, (unsigned long)g_results.depth[i]);
+            log_file(line);
             g_results.color_expect[i] = color_exp[i];
             g_results.depth_expect[i] = depth_exp[i];
         }
@@ -370,6 +490,65 @@ static void run_config (int index)
         }
     }
 
+    /* What the CPU sees: runs of equal depth along two rows (log only).
+     * Edges at y 150: A 127..393, B 247..513; at y 300: A 207..313, B 327..433. */
+    {
+        static const int rows[2] = {150, 300};
+        int r, x, start;
+        for (r = 0; r < 2; r++) {
+            char line[256];
+            int n = snprintf(line, sizeof(line), "depth row %d:", rows[r]);
+            uint32_t run = read_depth(cfg, ds, ds_pitch, 0, rows[r]);
+            start = 0;
+            for (x = 1; x <= WIDTH; x++) {
+                uint32_t v = (x < WIDTH) ? read_depth(cfg, ds, ds_pitch, x, rows[r]) : ~run;
+                if (v != run) {
+                    if (n < (int)sizeof(line) - 24) {
+                        n += snprintf(line + n, sizeof(line) - n, " %d-%d:%lX", start, x - 1, (unsigned long)run);
+                    }
+                    run = v;
+                    start = x;
+                }
+            }
+            log_file(line);
+        }
+    }
+
+    /* GPU probe: a quad at a depth between A and B, depth tested against what
+     * the GPU holds. It must cover the clear area and the far triangle's own
+     * area and nothing else, whatever the CPU read back (Z compression). */
+    {
+        const int px[4][2] = {{PX_CLEAR_X, PX_CLEAR_Y}, {PX_BOTH_X, PX_BOTH_Y}, {PX_A_X, PX_A_Y}, {PX_B_X, PX_B_Y}};
+        static const char *names[4] = {"clear", "overlap", "A only", "B only"};
+        uint32_t exp[4], got;
+        bool gpu_ok = true;
+        exp[0] = pack_color(cfg->color_fmt, COLOR_PROBE);
+        exp[1] = pack_color(cfg->color_fmt, w ? COLOR_A : COLOR_B);
+        exp[2] = pack_color(cfg->color_fmt, w ? COLOR_A : COLOR_PROBE);
+        exp[3] = pack_color(cfg->color_fmt, w ? COLOR_PROBE : COLOR_B);
+        uint8_t *pfb;
+        /* its own frame: the scene again, then the quad, read before the swap */
+        pb_wait_for_vbl();
+        pb_reset();
+        pb_target_back_buffer();
+        pfb = (uint8_t *)pb_back_buffer();
+        draw_scene(cfg);
+        draw_arrays(NV097_SET_BEGIN_END_OP_TRIANGLES, 6, 6);
+        while (pb_busy()) {
+        }
+        for (i = 0; i < 4; i++) {
+            got = read_color(cfg, pfb, fb_pitch, px[i][0], px[i][1]);
+            if (!color_matches(cfg->color_fmt, got, exp[i])) {
+                gpu_ok = false;
+            }
+            log_line("gpu probe %-7s %06X exp %06X %s", names[i], got, exp[i],
+                     color_matches(cfg->color_fmt, got, exp[i]) ? "ok" : "FAIL");
+        }
+        log_line("GPU DEPTH: %s", gpu_ok ? "correct (probe as expected)" : "WRONG (probe differs)");
+        while (pb_finished()) {
+        }
+    }
+
     pass = (fails == 0);
     log_line("RESULT: %s (fails 0x%02X)", pass ? "PASS" : "FAIL", fails);
     g_results.fails = fails;
@@ -377,7 +556,7 @@ static void run_config (int index)
     g_results.state = 1;
 
     /* Hold the frame with the report on screen */
-#ifdef CONFIG
+#if defined(CONFIG) && !defined(CHAIN)
     for (frame = 0;; frame++) {
 #else
     for (frame = 0; frame < HOLD_FRAMES; frame++) {
@@ -390,26 +569,85 @@ static void run_config (int index)
             pb_print("%s\n", status[i]);
         }
         pb_draw_text_screen();
+        if (frame == 0) {
+            log_file("hold frame 0 submitted");
+        }
         while (pb_busy()) {
         }
         while (pb_finished()) {
         }
         g_results.frame = frame;
+        watchdog_kick(NULL);
+        if (frame < 3 || frame == HOLD_FRAMES - 1) {
+            char line[48];
+            snprintf(line, sizeof(line), "hold frame %d ok", frame);
+            log_file(line);
+        }
+#ifdef NO_FILE_LOG
+        if (0) {
+#else
+        if ((frame % 10) == 0 && g_cycle == 0) {
+#endif
+            /* E:\pbkit_progress.txt names the last frame that completed, for a hang */
+            FILE *pf;
+            mount_e();
+            pf = fopen("E:\\pbkit_progress.txt", "wb");
+            if (pf) {
+                fprintf(pf, "config %d frame %d\r\n", index, frame);
+                fclose(pf);
+            }
+        }
     }
+    log_file("hold done");
 
+#ifndef CHAIN
     MmFreeContiguousMemory(alloc_vertices);
     pb_kill();
+#endif
 }
 
 int main (void)
 {
+#ifndef NO_WATCHDOG
+    mount_e();
+    watchdog_start();
+#endif
 #ifdef CONFIG
+#ifdef CHAIN
+    /* One XBE per configuration: cfg0 (default.xbe) truncates the log, the
+     * others append; after the hold the next XBE is launched through the
+     * kernel instead of pb_kill/pb_init, the last one reboots. */
+    g_log_started = (CONFIG != 0);
     run_config(CONFIG);
+    if (CONFIG + 1 < (int)NUM_CONFIGS) {
+        char path[64];
+        snprintf(path, sizeof(path), "E:\\Games\\%s\\cfg%d.xbe", CHAIN_DIR, CONFIG + 1);
+        {
+            char line[96];
+            snprintf(line, sizeof(line), "NEXT %s", path);
+            log_file(line);
+        }
+        XLaunchXBE(path);
+        log_file("XLaunchXBE returned");
+    } else {
+        log_file("DONE: rebooting to the dashboard");
+        XReboot();
+    }
+    while (1) {
+    }
+#else
+    run_config(CONFIG);
+#endif
 #else
     while (1) {
         unsigned int i;
         for (i = 0; i < NUM_CONFIGS; i++) {
             run_config(i);
+        }
+        g_cycle++;
+        if (g_cycle == LOG_CYCLES) {
+            log_file("DONE: rebooting to the dashboard");
+            XReboot();
         }
     }
 #endif
