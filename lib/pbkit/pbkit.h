@@ -61,6 +61,26 @@ void    pb_get_display_field_status(DWORD *vbl_count, int *field);
 void    pb_set_presentation_interval(int interval);
 int     pb_get_presentation_interval(void);
 
+/* GPU (PGRAPH) errors: by default pbkit shows a report and halts inside its
+ * interrupt DPC, which freezes the whole console (no thread runs again).
+ * pb_set_gpu_error_halt(false) only records the error and lets the system
+ * run: the application polls pb_get_gpu_error()->count at passive level and
+ * reports or reboots itself. */
+typedef struct pb_gpu_error
+{
+    DWORD count;         /* errors recorded since the program started */
+    DWORD nsource;       /* NV_PGRAPH_NSOURCE bits of the last one (0x20: zeta limit) */
+    DWORD address;       /* trapped method */
+    DWORD data_low;
+    DWORD data_high;
+    DWORD param_a;       /* NV_PGRAPH_PARAMETER_A (0x1D8C) */
+    DWORD param_b;       /* NV_PGRAPH_PARAMETER_B (0x1D90) */
+    DWORD limit_details; /* 0x400800, printed with limit errors */
+} pb_gpu_error;
+
+void    pb_set_gpu_error_halt(bool halt);
+const volatile pb_gpu_error *pb_get_gpu_error(void);
+
 //Fences: pb_insert_fence() queues a GPU write of a new 32-bit value (wrap-safe compare) once
 //everything pushed before it has been rendered (NV097_BACK_END_WRITE_SEMAPHORE_RELEASE). Like
 //pb_end_deferred it does not kick the push buffer; pb_is_fence_pending/pb_block_on_fence kick it
