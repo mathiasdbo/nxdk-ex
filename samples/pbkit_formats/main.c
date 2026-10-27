@@ -525,6 +525,14 @@ int main (void)
     mount_e();
     watchdog_start();
 #endif
+    {
+        char line[160];
+#if defined(CONFIG) && defined(CHAIN)
+        g_log_started = (CONFIG != 0); /* cfg1..6 append */
+#endif
+        watchdog_sector0("at start", line, sizeof(line));
+        log_file(line);
+    }
 #ifdef CONFIG
 #ifdef CHAIN
     /* One XBE per configuration: cfg0 (default.xbe) truncates the log, the
@@ -543,6 +551,9 @@ int main (void)
         XLaunchXBE(path);
         log_file("XLaunchXBE returned");
     } else {
+        char line[160];
+        watchdog_sector0("before reboot", line, sizeof(line));
+        log_file(line);
         log_file("DONE: rebooting to the dashboard");
         XReboot();
     }
