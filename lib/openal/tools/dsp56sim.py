@@ -306,6 +306,8 @@ class Gp:
             v = self.reg[d]
             if mn == 'clr':
                 v = 0
+            elif mn == 'rnd':
+                v = self.round(v)
             elif mn == 'neg':
                 v = -v
             elif mn == 'abs':
@@ -336,7 +338,7 @@ class Gp:
                 p = -p
             v = p if mn.startswith('mpy') else self.reg[d] + p
             if mn.endswith('r'):
-                v = ((v + (1 << 23)) >> 24) << 24
+                v = self.round(v)
             self.set_acc(d, v)
             return
         if mn in ('tfr', 'add', 'sub', 'cmp', 'cmpm'):
@@ -361,6 +363,15 @@ class Gp:
                 self.flags = (r < 0, r == 0, False)
             return
         raise SimError('ALU op %s not modelled' % mn)
+
+    @staticmethod
+    def round(v):
+        """Round to A1 (no scaling): convergent, the reset rounding mode (SR RM = 0) the GP runs in."""
+        lo = v & MASK24
+        hi = v - lo
+        if lo > 0x800000 or (lo == 0x800000 and (hi >> 24) & 1):
+            hi += 1 << 24
+        return hi
 
     def cond(self, cc):
         n, z, v = self.flags
