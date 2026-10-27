@@ -28,6 +28,8 @@
 #include <windows.h>
 #include <xboxkrnl/xboxkrnl.h>
 
+#include "watchdog.h"
+
 #define MASK(mask, val) (((val) << (ffs(mask) - 1)) & (mask))
 
 #define WIDTH  640
@@ -129,25 +131,33 @@ static void mount_e (void)
     }
 }
 
+static char g_last_step[96]; /* the watchdog names the last line logged */
+
 /* Appends one line to E:\pbkit_formats.txt during the first pass (on xemu
- * without an E: partition fopen just fails) */
+ * without an E: partition CreateFile just fails) and bumps the watchdog */
 static void log_file (const char *line)
 {
-    FILE *f;
+    HANDLE h;
+    DWORD written;
+
+    strncpy(g_last_step, line, sizeof(g_last_step) - 1);
+    watchdog_kick(g_last_step);
 #ifdef NO_FILE_LOG
-    (void)line;
     return; /* experiment: no disk writes */
 #endif
     if (g_cycle > 0) {
         return;
     }
     mount_e();
-    f = fopen(LOGFILE, g_log_started ? "ab" : "wb");
+    /* write-through, so a reset or a power-off keeps every line already logged */
+    h = CreateFileA(LOGFILE, GENERIC_WRITE, 0, NULL, g_log_started ? OPEN_ALWAYS : CREATE_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
     g_log_started = true;
-    if (f) {
-        fputs(line, f);
-        fputs("\r\n", f);
-        fclose(f);
+    if (h != INVALID_HANDLE_VALUE) {
+        SetFilePointer(h, 0, NULL, FILE_END);
+        WriteFile(h, line, (DWORD)strlen(line), &written, NULL);
+        WriteFile(h, "\r\n", 2, &written, NULL);
+        CloseHandle(h);
     }
 }
 
@@ -314,6 +324,13 @@ static void run_config (int index)
         return;
     }
     log_file("step: pb_init ok");
+#ifdef HANG
+    /* experiment: a hang at passive level, for the watchdog */
+    log_file("EXP HANG: spinning");
+    for (;;) {
+        __asm__ volatile("");
+    }
+#endif
     pb_show_front_screen();
     log_file("step: pb_show_front_screen ok");
 
@@ -464,6 +481,7 @@ static void run_config (int index)
         while (pb_finished()) {
         }
         g_results.frame = frame;
+        watchdog_kick(NULL);
         if (frame < 3 || frame == HOLD_FRAMES - 1) {
             char line[48];
             snprintf(line, sizeof(line), "hold frame %d ok", frame);
@@ -494,6 +512,10 @@ static void run_config (int index)
 
 int main (void)
 {
+#ifndef NO_WATCHDOG
+    mount_e();
+    watchdog_start();
+#endif
 #ifdef CONFIG
 #ifdef CHAIN
     /* One XBE per configuration: cfg0 (default.xbe) truncates the log, the
