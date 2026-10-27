@@ -40,6 +40,34 @@ void    pb_show_debug_screen(void); //shows debug screen (default openxdk+SDL bu
 void    pb_show_depth_screen(void); //shows depth screen (depth stencil buffer)
 
 DWORD   pb_get_vbl_counter(void);
+
+//VBlank and swap callbacks (NULL removes them). Both run in pbkit's DPC (DISPATCH_LEVEL), right
+//after the VBlank handling (swap: after a frame was put on screen, also from the DPC for
+//PB_PRESENT_INTERVAL_IMMEDIATE flips). They must be brief, must not call pbkit and must save and
+//restore the FPU state themselves if they use floating point (KeSaveFloatingPointState).
+//vbl_count is pb_get_vbl_counter() at that VBlank, frame the number of frames shown since pb_init.
+void    pb_set_vblank_callback(void (*cb)(DWORD vbl_count));
+void    pb_set_swap_callback(void (*cb)(DWORD frame, DWORD vbl_count));
+//Display field status: *vbl_count = VBlank counter, *field = 0 (even) or 1 (odd) field being
+//scanned out in an interlaced mode, -1 when progressive or unknown. Either pointer may be NULL.
+void    pb_get_display_field_status(DWORD *vbl_count, int *field);
+
+//Presentation interval (D3DPRESENT_INTERVAL_*): when pb_finished() frames are put on screen.
+//Can be changed at any time; it lasts across pb_kill/pb_init.
+#define PB_PRESENT_INTERVAL_ONE             1   //at the next VBlank (default, the classic pbkit behaviour)
+#define PB_PRESENT_INTERVAL_TWO             2   //at a VBlank, at most every second VBlank
+#define PB_PRESENT_INTERVAL_IMMEDIATE       0   //as soon as the GPU has finished the frame (tearing)
+#define PB_PRESENT_INTERVAL_ONE_OR_IMMEDIATE 3  //at the next VBlank, immediately if the frame missed one
+void    pb_set_presentation_interval(int interval);
+int     pb_get_presentation_interval(void);
+
+//Fences: pb_insert_fence() queues a GPU write of a new 32-bit value (wrap-safe compare) once
+//everything pushed before it has been rendered (NV097_BACK_END_WRITE_SEMAPHORE_RELEASE). Like
+//pb_end_deferred it does not kick the push buffer; pb_is_fence_pending/pb_block_on_fence kick it
+//when the fence has not passed. A fence that was never inserted is not pending.
+DWORD   pb_insert_fence(void);
+bool    pb_is_fence_pending(DWORD fence);
+void    pb_block_on_fence(DWORD fence);     //busy waits until the GPU has passed the fence
 DWORD   pb_wait_for_vbl(void);  //waits for VBL, returns VBL counter value as bonus info
                 //you can avoid calling it and try to draw a lot in advance
                 //use it if you need strong synchronization with controls
@@ -81,6 +109,56 @@ void    pb_kill(void);      //stops Dma engine and releases push buffer
 
 void    pb_target_extra_buffer(int n);  //to have rendering made into a static extra buffer
 void    pb_target_back_buffer(void);    //to have rendering made into normal rotating back buffer
+
+//Render to texture: pb_set_render_target points the GPU at an application buffer until the next
+//pb_target_back_buffer / pb_target_extra_buffer / pb_set_render_target (NULL: back buffer) or
+//pb_finished. Buffers: contiguous memory below 0x03FFB000 (MmAllocateContiguousMemoryEx), 64
+//bytes aligned. Returns 0, or -1 (nothing changed) for an invalid target.
+//- swizzled: width and height powers of two (<= 4096), Morton order (pb_swizzle_offset), the
+//  pitches are not used; sample it as a SZ_* texture of the same size.
+//- linear: pitch (and depth_pitch) >= width*Bpp, multiples of 64; sample it as a LU_IMAGE_*
+//  texture (texel coordinates). A tiled buffer needs a tile pitch (see pb_assign_tile).
+//- depth_addr NULL: no depth buffer, depth and stencil tests go off (back on, with depth writes,
+//  when a target with a depth buffer follows). Otherwise it has pbkit's depth format
+//  (pb_get_depth_format, Z24S8 with PB_DEPTH_NONE) and the color buffer's layout.
+//Coordinates and pb_set_viewport are in target pixels; the window clip is widened to 4096 for
+//a target larger than the screen. No pb_fill / pb_erase_depth_stencil_buffer (NV097_CLEAR_SURFACE)
+//on a swizzled target (xemu asserts): clear it with a quad. Push NV097_WAIT_FOR_IDLE before
+//sampling it, wait for the GPU (fence, pb_busy) before the CPU reads it.
+typedef struct {
+    DWORD        *addr;          //color buffer
+    DWORD        width;
+    DWORD        height;
+    unsigned int color_format;   //NV097_SET_SURFACE_FORMAT_COLOR_LE_*
+    bool         swizzled;
+    DWORD        pitch;          //linear only: bytes per line
+    DWORD        *depth_addr;    //NULL: no depth buffer
+    DWORD        depth_pitch;    //linear only
+} pb_render_target;
+int     pb_set_render_target(const pb_render_target *rt);
+//Byte offset of texel (x, y) in a swizzled w x h surface or texture (powers of two), for CPU access
+DWORD   pb_swizzle_offset(DWORD x, DWORD y, DWORD w, DWORD h, DWORD bytes_per_pixel);
+
+//Multisampling (call before pb_init). PB_MS_2X: 2 samples per pixel side by side
+//(NV097_SET_SURFACE_FORMAT_ANTI_ALIASING_CENTER_CORNER_2), PB_MS_4X: 2x2 (SQUARE_OFFSET_4).
+//pb_init allocates a sample buffer (width*2 x height, 4X: width*2 x height*2, tile #3) and the
+//depth stencil buffer at that size; pb_target_back_buffer draws into the sample buffer and
+//pb_finished resolves it on the GPU into the back buffer (box filter: the bilinear average of
+//each pixel's samples) before queuing the flip. All coordinates (vertices, viewport, clears,
+//pb_fill) stay in screen pixels: the GPU scales them. The frame buffers keep the screen size.
+//The resolve changes GPU state: transform program start (slot 134, set back to 0), execution
+//mode (program), slots 134-135 of the transform program, texture stages (0 disabled again,
+//1-3 disabled), shader stage program, combiners, blending, alpha test, logic op, color mask,
+//polygon modes, vertex attributes 0 and 9 (inline values); depth/stencil tests and depth writes
+//and culling are back on. Set your own state again after pb_finished.
+//pb_target_extra_buffer draws at screen size without depth buffer when multisampling.
+#define PB_MS_NONE  0
+#define PB_MS_2X    1
+#define PB_MS_4X    2
+void    pb_set_multisample(int mode);
+int     pb_get_multisample(void);
+DWORD   *pb_multisample_buffer(void);   //after pb_init: the sample buffer (NULL without multisampling)
+DWORD   pb_multisample_pitch(void);
 
 DWORD   *pb_extra_buffer(int n);    //returns a static extra buffer address
 DWORD   *pb_back_buffer(void);      //returns normal rotating back buffer address
