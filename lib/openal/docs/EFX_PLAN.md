@@ -82,32 +82,35 @@ with `AL_INVALID_OPERATION` and the slot keeps its autowah, the rotation changes
 and the log on E: is written through line by line. Its GP runs at 90-300 frames/s instead of 1500 (`GP frames +N`
 in the log). xemu 0.8.139 aborted in five of seven runs with `dsp_cpu.c:419 lookup_opcode_slow: Invalid op code`
 (op `$0000E0`, `$0000EA`), each time right after a kernel switch (once in 6d, before any new kernel; in 6i at the
-equalizer; in 7 after the autowah and after the echo); the runs without an abort ended with the `XReboot()`. A
-suspect for the console: `apu_gp.c` `wait_frames()` gives up after 40000 register reads (about 20 ms on a console)
-and returns as if the two frames had passed, so on a GP this slow the code may be rewritten under a kernel still in
-its frame. On a console 2 frames are 1.3 ms; the sample logs `GP frames +N in 100 ms` after every attach (about 150
-expected) so a GP stopped by a switch shows.
+equalizer; in 7 after the autowah and after the echo); the runs without an abort ended with the `XReboot()`. The
+cause: `apu_gp.c` `wait_frames()` gave up after 40000 register reads (about 20 ms) and went on as if the two frames
+had passed, so on a GP this slow the code was rewritten under a kernel still in its frame. It now waits up to 250 ms
+by `KeTickCount` and refuses the load instead: 3 of 3 xemu runs then reached the `XReboot()`, no abort.
+
+**Console (2026-10-27):** 44 of 45 checks passed, the GP ran about 1500 frames a second with every kernel, and
+the rotation ran 5 minutes without an underrun, a padded buffer or a slip. The one failure was the test's: 6j's
+floor was measured while the reverb's tail still rang (fixed, rerun pending).
 
 | Section | Check | Expected (simulator), tolerance | xemu | Console |
 |---|---|---|---|---|
-| 6i ring modulator | 1 kHz x 300 Hz sine, `HIGHPASS_CUTOFF` 0: 700 / 1300 Hz against the dry ear | -3.0 / -3.0 dB, +-0.5 | silent | |
-| | the 1 kHz carrier against 700 Hz | below -40 dB (simulator -111) | silent | |
-| 6i distortion | 1 kHz pcm 8000, `EDGE` 0.5, `GAIN` 0.5, lowpass 8 kHz, EQ 3 kHz / 6 kHz: H1 against the dry ear; H3, H5 against H1 | +7.7; -6.6, -12.2 dB, +-0.6; H3 30 dB over the dry voice's | silent | |
-| 6i equalizer | 100 / 500 / 3000 / 12000 Hz, flat against the dry ear | +3.0 dB each, +-0.5 | silent | |
-| | low +12 dB (cutoff 200 Hz) | +10.3 / +1.1 / 0.0 / 0.0, +-0.5 | silent | |
-| | mid1 +12 dB (500 Hz) | +0.3 / +12.0 / +0.2 / 0.0, +-0.5 | silent | |
-| | mid2 +12 dB (3 kHz) | 0.0 / +0.2 / +12.0 / +0.4, +-0.5 | silent | |
-| | high +12 dB (cutoff 6 kHz) | 0.0 / 0.0 / +1.6 / +10.9, +-0.5 | silent | |
-| 6i compressor | 1 kHz pcm 29000 / 3000, slot gain 0.5: loud on - off, quiet on - off | +2.3 +-1.0, +6.0 +-0.5 | silent | |
-| | loud - quiet, on / off | 16.0 +-1.0 / 19.7 +-0.5 dB | silent | |
-| 6i autowah | harmonics every 100 Hz, 0.6 s loud then 0.6 s 14 dB quieter, `RESONANCE` 100, `PEAK_GAIN` 0.00003: the peak, loud / quiet | 2312 / 499 Hz, +-12 %; (f - 20) ratio 4.78 +-0.45 | silent | |
-| 6i GP load | ring modulator, distortion, equalizer (one band), compressor, autowah | simulator 3,500 / 4,500 / 2,400 / 1,800 / 7,200 instructions a frame | 0 % (not modelled) | |
-| 6j four slots | reverb + equalizer (4 bands) + distortion + autowah attach | `AL_NO_ERROR` each | PASS | |
-| | all four busy 2 s: GP load peak, AC97 padded | below 100 % (about 87 % by the reverb's console scale, 27,500 instructions), 0 padded | 0 %, padded +188 (not modelled) | |
-| | each slot alone: 1 kHz against the dry ear; 3 kHz against 1 kHz | at least -30 dB and 20 over the floor; H3 at least -30 dB on the distortion only | silent | |
-| | a second reverb on slot 4 | `AL_INVALID_OPERATION`, slot unchanged | PASS | |
-| | GP restarts | 0 | 0, PASS | |
-| 7 rotation | 11 settings (reverb, echo, chorus, ring modulator, distortion, flanger, equalizer, compressor, autowah), 15 s each, 5 min, then `XReboot()` | 0 underruns / padded / slips, no AL error | no AL error, 0 restarts; slips not modelled | |
+| 6i ring modulator | 1 kHz x 300 Hz sine, `HIGHPASS_CUTOFF` 0: 700 / 1300 Hz against the dry ear | -3.0 / -3.0 dB, +-0.5 | silent | -3.0 / -3.0, PASS |
+| | the 1 kHz carrier against 700 Hz | below -40 dB (simulator -111) | silent | -105.7 dB, PASS |
+| 6i distortion | 1 kHz pcm 8000, `EDGE` 0.5, `GAIN` 0.5, lowpass 8 kHz, EQ 3 kHz / 6 kHz: H1 against the dry ear; H3, H5 against H1 | +7.7; -6.6, -12.2 dB, +-0.6; H3 30 dB over the dry voice's | silent | +7.6; -6.6, -12.2; H3 92.4 dB over, PASS |
+| 6i equalizer | 100 / 500 / 3000 / 12000 Hz, flat against the dry ear | +3.0 dB each, +-0.5 | silent | +3.0 each, PASS |
+| | low +12 dB (cutoff 200 Hz) | +10.3 / +1.1 / 0.0 / 0.0, +-0.5 | silent | +10.3 / +1.1 / 0.0 / 0.0, PASS |
+| | mid1 +12 dB (500 Hz) | +0.3 / +12.0 / +0.2 / 0.0, +-0.5 | silent | +0.3 / +12.0 / +0.2 / 0.0, PASS |
+| | mid2 +12 dB (3 kHz) | 0.0 / +0.2 / +12.0 / +0.4, +-0.5 | silent | 0.0 / +0.2 / +12.0 / +0.4, PASS |
+| | high +12 dB (cutoff 6 kHz) | 0.0 / 0.0 / +1.6 / +10.9, +-0.5 | silent | 0.0 / 0.0 / +1.6 / +10.9, PASS |
+| 6i compressor | 1 kHz pcm 29000 / 3000, slot gain 0.5: loud on - off, quiet on - off | +2.3 +-1.0, +6.0 +-0.5 | silent | +2.3, +6.0, PASS |
+| | loud - quiet, on / off | 16.0 +-1.0 / 19.7 +-0.5 dB | silent | 16.0 / 19.7, PASS |
+| 6i autowah | harmonics every 100 Hz, 0.6 s loud then 0.6 s 14 dB quieter, `RESONANCE` 100, `PEAK_GAIN` 0.00003: the peak, loud / quiet | 2312 / 499 Hz, +-12 %; (f - 20) ratio 4.78 +-0.45 | silent | 2312 / 499 Hz; 4.78, PASS |
+| 6i GP load | ring modulator, distortion, equalizer (one band), compressor, autowah | simulator 3,500 / 4,500 / 2,400 / 1,800 / 7,200 instructions a frame | 0 % (not modelled) | 0 / 8 / 3 / 3 / 12 % (reverb 34 %, echo 2-3 %, chorus 0 %: the meter reads 0 for the ring modulator and the chorus, to look into) |
+| 6j four slots | reverb + equalizer (4 bands) + distortion + autowah attach | `AL_NO_ERROR` each | PASS | PASS |
+| | all four busy 2 s: GP load peak, AC97 padded | below 100 % (about 87 % by the reverb's console scale, 27,500 instructions), 0 padded | 0 %, padded +188 (not modelled) | 56 %, peak 57 %; padded +0, underruns +0, PASS |
+| | each slot alone: 1 kHz against the dry ear; 3 kHz against 1 kHz | at least -30 dB and 20 over the floor; H3 at least -30 dB on the distortion only | silent | reverb -4.5, equalizer +4.6, distortion +7.6, autowah +3.1 dB; H3 -70.6 / -80.5 / -6.6 / -96.9: PASS but the reverb (FAIL: the floor, measured 300 ms after its sends, was the reverb's own tail at -22.1 dB; the floor now waits 3 s) |
+| | a second reverb on slot 4 | `AL_INVALID_OPERATION`, slot unchanged | PASS | PASS |
+| | GP restarts | 0 | 0, PASS | 0, PASS |
+| 7 rotation | 11 settings (reverb, echo, chorus, ring modulator, distortion, flanger, equalizer, compressor, autowah), 15 s each, 5 min, then `XReboot()` | 0 underruns / padded / slips, no AL error | no AL error, 0 restarts; slips not modelled | 0 underruns / padded / slips each minute, no AL error, 0 restarts, about 1500 GP frames/s, GP load peak 35 %, `XReboot()`, PASS |
 
 ## 3. Design
 
