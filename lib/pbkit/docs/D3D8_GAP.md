@@ -40,7 +40,7 @@ The points a console must still confirm are listed at the end of each batch.
 
 | Function | What |
 | --- | --- |
-| `pb_depth_stencil_buffer()` | CPU address of the (shared) depth stencil buffer. |
+| `pb_depth_stencil_buffer()` | CPU address of the (shared) depth stencil buffer. Linear for the CPU only with `pb_set_depth_tile_mode(PB_DEPTH_TILE_LINEAR)` or `_NONE` before `pb_init` (the default Z tile is not; see the console run). |
 | `pb_depth_stencil_pitch()` | bytes per line of that buffer (same convention as `pb_back_buffer_pitch`). |
 | `pb_assign_tile(index, addr, size, pitch, z_start_tag, z_offset, flags)` | now declared (it was already public). Index asserted 0..7. |
 | `pb_release_tile(index, clear_offset)` | now public. |
@@ -159,6 +159,40 @@ F24S8 + `D3DZB_USEW` combination and only a console can prove it.
 4. Dithering (`NV097_SET_DITHER_ENABLE`): xemu maps it to `GL_DITHER`, which is
    a no-op for exactly representable colors.
 5. `STENCIL_WRITE_ENABLE` = 0 with Z16 (xemu has no stencil attachment then).
+
+### Console run (2026-10-27)
+
+`samples/pbkit_formats` in chain mode (`make CONFIG=n CHAIN=1`, one XBE per
+configuration, log in `E:\pbkit_formats.txt`) on a console. Besides the four
+readback points the log has the depth along rows 150 and 300 and a GPU probe:
+a full screen quad halfway between the two triangles' depths, read back as
+colors, which shows what the GPU's depth test holds.
+
+- **The depth test is right in all 7 configurations**, F24S8 + W-buffering
+  (config 5, which xemu cannot run) included.
+- **With pbkit's default depth tile (a compressed Z tile) the CPU does not see a
+  linear image.** Configurations 1, 2, 4, 5 and 6 failed their depth readback
+  (the far triangle's own area read the near triangle's value), and the row
+  dumps of 0 and 3, which passed, were scrambled too: stripes a few pixels wide,
+  whole Z16 rows of one value or of 0. Turning compression off changed nothing;
+  the Z flags of the tile region are what the CPU sees through.
+- **With a tile region without the Z flags (`PB_DEPTH_TILE_LINEAR`), or none
+  (`PB_DEPTH_TILE_NONE`), all 7 pass**, and the rows match the triangles' edges
+  to the pixel. The sample now uses `PB_DEPTH_TILE_LINEAR`; pbkit's default stays
+  the Z tile, the fast one for rendering. Item 3 above is answered: the readback
+  of a Z tile is not transparent, with or without compression.
+- Raw float depth on the console (near / far / clear): Z16 float, Z-buffer
+  `C998 / FCCB / FFFF`; F24S8, Z-buffer `DF431E / E26B81 / E293E5`; F24S8,
+  W-buffer `E0E4AD / E21ABA / E293E5`; Z16 float, W-buffer `E332 / F665 / FFFF`.
+  All ordered as the formats require (clear > far > near).
+- A depth clear four times the buffer's height (`EXP=GPU_ERROR`) did not raise
+  a GPU error.
+
+pbkit's GPU error report halts inside the interrupt DPC, which freezes every
+thread. `pb_set_gpu_error_halt(false)` records the error instead
+(`pb_get_gpu_error()`), and the sample's watchdog thread (`watchdog.h`) logs it
+and resets the console through the SMC, as it does after 10 s without progress.
+On the console the hang test reset as expected and logged its last step.
 
 ## Batch 2: memory
 
