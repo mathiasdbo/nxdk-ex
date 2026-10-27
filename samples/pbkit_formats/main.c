@@ -481,6 +481,30 @@ static void run_config (int index)
         }
     }
 
+    /* What the CPU sees: runs of equal depth along two rows (log only).
+     * Edges at y 150: A 127..393, B 247..513; at y 300: A 207..313, B 327..433. */
+    {
+        static const int rows[2] = {150, 300};
+        int r, x, start;
+        for (r = 0; r < 2; r++) {
+            char line[256];
+            int n = snprintf(line, sizeof(line), "depth row %d:", rows[r]);
+            uint32_t run = read_depth(cfg, ds, ds_pitch, 0, rows[r]);
+            start = 0;
+            for (x = 1; x <= WIDTH; x++) {
+                uint32_t v = (x < WIDTH) ? read_depth(cfg, ds, ds_pitch, x, rows[r]) : ~run;
+                if (v != run) {
+                    if (n < (int)sizeof(line) - 24) {
+                        n += snprintf(line + n, sizeof(line) - n, " %d-%d:%lX", start, x - 1, (unsigned long)run);
+                    }
+                    run = v;
+                    start = x;
+                }
+            }
+            log_file(line);
+        }
+    }
+
     /* GPU probe: a quad at a depth between A and B, depth tested against what
      * the GPU holds. It must cover the clear area and the far triangle's own
      * area and nothing else, whatever the CPU read back (Z compression). */
