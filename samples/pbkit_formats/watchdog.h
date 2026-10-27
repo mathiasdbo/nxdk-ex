@@ -123,7 +123,7 @@ static void watchdog_sector0 (const char *when, char *line, size_t size)
         snprintf(line, size, "sector0 %s: no memory", when);
         return;
     }
-    RtlInitAnsiString(&name, "\Device\Harddisk0\Partition0");
+    RtlInitAnsiString(&name, "\\Device\\Harddisk0\\Partition0");
     InitializeObjectAttributes(&attr, &name, OBJ_CASE_INSENSITIVE, NULL, NULL);
     st = NtOpenFile(&h, SYNCHRONIZE | GENERIC_READ, &attr, &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
                     FILE_SYNCHRONOUS_IO_NONALERT | FILE_NO_INTERMEDIATE_BUFFERING);
