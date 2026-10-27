@@ -538,7 +538,6 @@ int main (void)
     /* One XBE per configuration: cfg0 (default.xbe) truncates the log, the
      * others append; after the hold the next XBE is launched through the
      * kernel instead of pb_kill/pb_init, the last one reboots. */
-    g_log_started = (CONFIG != 0);
     run_config(CONFIG);
     if (CONFIG + 1 < (int)NUM_CONFIGS) {
         char path[64];
