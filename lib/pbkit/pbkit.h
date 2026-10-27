@@ -186,6 +186,35 @@ void    pb_release_tile(int tile_index,int clear_offset); //clear_offset=1 also 
 
 void    pb_set_viewport(int dwx,int dwy,int width,int height,float zmin,float zmax);
 
+//Video overlay (NV_PVIDEO buffer 0): a YUY2 or UYVY surface scaled into a screen rectangle by
+//the scan-out, over the frame buffer (where it has the color key, if enabled). Not part of the
+//frame buffer: a CPU or GPU readback of the screen does not see it. pb_overlay_update checks
+//the description and queues it: pbkit's VBlank interrupt programs it at the next VBlank, the
+//last update queued before a VBlank wins. The surface must stay untouched while it is shown:
+//double buffer it, write the next one, update, and reuse the previous surface once
+//pb_overlay_update_pending() is 0. Needs pb_init (before it / after pb_kill the registers are
+//written at once). pb_kill and pb_overlay_disable (at the next VBlank) stop the overlay.
+//Surface: contiguous memory below 64 Mb, 64 bytes aligned, pitch a multiple of 64 (<= 8128),
+//2 bytes per pixel. Source rectangle: src_x + src_width <= 2046 (even), src_y + src_height <=
+//2047; destination: dst_x, dst_y, dst_width, dst_height < 4096, scaling (ds/dx = src/dst,
+//20 bits fraction) between 8x down (dst >= src / 8) and any upscale.
+#define PB_OVERLAY_UYVY 0   //bytes U Y0 V Y1 (NV_PVIDEO_FORMAT_COLOR_LE_YB8CR8YA8CB8; xemu: not supported, asserts)
+#define PB_OVERLAY_YUY2 1   //bytes Y0 U Y1 V (NV_PVIDEO_FORMAT_COLOR_LE_CR8YB8CB8YA8)
+typedef struct {
+    const void  *surface;
+    DWORD       pitch;
+    int         format;             //PB_OVERLAY_*
+    DWORD       src_x, src_y, src_width, src_height;
+    DWORD       dst_x, dst_y, dst_width, dst_height;
+    bool        color_key_enable;   //show the overlay only where the frame buffer pixel is color_key
+    DWORD       color_key;          //0xRRGGBB
+    bool        bt709;              //ITU-R BT.709 matrix instead of BT.601
+} pb_overlay;
+int     pb_overlay_update(const pb_overlay *ov);   //0, or -1 (nothing queued) for an invalid description
+void    pb_overlay_disable(void);
+int     pb_overlay_update_pending(void);    //1 while a queued update (or disable) waits for its VBlank
+DWORD   pb_overlay_last_vbl(void);          //VBlank count at which the last update / disable was programmed
+
 int pb_busy(void);
 
 #ifdef __cplusplus

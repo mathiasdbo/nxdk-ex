@@ -44,6 +44,18 @@ extern "C"
 #define VIDEO_ADAPTER_MASK  0x000000FF
 #define VIDEO_STANDARD_MASK 0x0000FF00
 
+// Flags for XVideoSetModeEx (same values as the XDK's D3DPRESENTFLAG_*)
+#define XVIDEO_FLAG_WIDESCREEN             0x00000010 // 16:9: SDTV modes get the encoder's WSS bit
+#define XVIDEO_FLAG_INTERLACED             0x00000020 // 480i (HDTV pack), 1080i
+#define XVIDEO_FLAG_PROGRESSIVE            0x00000040 // 480p / 720p (HDTV pack, enabled in the dashboard), VGA
+#define XVIDEO_FLAG_FIELD                  0x00000080 // field rendering: not supported, XVideoSetModeEx fails
+#define XVIDEO_FLAG_10X11PIXELASPECTRATIO  0x00000100 // 640x480 only: the kernel's FPAR modes
+
+// AV mode word bits (the kernel's AvSetDisplayMode mode, AV_OPTION_QUERY_MODE)
+#define XVIDEO_AV_MODE_OUT_MASK            0xC0000000 // 0, 1 SDTV; 2 HDTV; 3 VGA
+#define XVIDEO_AV_MODE_SCART               0x20000000 // RGB
+#define XVIDEO_AV_MODE_WSS                 0x10000000 // 16:9 wide screen signalling
+
 //Defines for refresh rates
 #define REFRESH_50HZ                50
 #define REFRESH_60HZ                60
@@ -74,6 +86,45 @@ void XVideoFlushFB(void);
 
 void XVideoSetFlickerFilter(int level);
 BOOL XVideoSetMode(int width, int height, int bpp, int refresh);
+
+/*
+Like XVideoSetMode, with XVIDEO_FLAG_* flags. 0 = XVideoSetMode.
+INTERLACED / PROGRESSIVE select the scan type where the AV pack offers both
+(HDTV pack, 480 lines); a scan type the pack or the dashboard settings do not
+offer fails (SDTV packs are interlaced only, VGA progressive only, 720p is
+progressive, 1080i interlaced, 480p / 720p / 1080i need the dashboard flag).
+WIDESCREEN sets the encoder's wide screen signalling bit in SDTV modes (the
+game renders anamorphic 16:9); HDTV and VGA modes are unchanged by it.
+10X11PIXELASPECTRATIO selects the kernel's 640x480 FPAR mode (other sizes fail).
+FIELD fails: field rendering is not supported.
+Returns FALSE when no mode matches (XVideoSetMode's rules for flags 0; with
+flags, the current mode is kept).
+*/
+BOOL XVideoSetModeEx(int width, int height, int bpp, int refresh, DWORD flags);
+
+// XVIDEO_FLAG_* of the current mode as set: the requested flags plus the scan
+// type of the mode (INTERLACED or PROGRESSIVE); 0 before the first mode set
+DWORD XVideoGetModeFlags(void);
+
+// The kernel AV mode word of the current mode (0 before the first mode set)
+DWORD XVideoGetAvMode(void);
+
+// The dashboard video settings (EEPROM XC_VIDEO): VIDEO_WIDESCREEN,
+// VIDEO_LETTERBOX, VIDEO_MODE_480P / 720P / 1080I, VIDEO_60Hz (PAL 60)
+DWORD XVideoGetVideoFlags(void);
+
+/*
+Keeps the picture on screen across XLaunchXBE: copies the frame buffer the
+CRTC is showing into persisted contiguous memory, points the CRTC at the copy
+and hands it to the kernel (AvSetSavedDataAddress). The next title's first
+XVideoSetMode / XVideoSetModeEx frees it; before that, AvGetSavedDataAddress()
+returns it (the kernel may move it at the reboot: use that address, and its
+second dword is overwritten by the kernel). With pbkit, call it once the last
+frame is on screen (no frame queued), then pb_kill() and XLaunchXBE.
+Returns FALSE when no mode is set or the allocation fails.
+*/
+BOOL XVideoPersistDisplay(void);
+
 void XVideoSetSoftenFilter(BOOL enable);
 void XVideoSetVideoEnable(BOOL enable);
 void XVideoSetGammaRamp(unsigned int offset, const GAMMA_RAMP_ENTRY *entries, unsigned int count);

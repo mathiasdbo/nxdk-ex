@@ -1,0 +1,22 @@
+struct vIn {
+	float4 color    : DIFFUSE;
+	float4 position : POSITION;
+};
+
+struct vOut {
+	float4 col : COLOR;
+	float4 pos : POSITION;
+};
+
+/* Pass-through: the application supplies screen space positions directly
+ * (x, y in pixels, z in depth units of the current depth format, w). The NV2A
+ * does not divide x, y, z by w; w is only used for perspective correct
+ * interpolation and, with W-buffering, as the depth value. */
+vOut main(vIn I)
+{
+	vOut result;
+
+	result.col = I.color;
+	result.pos = I.position;
+	return result;
+}
