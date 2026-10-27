@@ -64,6 +64,54 @@ Also from the tree:
 
 Toolchain note: nxdk's pdclib `lrint*()` is an `assert(0)` stub; round by hand.
 
+### 2.2 On-chip effects and several slots (phase9-08, `samples/openal_efx` 6i / 6j)
+
+The sample mutes the dry path (`AL_FILTER_LOWPASS`, `GAIN` 0), sends a voice into the slot and reads the final
+mix through `AL_XBOX_output_callback` (Goertzel over 960-sample blocks of the left ear). Expected values come from
+the library's kernels in the host simulator on the same sounds (`samples/openal_efx/expected_6i.py`; the kernels
+are within 3.3 LSB of 16 bits of OpenAL Soft's algorithms, `GP_KERNELS.md` 10). Levels are against the dry,
+centre-panned ear, which the sample measures first (expected 0.7071 x pcm 8000 = 5657). Tolerance: 0.5 dB on the
+linear checks; the level-dependent ones add the simulator's spread for an input 0.5 dB louder or quieter.
+First on hardware: `rnd` (ring modulator, distortion, equalizer, autowah), `mpyr` / `macr` (compressor, autowah).
+
+**xemu (2026-10-27, xemu 0.8.139):** every capture of the mix is silent (`AC97 padded` on each one, `output_slips`
+growing, the GP's frames late), here and in the older sections 1-6h, and `AL_XBOX_GP_LOAD` reads 0: no level, load
+or timing check below can be modelled there. What xemu does show: every kernel loads through the P window (0 GP
+restarts in 6i, 6j and the 5-minute rotation), all four slots attach (`AL_NO_ERROR`), the second reverb is refused
+with `AL_INVALID_OPERATION` and the slot keeps its autowah, the rotation changes effect every 15 s with no AL error,
+and the log on E: is written through line by line. Its GP runs at 90-300 frames/s instead of 1500 (`GP frames +N`
+in the log). xemu 0.8.139 aborted in five of seven runs with `dsp_cpu.c:419 lookup_opcode_slow: Invalid op code`
+(op `$0000E0`, `$0000EA`), each time right after a kernel switch (once in 6d, before any new kernel; in 6i at the
+equalizer; in 7 after the autowah and after the echo); the runs without an abort ended with the `XReboot()`. The
+cause: `apu_gp.c` `wait_frames()` gave up after 40000 register reads (about 20 ms) and went on as if the two frames
+had passed, so on a GP this slow the code was rewritten under a kernel still in its frame. It now waits up to 250 ms
+by `KeTickCount` and refuses the load instead: 3 of 3 xemu runs then reached the `XReboot()`, no abort.
+
+**Console (2026-10-27):** 45 of 45 checks passed on the second run (the first, 44 of 45, measured 6j's floor while
+the reverb's tail still rang; it now waits 3 s and reads -102.5 dB). The GP ran about 1500 frames a second with
+every kernel, and the rotation ran 5 minutes without an underrun, a padded buffer or a slip, both runs.
+
+| Section | Check | Expected (simulator), tolerance | xemu | Console |
+|---|---|---|---|---|
+| 6i ring modulator | 1 kHz x 300 Hz sine, `HIGHPASS_CUTOFF` 0: 700 / 1300 Hz against the dry ear | -3.0 / -3.0 dB, +-0.5 | silent | -3.0 / -3.0, PASS |
+| | the 1 kHz carrier against 700 Hz | below -40 dB (simulator -111) | silent | -105.7 dB, PASS |
+| 6i distortion | 1 kHz pcm 8000, `EDGE` 0.5, `GAIN` 0.5, lowpass 8 kHz, EQ 3 kHz / 6 kHz: H1 against the dry ear; H3, H5 against H1 | +7.7; -6.6, -12.2 dB, +-0.6; H3 30 dB over the dry voice's | silent | +7.6; -6.6, -12.2; H3 92.4 dB over, PASS |
+| 6i equalizer | 100 / 500 / 3000 / 12000 Hz, flat against the dry ear | +3.0 dB each, +-0.5 | silent | +3.0 each, PASS |
+| | low +12 dB (cutoff 200 Hz) | +10.3 / +1.1 / 0.0 / 0.0, +-0.5 | silent | +10.3 / +1.1 / 0.0 / 0.0, PASS |
+| | mid1 +12 dB (500 Hz) | +0.3 / +12.0 / +0.2 / 0.0, +-0.5 | silent | +0.3 / +12.0 / +0.2 / 0.0, PASS |
+| | mid2 +12 dB (3 kHz) | 0.0 / +0.2 / +12.0 / +0.4, +-0.5 | silent | 0.0 / +0.2 / +12.0 / +0.4, PASS |
+| | high +12 dB (cutoff 6 kHz) | 0.0 / 0.0 / +1.6 / +10.9, +-0.5 | silent | 0.0 / 0.0 / +1.6 / +10.9, PASS |
+| 6i compressor | 1 kHz pcm 29000 / 3000, slot gain 0.5: loud on - off, quiet on - off | +2.3 +-1.0, +6.0 +-0.5 | silent | +2.3, +6.0, PASS |
+| | loud - quiet, on / off | 16.0 +-1.0 / 19.7 +-0.5 dB | silent | 16.0 / 19.7, PASS |
+| 6i autowah | harmonics every 100 Hz, 0.6 s loud then 0.6 s 14 dB quieter, `RESONANCE` 100, `PEAK_GAIN` 0.00003: the peak, loud / quiet | 2312 / 499 Hz, +-12 %; (f - 20) ratio 4.78 +-0.45 | silent | 2312 / 499 Hz; 4.78, PASS |
+| 6i GP load | ring modulator, distortion, equalizer (one band), compressor, autowah | simulator 3,500 / 4,500 / 2,400 / 1,800 / 7,200 instructions a frame | 0 % (not modelled) | 0 / 8 / 3 / 3 / 12 % (reverb 34 %, echo 2-3 %, chorus 0 %: the meter reads 0 for the ring modulator and the chorus, to look into) |
+| 6j four slots | reverb + equalizer (4 bands) + distortion + autowah attach | `AL_NO_ERROR` each | PASS | PASS |
+| | all four busy 2 s: GP load peak, AC97 padded | below 100 % (about 87 % by the reverb's console scale, 27,500 instructions), 0 padded | 0 %, padded +188 (not modelled) | 56 %, peak 57 %; padded +0, underruns +0, PASS |
+| | each slot alone: 1 kHz against the dry ear; 3 kHz against 1 kHz | at least -30 dB and 20 over the floor; H3 at least -30 dB on the distortion only | silent | reverb -4.5, equalizer +4.6, distortion +7.6, autowah +3.1 dB; H3 -70.6 / -80.5 / -6.6 / -96.9: PASS (run 1 failed the reverb: its floor, measured 300 ms after the sends, was the reverb's own tail at -22.1 dB; run 2 waits 3 s, floor -102.5 dB, reverb -4.4 dB) |
+| | a second reverb on slot 4 | `AL_INVALID_OPERATION`, slot unchanged | PASS | PASS |
+| | GP restarts | 0 | 0, PASS | 0, PASS |
+| 7 rotation | 11 settings (reverb, echo, chorus, ring modulator, distortion, flanger, equalizer, compressor, autowah), 15 s each, 5 min, then `XReboot()` | 0 underruns / padded / slips, no AL error | no AL error, 0 restarts; slips not modelled | 0 underruns / padded / slips each minute, no AL error, 0 restarts, about 1500 GP frames/s, GP load peak 35 %, `XReboot()`, PASS |
+
 ## 3. Design
 
 ### 3.1 API objects (`al_efx.c`, new)
