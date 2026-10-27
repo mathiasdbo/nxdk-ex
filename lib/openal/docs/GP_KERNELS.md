@@ -3,13 +3,14 @@
 A GP kernel is your own DSP56300 code that the APU's GP DSP runs on the effect sends to one effect slot, every
 0.67 ms, as an `ALC_EXT_EFX` effect. It costs no CPU time. The library owns the frame, the output and the
 parameter delivery; the kernel only processes one 32-sample block per call. Each of the 4 slots runs its own
-kernel, so yours runs beside the library's reverb, echo or chorus.
+kernel, so yours runs beside the library's reverb, echo, chorus or on-chip effects (section 10).
 
 **Status:** ABI 1 (one kernel at fixed addresses) ran on a console in `samples/openal_efx` (2026-10-18): the
 echo landed exactly on its delay on both ears, a parameter change reached the kernel in one frame, every load
 went through the P window without a GP restart, and 5 minutes of switching effects gave 0 underruns. **ABI 2**
-(relocatable, one kernel per slot, phase9-04) is host-tested (assembler, simulator, loader); its console run is
-phase9-08. The current ABI is 2 (`AL_XBOX_GP_IMAGE_ABI`); ABI 1 images still load, and run only alone.
+(relocatable, one kernel per slot, phase9-04) is host-tested (assembler, simulator, loader), and so are the
+library's ABI 2 kernels (echo, chorus, and the on-chip effects of phase9-07); their console run is phase9-08.
+The current ABI is 2 (`AL_XBOX_GP_IMAGE_ABI`); ABI 1 images still load, and run only alone.
 
 The example used throughout is `dsp/gp_kecho.asm`, a stereo echo (154 words).
 
@@ -52,10 +53,12 @@ alSource3i(src, AL_AUXILIARY_SEND_FILTER, (ALint)slot, 0, AL_FILTER_NULL);
   words), scratch (about 500 KiB) and 60 descriptors a frame, summed over the slots. Attaching an effect that
   does not fit beside the other slots' gives `AL_INVALID_OPERATION` (and nothing changes); so does attaching
   any while `AL_XBOX_REVERB` is on, or an ABI 1 kernel beside anything. For scale: the reverb takes 101 P,
-  $8C0 X, 180 KiB, 50 descriptors; the echo 169 P, $C0 X, 128 KiB, 3; the chorus 177 P, $30 X, all of Y.
+  $8C0 X, 180 KiB, 50 descriptors; the echo 169 P, $C0 X, 128 KiB, 3; the chorus 177 P, $30 X, all of Y; the
+  on-chip effects 92 to 247 P and $2B to $53 X each, nothing else (section 10).
 - **`AL_EFFECTSLOT_GAIN`** scales the sends into the kernel (the kernel has no word for it), live. For a
   linear kernel such as the echo that is the same as scaling its output; a kernel that is not linear (a
   compressor, a distortion) sees a quieter input, so give it its own output-gain parameter if it needs one.
+  The library's distortion, compressor and autowah do that: the slot's gain is one of their words.
 - **Load:** `alXboxGetHardwareStatus(AL_XBOX_GP_LOAD, &v)` is the share of the last frame the effects took, in
   percent; `AL_XBOX_GP_LOAD_PEAK` the highest since the previous peak query. 100 means frames are late and the
   dry mix stutters. Console only: 0 elsewhere (section 7).
@@ -222,8 +225,11 @@ reference (an empty frame's wait) is measured again.
 frame start. The library compares that count with an empty frame's: the percentage is the share of the frame
 the effects (kernels and their DMA) take. For scale, in the host simulator the reverb runs about 10,800
 instructions a frame (34 % of the frame on a console), the echo about 1,060, the chorus about 4,950, and the
-three together about 15,600. A kernel that overruns does not crash, but the output gets late frames: watch
-`AL_XBOX_GP_LOAD_PEAK`, and `ac97_padded` / `output_slips` in `AL_XBOX_stats`.
+three together about 15,600. The on-chip effects run 1,900 (compressor) to 7,200 (autowah) each, and the
+reverb with a four-band equalizer, the distortion and the autowah about 27,500: by the reverb's console scale
+about 87 % of the frame, about the heaviest set the library's own kernels make (section 10). A kernel that overruns
+does not crash, but the output gets late frames: watch `AL_XBOX_GP_LOAD_PEAK`, and `ac97_padded` /
+`output_slips` in `AL_XBOX_stats`.
 
 ## 8. Testing on the host
 
@@ -242,7 +248,13 @@ copied for a new kernel. Parameter changes are tested by writing the mailbox (`M
 library does. [9] checks that every library image relocated by the loader's rules equals its source assembled
 at those bases, [10] that three kernels in one loop add exactly what each adds alone. The simulator knows the
 instructions the assembler knows; it does not model the GP's timing, only the instruction count
-(`gp.frame_steps` for the last frame).
+(`gp.frame_steps` for the last frame). Its rounding (`rnd`, `mpyr`, `macr`) is convergent, the rounding mode
+the GP starts in (the loop never changes SR).
+
+For a kernel that implements an algorithm, `tests/test_gp_onchip.py` shows the next step: the kernel against a
+floating-point model of the algorithm fed the kernel's own words (so the comparison measures the fixed-point
+arithmetic), the error in LSB of OUT L / OUT R, and the words taken from the library itself through a small C
+helper (`tests/gpsim_onchip_words.c`).
 
 The library's loader is tested with the null backend in `tests/test_apu_gp.c` [7]-[9], and the AL entry points
 in `tests/test_efx_program.c` and `tests/test_efx_multi.c`.
@@ -255,3 +267,70 @@ in `tests/test_efx_program.c` and `tests/test_efx_multi.c`.
 - Your X from `KX+$28`; Y from `KY`, initialised by you.
 - Parameters read every frame; delays that change rewrite their read offsets.
 - Headroom in the output; `AL_XBOX_GP_LOAD_PEAK` checked on a console with the worst case running.
+
+## 10. The library's on-chip effects
+
+`AL_EFFECT_RING_MODULATOR`, `AL_EFFECT_DISTORTION`, `AL_EFFECT_EQUALIZER`, `AL_EFFECT_COMPRESSOR` and
+`AL_EFFECT_AUTOWAH` (phase9-07) are library kernels, loaded like the echo and the chorus: one image each in
+`src/gp_kefx_<name>.h`, assembled from `dsp/gp_kefx_<name>.asm`, with the words `al_efx.c` derives from the
+EFX values. They follow OpenAL Soft's algorithms. None uses Y RAM, scratch or DMA, so any three fit beside the
+reverb's $8C0 X words, any four together, and each runs beside a chorus (which takes all of Y).
+
+| Kernel | P words | X block | Instructions a frame (simulator) | Against OpenAL Soft's algorithm |
+|---|---|---|---|---|
+| `gp_kefx_ringmod` | 166 | $53 | 2,600 (no modulation) to 3,500 (sine) | within 0.3 LSB of 16 bits |
+| `gp_kefx_distortion` | 169 | $33 | 4,200 to 4,900 (more with a hard edge) | within 0.65 LSB |
+| `gp_kefx_equalizer` | 92 | $44 | 600 (every band at gain 1), 2,400 (one band), 6,400 (four) | within 0.04 LSB |
+| `gp_kefx_compressor` | 103 | $2B | 1,800 to 1,900 | within 0.05 LSB |
+| `gp_kefx_autowah` | 247 | $3C | 7,200 | within 3.3 LSB (OpenAL Soft's own single precision: 3.2) |
+
+The comparison is with OpenAL Soft's algorithm in double precision on the kernel's own words, over tones,
+noise and plucks, with the parameters at their defaults and at the ends of their ranges. In one loop the
+reverb, a four-band equalizer, the distortion and the autowah take about 27,500 instructions a frame; the ring
+modulator, the distortion, the equalizer and the compressor about 15,900.
+
+**What they share:**
+- **Input.** The ring modulator and the equalizer filter each bin on its own, as u = 2 bin (a library kernel's
+  slot gets half the send on each bin, so a mono source gives u = the send on both sides, the level the echo's
+  L + R has). The compressor and the autowah scale or filter each channel the same way, but follow the
+  envelope of m = L + R, as OpenAL Soft follows its first channel; the distortion works on m alone and puts
+  the result on both sides, as OpenAL Soft pans its distortion to the front.
+- **Biquads.** Direct form 1 with the words b0 b1 b2 -a1 -a2 halved (quartered in the equalizer: a +18 dB
+  shelf or peak has a b0 above 2), the sum shifted back, rounded (`rnd`), and the rounding's residual added
+  into the next sample (first-order error feedback): a 20 Hz highpass stays within 0.05 LSB of 16 bits instead
+  of 10. Every stage's output is limited to full scale, also where it feeds back (OpenAL Soft's is not).
+- **The slot's gain.** The distortion, the compressor and the autowah apply `AL_EFFECTSLOT_GAIN` at their
+  output (a word), as OpenAL Soft does; the ring modulator and the equalizer have their input scaled.
+
+**Where they differ from OpenAL Soft:**
+- **Ring modulator.** The phase is a 24-bit accumulator, OpenAL Soft's own resolution. The sine is an odd
+  polynomial of degree 7 on the folded phase (within 7e-7); the square's and "no modulation"'s 1 is
+  1 - 2^-23. The highpass is OpenAL Soft's (slope 0.75); below 1 Hz it is the identity (as OpenAL Soft's 0 Hz
+  is), above 0.49 fs it stays at 0.49 fs.
+- **Distortion.** OpenAL Soft's waveshaper is three stages of x (1 + k) / (1 + k |x|), the middle one negated.
+  Each stage is a Moebius map, so the three compose into one: -x / (d + (1 - d) |x|) with
+  d = ((1 - e) / (1 + e))^3, which the library computes (`tests/test_efx_distortion.c` checks the identity).
+  The kernel divides by normalising d + (1 - d) |x| (shifts of 16, 8, 4, 2, 1) and one Newton-Raphson
+  reciprocal (a linear guess within 1/17, three steps). It runs at 48 kHz, not 4x oversampled: harmonics above
+  24 kHz alias, and the two filters are designed at 48 kHz with the Q OpenAL Soft's oversampled design gives
+  them (cutoff and centre at most 0.45 fs, 1/Q at most 20). The gain is in the bandpass's b words, so the
+  bandpass's own peaks are scaled down before anything is limited. With an edge near 1 the shaper's slope at
+  0 reaches 2^23: one LSB of input at a zero crossing is a full-scale step, in any 24-bit implementation.
+- **Equalizer.** Only the bands not at gain 1 run (N stages, packed in order, sharing their histories);
+  changing which bands are at gain 1 moves the stages, and their states restart where they land (a click at
+  most).
+- **Compressor.** 1/env comes from one Newton-Raphson step a sample, from the last sample's (the envelope moves
+  less than 0.03 % a sample). The amplitude's clamp at 2 cannot be reached here (the sum is limited to 1).
+- **Autowah.** As in OpenAL Soft the peak runs in transposed direct form 2 (with words that move every sample
+  the form changes the output: direct form 1 lands up to 1000 LSB of 16 bits away), its states kept at 48 bits
+  and its output rounded with error feedback. The envelope is kept at 48 bits too. sin w0 and cos w0 come from
+  the half angle (cos w0 = 1 - 2 sin^2(pi f), quartic polynomials within 7e-8), which keeps a1 accurate where
+  w0 is small and a1 is near -2; 1/a0 from two Newton-Raphson steps. A peak at 20 Hz with Q 5 integrates
+  small differences of its words over thousands of samples, so the output's distance from the double-precision
+  model is set by the words' precision: about what OpenAL Soft's own single precision gives.
+
+**Tests.** `tests/test_gp_onchip.py` (ring modulator, distortion, equalizer), `test_gp_onchip_env.py`
+(compressor, autowah) and `test_gp_onchip_slots.py` (relocations, four kernels in one loop adding what each
+adds alone) in the simulator, on the library's words; `tests/test_efx_<effect>.c` for the effect objects and
+their words; `tests/test_efx_multi.c` [4] for the budgets (every set of three beside the reverb and of four;
+X and P full give `AL_INVALID_OPERATION`).
