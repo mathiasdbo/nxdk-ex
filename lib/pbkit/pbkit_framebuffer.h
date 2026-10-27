@@ -47,6 +47,21 @@ bool pb_get_depth_float (void);
 void pb_set_w_buffer (bool enable);
 bool pb_get_w_buffer (void);
 
+// Tile region of the depth stencil buffer, set before pb_init (console checked
+// with samples/pbkit_formats, 2026-10-27):
+// - PB_DEPTH_TILE_Z (default): a compressed Z tile. Fastest for the GPU, but
+//   the CPU sees the GPU's internal Z layout through pb_depth_stencil_buffer(),
+//   not a linear image (xemu hides this: it reads back linearly in any mode).
+// - PB_DEPTH_TILE_LINEAR: a tile region without the Z flags. The GPU still
+//   tiles its accesses and the CPU reads and writes the buffer linearly.
+// - PB_DEPTH_TILE_NONE: no tile region. Linear for the CPU too.
+// The depth test itself is right in every mode.
+#define PB_DEPTH_TILE_Z      0
+#define PB_DEPTH_TILE_LINEAR 1
+#define PB_DEPTH_TILE_NONE   2
+void pb_set_depth_tile_mode (int mode);
+int pb_get_depth_tile_mode (void);
+
 // The depth value 1.0f maps to in pb_set_viewport: 0xFFFFFF (Z24S8), 0xFFFF
 // (Z16), 1.0E30 (Z24S8 float), 511.9375 (Z16 float). Valid after pb_init.
 float pb_depth_scale (void);
