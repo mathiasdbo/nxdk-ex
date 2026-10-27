@@ -193,8 +193,13 @@ Recipes: ENGINE_INTEGRATION 3.12 (EFX) and 3.13 (your own GP kernel). Every EFX 
 | `AL_EFFECT_REVERB`, `AL_EFFECT_EAXREVERB` | the GP reverb. Every parameter is stored with the extension's ranges and defaults; which ones change the sound is in the table in 3.12 |
 | `AL_EFFECT_CHORUS`, `AL_EFFECT_FLANGER` | one library kernel on the GP; all six parameters (`WAVEFORM` 0..1 and `PHASE` −180..180 as integers; `RATE` 0..10 Hz, `DEPTH` 0..1, `FEEDBACK` −1..1, `DELAY` 0..0.016 s for the chorus, 0..0.004 s for the flanger) change the sound (ENGINE_INTEGRATION 3.12) |
 | `AL_EFFECT_ECHO` | a library kernel on the GP; all five parameters (`AL_ECHO_DELAY` 0..0.207 s, `LRDELAY` 0..0.404 s, `DAMPING` 0..0.99, `FEEDBACK` 0..1, `SPREAD` −1..1) change the sound. Taps under 32 samples become 32 (ENGINE_INTEGRATION 3.12) |
+| `AL_EFFECT_RING_MODULATOR` | a library kernel on the GP, OpenAL Soft's algorithm: `FREQUENCY` 0..8000 Hz, `HIGHPASS_CUTOFF` 0..24000 Hz (above 23520 Hz it acts as 23520), `WAVEFORM` 0..2 (sinusoid, sawtooth, square; an integer). Each channel of a stereo source on its own |
+| `AL_EFFECT_DISTORTION` | a library kernel on the GP, OpenAL Soft's algorithm at 48 kHz (without its 4x oversampling): `EDGE` 0..1, `GAIN` 0.01..1, `LOWPASS_CUTOFF`, `EQCENTER` and `EQBANDWIDTH` 80..24000 Hz (cutoff and centre above 21600 Hz act as 21600) |
+| `AL_EFFECT_EQUALIZER` | a library kernel on the GP, OpenAL Soft's four filters: `LOW_GAIN`, `MID1_GAIN`, `MID2_GAIN`, `HIGH_GAIN` 0.126..7.943, `LOW_CUTOFF` 50..800 Hz, `MID1_CENTER` 200..3000 Hz, `MID2_CENTER` 1000..8000 Hz, `MID1_WIDTH` / `MID2_WIDTH` 0.01..1 octave, `HIGH_CUTOFF` 4000..16000 Hz. A band left at gain 1 costs nothing. Each channel on its own |
+| `AL_EFFECT_COMPRESSOR` | a library kernel on the GP, OpenAL Soft's automatic gain (0.1 s attack, 0.2 s release, a gain of 1..2 from the level): `ONOFF` 0 / 1 (an integer, default 1) |
+| `AL_EFFECT_AUTOWAH` | a library kernel on the GP, OpenAL Soft's algorithm: `ATTACK_TIME` and `RELEASE_TIME` 0.0001..1 s (a release under 1 ms acts as 1 ms), `RESONANCE` 2..1000, `PEAK_GAIN` 0.00003..31621 |
 | `AL_EFFECT_XBOX_GP_PROGRAM` | your DSP56300 kernel (6.4) |
-| any other | `AL_INVALID_VALUE` |
+| any other | `AL_INVALID_VALUE` (the frequency shifter, the vocal morpher, the pitch shifter) |
 
 Up to 256 effects. Changing the type resets the parameters to that type's defaults.
 
@@ -220,13 +225,14 @@ Up to 256 filters. Sources hold copies, so attach the filter again after changin
 | Parameter | Values | Meaning |
 |---|---|---|
 | `AL_EFFECTSLOT_EFFECT` | an effect, or 0 | takes a copy of the effect and starts it on the GP. Attach again after changing the effect |
-| `AL_EFFECTSLOT_GAIN` | 0..1, default 1 | the effect's level (reverb: its output; GP program: the sends into it) |
+| `AL_EFFECTSLOT_GAIN` | 0..1, default 1 | the effect's level (reverb, distortion, compressor, autowah: their output, as in OpenAL Soft; the other kernels and a GP program: the sends into it, the same thing for a linear effect) |
 | `AL_EFFECTSLOT_AUXILIARY_SEND_AUTO` | `AL_TRUE` (default) / `AL_FALSE` | the reverb's own room rolloff added to the sends |
 
 **Limits:**
 - There are 4 slots, each running its own GP kernel (slot s reads bins 2+2(s-1) / 3+2(s-1)). Attaching an effect
   gives `AL_INVALID_OPERATION` when it does not fit beside the other slots' (P, X, Y, scratch, 60 descriptors:
-  a reverb, an echo and a chorus fit; two reverbs or two choruses do not), or while `AL_XBOX_REVERB` is on.
+  a reverb, an echo and a chorus fit; the reverb and any three of the on-chip effects fit; two reverbs or two
+  choruses do not), or while `AL_XBOX_REVERB` is on.
 - Empty slots are legal and silent.
 - Deleting a slot a source sends to gives `AL_INVALID_OPERATION`.
 
@@ -420,6 +426,6 @@ alXboxOutputCallback(cb, user);                             /* NULL removes it *
 - Output other than stereo 16-bit 48 kHz: no 5.1 or Dolby Digital.
 - Multichannel buffers.
 - Capture.
-- EFX effect types other than reverb, EAX reverb, echo, chorus, flanger and the GP program.
+- The EFX frequency shifter, vocal morpher and pitch shifter (every other effect type runs, 6.1).
 - Highpass and bandpass filters.
-- More than one running effect, or more than 2 sends per source.
+- More effects at once than the GP's budgets hold (6.3), or more than 2 sends per source.
