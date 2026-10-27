@@ -1358,10 +1358,11 @@ static void phase_multislot(void) {
           peak < 100 && s1.padded == s0.padded && s1.underruns == s0.underruns ? "PASS" : "FAIL");
     drop_source(b);
 
-    /* each slot alone on A's send 0, then no send at all: the floor */
+    /* each slot alone on A's send 0, then no send at all: the floor, once the
+     * reverb's tail has died away (300 ms left it at -22 dB on the console) */
     send_to(a, 1, AL_EFFECTSLOT_NULL);
     send_to(a, 0, AL_EFFECTSLOT_NULL);
-    n = settle_capture(300, 400);
+    n = settle_capture(3000, 400);
     floor_db = dbd(amp_at(0, n, 1000.0) / (s_dry_unit * DRY_PCM));
     logf_("   no send: 1 kHz %s dB against the dry ear (the floor)\n", dbs(tenths(floor_db)));
     for (k = 0; k < 4; k++) {
