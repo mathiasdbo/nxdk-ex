@@ -17,7 +17,10 @@ endif
 ifdef CHAIN
 CFLAGS += -DCHAIN
 endif
-# make EXP=NO_DEPTH_READ / EXP=NO_FILE_LOG: console lock-up experiments
+# make EXP=NO_DEPTH_READ / EXP=NO_FILE_LOG: console lock-up experiments;
+# EXP=HANG spins after pb_init (watchdog test), EXP=NO_WATCHDOG leaves it out.
+# The watchdog (watchdog.h) resets the console through the SMC after 10 s
+# without a step or frame, and notes it in E:\pbkit_watchdog.txt.
 ifdef EXP
 CFLAGS += -D$(EXP)
 endif
