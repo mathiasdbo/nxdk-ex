@@ -324,6 +324,15 @@ static void run_config (int index)
         return;
     }
     log_file("step: pb_init ok");
+#ifdef GPU_ERROR
+    /* experiment: a depth clear four times the buffer's height, past its DMA
+     * limit; on a console this raises a zeta limit error for the watchdog */
+    log_file("EXP GPU_ERROR: oversized depth clear");
+    pb_erase_depth_stencil_buffer(0, 0, WIDTH, HEIGHT * 4);
+    while (pb_busy()) {
+    }
+    log_file("EXP GPU_ERROR: clear done without an error");
+#endif
 #ifdef HANG
     /* experiment: a hang at passive level, for the watchdog */
     log_file("EXP HANG: spinning");

@@ -484,6 +484,9 @@ static void pb_subprog(DWORD subprogID, DWORD paramA, DWORD paramB)
 
 
 
+static bool pb_GpuErrorHalt=true; //pb_set_gpu_error_halt
+static volatile pb_gpu_error pb_GpuError; //last PGRAPH error (pb_get_gpu_error)
+
 static DWORD pb_gr_handler(void)
 {
     DWORD           status;
@@ -572,6 +575,24 @@ static DWORD pb_gr_handler(void)
                         }
                         else
                         {
+                            pb_GpuError.nsource=nsource;
+                            pb_GpuError.address=trapped_address;
+                            pb_GpuError.data_low=DataLow;
+                            pb_GpuError.data_high=VIDEOREG(NV_PGRAPH_TRAPPED_DATA_HIGH);
+                            pb_GpuError.param_a=VIDEOREG(NV_PGRAPH_PARAMETER_A);
+                            pb_GpuError.param_b=VIDEOREG(NV_PGRAPH_PARAMETER_B);
+                            pb_GpuError.limit_details=VIDEOREG(0x00400800);
+                            pb_GpuError.count++;
+
+                            if (!pb_GpuErrorHalt)
+                            {
+                                //recorded only: the application reads pb_get_gpu_error() at passive level
+                                //(this runs in the DPC, where a halt loop freezes every thread)
+                                VIDEOREG(NV_PGRAPH_INTR)=NV_PGRAPH_INTR_ERROR_RESET;
+                                VIDEOREG(NV_PGRAPH_FIFO)=NV_PGRAPH_FIFO_ACCESS_ENABLE;
+                                return VIDEOREG(NV_PGRAPH_INTR);
+                            }
+
                             pb_show_debug_screen();
 
                             debugPrint("\n");
@@ -2312,6 +2333,16 @@ void pb_set_presentation_interval(int interval)
         return;
     }
     pb_PresentInterval=interval;
+}
+
+void pb_set_gpu_error_halt(bool halt)
+{
+    pb_GpuErrorHalt=halt;
+}
+
+const volatile pb_gpu_error *pb_get_gpu_error(void)
+{
+    return &pb_GpuError;
 }
 
 int pb_get_presentation_interval(void)
