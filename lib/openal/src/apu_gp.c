@@ -292,19 +292,24 @@ void apu_gp_deinit(uintptr_t bar0) {
 
 /* ---------------------------------------------------------------- mailbox */
 
-/* Let the frame in progress finish its DMA chains (on the host nothing runs) */
-static void wait_frames(uintptr_t bar0, uint32_t n) {
+/* Let the frame in progress finish its DMA chains (on the host nothing runs).
+ * False when the GP did not count n frames within 250 ms: then it is stalled or
+ * very slow (xemu runs it at 90-300 frames a second), and code or state must
+ * not be rewritten under a kernel that may still be in its frame. */
+static bool wait_frames(uintptr_t bar0, uint32_t n) {
 #if defined(OPENAL_TARGET_XBOX)
-    uint32_t f0 = apu_gp_frames(bar0), spin;
-    for (spin = 0; spin < 40000u; spin++) {   /* about 20 ms of register reads */
-        if (((apu_gp_frames(bar0) - f0) & 0xFFFFFFu) >= n) {
-            return;
+    uint32_t f0 = apu_gp_frames(bar0);
+    DWORD t0 = KeTickCount;
+    while (((apu_gp_frames(bar0) - f0) & 0xFFFFFFu) < n) {
+        if (KeTickCount - t0 > 250u) {
+            return false;
         }
     }
 #else
     (void)bar0;
     (void)n;
 #endif
+    return true;
 }
 
 static void write_words(uintptr_t bar0, const apu_reverb_word_t *w, uint32_t n) {
@@ -813,7 +818,9 @@ static int slot_load(uintptr_t bar0, uint32_t slot, const apu_gp_kernel_t *k, co
     gp_slot_t *s = &s_slot[slot];
     uint32_t i, kparam;
     apu_gp_slot_stop(bar0, slot);
-    wait_frames(bar0, 2u);   /* nothing stopped (this slot or one before) is still in its frame */
+    if (!wait_frames(bar0, 2u)) {   /* nothing stopped (this slot or one before) is still in its frame */
+        return -1;
+    }
     if ((s_flags & ~FLAG_LOWPASS) == 0u) {
         idle_calibrate(bar0);
     }
@@ -983,7 +990,9 @@ int apu_gp_reverb_set(uintptr_t bar0, uint32_t slot, const apu_reverb_params_t *
         /* A new pre-delay: off for two frames so no chain is in flight, then a new layout, empty lines */
         s_flags &= ~slot_flag(slot);
         flags_write(bar0);
-        wait_frames(bar0, 2u);
+        if (!wait_frames(bar0, 2u)) {
+            return -1;
+        }
         memset((uint8_t *)s_scratch + s->scr, 0, k->scratch_bytes);
     } else if (slot_load(bar0, slot, k, NULL, SLOT_REVERB) != 0) {
         return -1;
