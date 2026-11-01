@@ -1,3 +1,12 @@
+> **Resonance3D fork.** This is [XboxDev/nxdk](https://github.com/XboxDev/nxdk)
+> with extensions that [Resonance3D](https://github.com/mathiasdbo/Resonance3D) (the Original Xbox port of
+> Xash3D-FWGS) builds on: pbkit additions that fill in what Direct3D 8 had
+> (render targets, multisampling, fences, display and overlay control,
+> CPU-readable depth tiles, a public tile API) and an OpenAL implementation
+> on the console's audio chip (APU), including on-chip EFX effects that run
+> on the DSP. `samples/` has the test programs that exercise them. The text
+> below is nxdk's own README.
+
 nxdk - *the new open source xdk*
 ================================
 nxdk is a software development kit for the original Xbox. nxdk is a revitalization of [OpenXDK](https://web.archive.org/web/20170624051336/http://openxdk.sourceforge.net:80/).
